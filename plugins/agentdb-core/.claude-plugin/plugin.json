@@ -1,0 +1,17 @@
+{
+  "name": "agentdb-core",
+  "version": "0.1.0",
+  "description": "Foundation plugin for AgentDB — pattern store, search, stats. Required by other agentdb-* plugins.",
+  "author": {
+    "name": "ruvnet",
+    "url": "https://github.com/ruvnet"
+  },
+  "homepage": "https://github.com/ruvnet/agentdb/tree/main/plugins/agentdb-core",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ruvnet/agentdb.git",
+    "directory": "plugins/agentdb-core"
+  },
+  "license": "MIT OR Apache-2.0",
+  "keywords": ["agentdb", "memory", "vectors", "claude-code", "mcp"]
+}

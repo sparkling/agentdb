@@ -1,0 +1,17 @@
+{
+  "name": "agentdb-search",
+  "version": "0.1.0",
+  "description": "Advanced retrieval for AgentDB — MMR diversity rerank, explainable recall, metadata filters, hybrid (BM25 + dense) search.",
+  "author": {
+    "name": "ruvnet",
+    "url": "https://github.com/ruvnet"
+  },
+  "homepage": "https://github.com/ruvnet/agentdb/tree/main/plugins/agentdb-search",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ruvnet/agentdb.git",
+    "directory": "plugins/agentdb-search"
+  },
+  "license": "MIT OR Apache-2.0",
+  "keywords": ["agentdb", "search", "rerank", "mmr", "hybrid", "claude-code"]
+}

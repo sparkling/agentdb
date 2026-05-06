@@ -1,0 +1,17 @@
+{
+  "name": "agentdb-learning",
+  "version": "0.1.0",
+  "description": "RL routing + Thompson Sampling bandit for AgentDB. 9 algorithms (Q-Learning, SARSA, DQN, PPO, Actor-Critic, Policy Gradient, Decision Transformer, MCTS, Model-Based RL); /learn-task, /route-task.",
+  "author": {
+    "name": "ruvnet",
+    "url": "https://github.com/ruvnet"
+  },
+  "homepage": "https://github.com/ruvnet/agentdb/tree/main/plugins/agentdb-learning",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ruvnet/agentdb.git",
+    "directory": "plugins/agentdb-learning"
+  },
+  "license": "MIT OR Apache-2.0",
+  "keywords": ["agentdb", "reinforcement-learning", "bandit", "routing", "claude-code"]
+}

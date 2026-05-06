@@ -1,0 +1,17 @@
+{
+  "name": "agentdb-graph",
+  "version": "0.1.0",
+  "description": "Graph operations on AgentDB — Cypher execution, k-hop traversal, hyperedge search.",
+  "author": {
+    "name": "ruvnet",
+    "url": "https://github.com/ruvnet"
+  },
+  "homepage": "https://github.com/ruvnet/agentdb/tree/main/plugins/agentdb-graph",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ruvnet/agentdb.git",
+    "directory": "plugins/agentdb-graph"
+  },
+  "license": "MIT OR Apache-2.0",
+  "keywords": ["agentdb", "graph", "cypher", "hyperedge", "claude-code"]
+}

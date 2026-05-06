@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>404 - AgentDB</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+      background: linear-gradient(135deg, #1a1a1a 0%, #2d2d2d 100%);
+      color: #fff;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 2rem;
+    }
+
+    .container {
+      max-width: 600px;
+      text-align: center;
+    }
+
+    .icon {
+      width: 100px;
+      height: 100px;
+      margin: 0 auto 2rem;
+      position: relative;
+    }
+
+    .icon svg {
+      width: 100%;
+      height: 100%;
+      color: #22c55e;
+      animation: pulse 2s ease-in-out infinite;
+    }
+
+    @keyframes pulse {
+      0%, 100% {
+        opacity: 1;
+        transform: scale(1);
+      }
+      50% {
+        opacity: 0.5;
+        transform: scale(1.05);
+      }
+    }
+
+    h1 {
+      font-size: 4rem;
+      font-weight: 700;
+      margin-bottom: 1rem;
+      background: linear-gradient(135deg, #22c55e 0%, #16a34a 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+    }
+
+    h2 {
+      font-size: 1.5rem;
+      color: #22c55e;
+      margin-bottom: 1rem;
+    }
+
+    p {
+      color: #a0a0a0;
+      font-size: 1.1rem;
+      margin-bottom: 2rem;
+      line-height: 1.6;
+    }
+
+    .links {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+      gap: 1rem;
+      margin-bottom: 2rem;
+    }
+
+    .link-card {
+      background: rgba(255, 255, 255, 0.05);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      border-radius: 8px;
+      padding: 1.5rem;
+      text-decoration: none;
+      color: inherit;
+      transition: all 0.3s ease;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 0.5rem;
+    }
+
+    .link-card:hover {
+      background: rgba(34, 197, 94, 0.1);
+      border-color: #22c55e;
+      transform: translateY(-2px);
+    }
+
+    .link-card svg {
+      width: 24px;
+      height: 24px;
+      color: #22c55e;
+    }
+
+    .link-title {
+      font-weight: 600;
+      font-size: 1rem;
+    }
+
+    .link-desc {
+      font-size: 0.875rem;
+      color: #808080;
+    }
+
+    .path {
+      background: rgba(255, 255, 255, 0.05);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      border-radius: 4px;
+      padding: 1rem;
+      margin-top: 2rem;
+    }
+
+    .path code {
+      color: #22c55e;
+      font-family: 'Courier New', monospace;
+      font-size: 0.9rem;
+    }
+
+    .footer {
+      margin-top: 2rem;
+      font-size: 0.875rem;
+      color: #606060;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="icon">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <ellipse cx="12" cy="5" rx="9" ry="3"></ellipse>
+        <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"></path>
+        <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"></path>
+      </svg>
+    </div>
+
+    <h1>404</h1>
+    <h2>Page Not Found</h2>
+    <p>The page you're looking for doesn't exist or has been moved.</p>
+
+    <div class="links">
+      <a href="/" class="link-card">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"></path>
+          <polyline points="9 22 9 12 15 12 15 22"></polyline>
+        </svg>
+        <div class="link-title">Home</div>
+        <div class="link-desc">Return to homepage</div>
+      </a>
+
+      <a href="/agentdb/examples/browser/management-ide/index.html" class="link-card">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
+          <line x1="9" y1="3" x2="9" y2="21"></line>
+          <line x1="3" y1="9" x2="21" y2="9"></line>
+        </svg>
+        <div class="link-title">⚡ AgentDB IDE</div>
+        <div class="link-desc">Full-featured management system</div>
+      </a>
+
+      <a href="/agentdb/examples/browser/agentic-marketing/index.html" class="link-card">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <polyline points="16 18 22 12 16 6"></polyline>
+          <polyline points="8 6 2 12 8 18"></polyline>
+        </svg>
+        <div class="link-title">Agentic Marketing</div>
+        <div class="link-desc">Live demo example</div>
+      </a>
+
+      <a href="https://github.com/ruvnet/agentic-flow/tree/main/packages/agentdb" class="link-card" target="_blank">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"></path>
+          <path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"></path>
+        </svg>
+        <div class="link-title">Documentation</div>
+        <div class="link-desc">Learn about AgentDB</div>
+      </a>
+
+      <a href="https://agentdb.ruv.io/docs" class="link-card" target="_blank">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+          <polyline points="14 2 14 8 20 8"></polyline>
+          <line x1="16" y1="13" x2="8" y2="13"></line>
+          <line x1="16" y1="17" x2="8" y2="17"></line>
+          <polyline points="10 9 9 9 8 9"></polyline>
+        </svg>
+        <div class="link-title">API Reference</div>
+        <div class="link-desc">Explore the API</div>
+      </a>
+    </div>
+
+    <div class="path">
+      <p style="margin: 0; color: #a0a0a0; font-size: 0.9rem;">Requested path:</p>
+      <code id="path"></code>
+    </div>
+
+    <div class="footer">
+      AgentDB - SQL-based Agentic Memory with Vector Embeddings
+    </div>
+  </div>
+
+  <script>
+    // Display the current path
+    document.getElementById('path').textContent = window.location.pathname;
+
+    // Auto-redirect if accessing a directory without trailing slash
+    if (window.location.pathname.endsWith('/agentdb/examples/browser/agentic-marketing')) {
+      window.location.href = window.location.pathname + '/index.html';
+    }
+  </script>
+</body>
+</html>

@@ -1,0 +1,14 @@
+{
+  "tasks": {
+    "dev": "deno run --allow-net --allow-read --allow-write --unstable server.ts",
+    "deploy": "deployctl deploy --project=agentdb-demo server.ts",
+    "deploy:prod": "deployctl deploy --project=agentdb-demo --prod server.ts"
+  },
+  "imports": {
+    "agentdb": "../../dist/deno/agentdb.deno.js"
+  },
+  "compilerOptions": {
+    "lib": ["deno.unstable", "deno.window"],
+    "strict": true
+  }
+}

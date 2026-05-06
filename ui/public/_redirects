@@ -1,0 +1,8 @@
+# Netlify redirects for directory index serving
+# Redirect directory URLs to their index.html files
+
+/agentdb/examples/browser/agentic-marketing  /agentdb/examples/browser/agentic-marketing/index.html  200
+/agentdb/examples/browser/*  /agentdb/examples/browser/:splat/index.html  200
+
+# SPA fallback
+/*    /index.html   200

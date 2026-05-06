@@ -1,0 +1,3 @@
+[submodule "packages/ruvector-upstream"]
+	path = packages/ruvector-upstream
+	url = https://github.com/ruvnet/ruvector.git

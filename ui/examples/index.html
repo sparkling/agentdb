@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AgentDB Examples - Strategic AI Demos</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+    body {
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 2rem;
+    }
+    .container {
+      max-width: 800px;
+      width: 100%;
+    }
+    .header {
+      text-align: center;
+      color: white;
+      margin-bottom: 3rem;
+    }
+    .header h1 {
+      font-size: 2.5rem;
+      font-weight: 700;
+      margin-bottom: 0.5rem;
+      text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
+    }
+    .header p {
+      font-size: 1.1rem;
+      opacity: 0.9;
+    }
+    .card {
+      background: white;
+      border-radius: 12px;
+      padding: 2rem;
+      box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+      margin-bottom: 2rem;
+    }
+    .card h2 {
+      color: #667eea;
+      margin-bottom: 1rem;
+      font-size: 1.5rem;
+    }
+    .card p {
+      color: #555;
+      line-height: 1.6;
+      margin-bottom: 1.5rem;
+    }
+    .features {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+      gap: 1rem;
+      margin-bottom: 1.5rem;
+    }
+    .feature {
+      padding: 0.75rem;
+      background: #f8f9fa;
+      border-radius: 8px;
+      border-left: 4px solid #667eea;
+    }
+    .feature h3 {
+      font-size: 0.9rem;
+      color: #667eea;
+      margin-bottom: 0.25rem;
+    }
+    .feature p {
+      font-size: 0.8rem;
+      color: #666;
+      margin: 0;
+    }
+    .btn {
+      display: inline-block;
+      padding: 1rem 2rem;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      color: white;
+      text-decoration: none;
+      border-radius: 8px;
+      font-weight: 600;
+      font-size: 1.1rem;
+      box-shadow: 0 4px 15px rgba(102, 126, 234, 0.4);
+      transition: all 0.3s;
+      margin-right: 1rem;
+      margin-bottom: 1rem;
+    }
+    .btn:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 6px 20px rgba(102, 126, 234, 0.6);
+    }
+    .btn-secondary {
+      background: #6c757d;
+    }
+    .btn-secondary:hover {
+      box-shadow: 0 6px 20px rgba(108, 117, 125, 0.4);
+    }
+    .tech-stack {
+      display: flex;
+      gap: 0.75rem;
+      flex-wrap: wrap;
+      margin-bottom: 1rem;
+    }
+    .tech-badge {
+      padding: 0.5rem 1rem;
+      background: #e7eaf6;
+      color: #667eea;
+      border-radius: 20px;
+      font-size: 0.85rem;
+      font-weight: 600;
+    }
+    .footer {
+      text-align: center;
+      color: white;
+      font-size: 0.9rem;
+      opacity: 0.8;
+    }
+    .footer a {
+      color: white;
+      text-decoration: underline;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <h1>🎮 AgentDB Examples</h1>
+      <p>Cutting-Edge AI Demonstrations</p>
+    </div>
+
+    <div class="card">
+      <h2>⚔️ Strategic AI War Games</h2>
+      <p>Experience the future of autonomous AI - multi-agent systems that learn, reason, and strategize in real-time. Watch three AI factions battle for supremacy using advanced game theory, pattern learning, and causal inference.</p>
+
+      <div class="tech-stack">
+        <span class="tech-badge">AgentDB v1.3.9</span>
+        <span class="tech-badge">WASM Backend</span>
+        <span class="tech-badge">Vector Embeddings</span>
+        <span class="tech-badge">Reflexion Learning</span>
+        <span class="tech-badge">Game Theory</span>
+        <span class="tech-badge">Causal Inference</span>
+      </div>
+
+      <div class="features">
+        <div class="feature">
+          <h3>🤖 Multi-Agent AI</h3>
+          <p>Three autonomous factions with unique strategies</p>
+        </div>
+        <div class="feature">
+          <h3>🧠 Pattern Learning</h3>
+          <p>Real-time learning from conflicts and victories</p>
+        </div>
+        <div class="feature">
+          <h3>🎲 Game Theory</h3>
+          <p>Nash Equilibrium, Prisoner's Dilemma, and more</p>
+        </div>
+        <div class="feature">
+          <h3>🏆 Achievements</h3>
+          <p>10 unlockable achievements and special events</p>
+        </div>
+        <div class="feature">
+          <h3>💥 Visual Effects</h3>
+          <p>Explosions, animations, and CRT terminal UI</p>
+        </div>
+        <div class="feature">
+          <h3>⚙️ Configurable</h3>
+          <p>Customize AI behavior and simulation parameters</p>
+        </div>
+      </div>
+
+      <div>
+        <a href="strategic-ai-wargames.html" class="btn">🎮 Launch War Games</a>
+        <a href="README-WARGAMES.md" class="btn btn-secondary">📖 Read Docs</a>
+        <a href="TESTING-GUIDE.md" class="btn btn-secondary">🧪 Testing Guide</a>
+      </div>
+    </div>
+
+    <div class="footer">
+      <p>Built with <a href="https://agentdb.ruv.io" target="_blank">AgentDB</a> • Showcasing the future of AI</p>
+    </div>
+  </div>
+</body>
+</html>

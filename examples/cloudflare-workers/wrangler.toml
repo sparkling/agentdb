@@ -1,0 +1,39 @@
+# Cloudflare Workers Configuration for AgentDB
+# ADR-071 Phase 4: Browser Deployment
+
+name = "agentdb-worker"
+main = "worker.ts"
+compatibility_date = "2024-01-01"
+
+# Durable Object binding
+[durable_objects]
+bindings = [
+  { name = "AGENTDB", class_name = "AgentDBDurableObject" }
+]
+
+# Durable Object migration (for first deployment)
+[[migrations]]
+tag = "v1"
+new_classes = ["AgentDBDurableObject"]
+
+# KV namespace for caching (optional)
+[[kv_namespaces]]
+binding = "CACHE"
+id = "your-kv-namespace-id" # Replace with actual KV namespace ID
+
+# Build configuration
+[build]
+command = "cd ../.. && npm run build:edge"
+
+# Environment variables
+[vars]
+ENVIRONMENT = "production"
+
+# Limits
+[limits]
+cpu_ms = 50_000 # 50 seconds for Durable Objects
+
+# Custom routes (optional)
+# [[routes]]
+# pattern = "api.example.com/*"
+# zone_name = "example.com"

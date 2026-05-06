@@ -35,3 +35,9 @@ coverage/
 # build / validation artefacts
 docker-report.txt
 validation-results.txt
+
+# Benchmark / runtime data caches (regenerated)
+bench-data/*
+!bench-data/.gitkeep
+data/*
+!data/.gitkeep

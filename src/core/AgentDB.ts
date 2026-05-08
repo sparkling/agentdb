@@ -30,6 +30,13 @@ export interface AgentDBConfig {
   vectorBackend?: 'auto' | 'ruvector' | 'hnswlib';
   /** Vector dimension (default: 384 for MiniLM) */
   vectorDimension?: number;
+  /** ADR-0069 A1: config-chain SQLite pragmas (re-applied per ADR-0161 acceptance gate) */
+  sqlite?: {
+    cacheSize?: number;      // default: -64000 (64MB)
+    busyTimeoutMs?: number;  // default: 5000
+    journalMode?: string;    // default: 'WAL'
+    synchronous?: string;    // default: 'NORMAL'
+  };
 }
 
 export class AgentDB {
@@ -101,11 +108,18 @@ export class AgentDB {
       return this.initializeSqlJsWasm(dbPath);
     }
 
+    // ADR-0069 A1: config-chain pragma values declared OUTSIDE try block
+    // so the catch branch (sql.js WASM fallback) can read the same config.
+    const sq = this.config.sqlite;
+
     // Try better-sqlite3 first (native performance)
     try {
       const Database = (await import('better-sqlite3')).default;
       const db = new Database(dbPath);
-      db.pragma('journal_mode = WAL');
+      db.pragma(`cache_size = ${sq?.cacheSize ?? -64000}`);
+      db.pragma(`busy_timeout = ${sq?.busyTimeoutMs ?? 5000}`);
+      db.pragma(`journal_mode = ${sq?.journalMode ?? 'WAL'}`);
+      db.pragma(`synchronous = ${sq?.synchronous ?? 'NORMAL'}`);
       this.usingWasm = false;
       return db as unknown as IDatabaseConnection;
     } catch (error) {

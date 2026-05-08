@@ -110,20 +110,39 @@ export class AttentionService {
    * Internal initialization implementation
    */
   private async _doInitialize(): Promise<void> {
-    performance.mark('attention-service-init-start');
+    // Per-instance mark names so concurrent inits / nested wasmManager.initialize()
+    // calls (which can call performance.clearMarks via shared metricsTracker)
+    // don't wipe each other's marks. Without this, measure() throws
+    // "performance mark has not been set" and propagates up.
+    const _markPrefix = `attention-service-init-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const _startMark = `${_markPrefix}-start`;
+    const _endMark = `${_markPrefix}-end`;
+    performance.mark(_startMark);
 
     try {
       await this.wasmManager.initialize();
 
       this.initialized = true;
-      performance.mark('attention-service-init-end');
-      performance.measure('attention-service-init', 'attention-service-init-start', 'attention-service-init-end');
+      performance.mark(_endMark);
+      let _durationMs = -1;
+      try {
+        performance.measure(_markPrefix, _startMark, _endMark);
+        const measure = performance.getEntriesByName(_markPrefix)[0];
+        if (measure) _durationMs = measure.duration;
+      } catch {
+        // Marks may have been cleared by a concurrent init under shared
+        // global performance buffer. Logging is best-effort; init succeeded.
+      }
+      if (_durationMs >= 0) {
+        console.log(`✅ AttentionService initialized in ${_durationMs.toFixed(2)}ms (${this.wasmManager.getRuntime()})`);
+      } else {
+        console.log(`✅ AttentionService initialized (timing unavailable, ${this.wasmManager.getRuntime()})`);
+      }
 
-      const measure = performance.getEntriesByName('attention-service-init')[0];
-      console.log(`✅ AttentionService initialized in ${measure.duration.toFixed(2)}ms (${this.wasmManager.getRuntime()})`);
-
-      // Clear performance entries to prevent memory leak
-      this.metricsTracker.clearPerformanceEntries('attention-service-init');
+      // Clear our per-instance entries (memory leak prevention).
+      try { performance.clearMarks(_startMark); } catch {}
+      try { performance.clearMarks(_endMark); } catch {}
+      try { performance.clearMeasures(_markPrefix); } catch {}
 
       // Warm up JIT with small computation
       if (!this.warmedUp) {

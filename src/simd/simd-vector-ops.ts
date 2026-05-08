@@ -15,6 +15,8 @@
 // Performance & Security Constants
 // ============================================================================
 
+import { getEmbeddingConfig } from '../config/embedding-config.js';
+
 /** @inline Maximum allowed vector dimension to prevent DoS via large allocations */
 export const MAX_VECTOR_DIMENSION = 4096;
 
@@ -915,7 +917,7 @@ export class SIMDVectorOps {
     this.config = {
       enableSIMD: config?.enableSIMD ?? true,
       bufferPoolSize: config?.bufferPoolSize ?? 32,
-      defaultDimension: config?.defaultDimension ?? 384,
+      defaultDimension: config?.defaultDimension ?? getEmbeddingConfig().dimension,
       enableLogging: config?.enableLogging ?? false,
     };
 

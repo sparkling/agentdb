@@ -3,6 +3,8 @@
  * Validates component combinations and parameter ranges
  */
 
+import { getEmbeddingConfig } from '../../config/embedding-config.js';
+
 export interface ValidationResult {
   valid: boolean;
   errors: string[];
@@ -173,7 +175,7 @@ export class ConfigValidator {
       clustering: 'louvain',
       selfHealing: 'mpc',
       nodes: 100000,
-      dimensions: 384,
+      dimensions: getEmbeddingConfig().dimension,
       iterations: 3,
     };
 

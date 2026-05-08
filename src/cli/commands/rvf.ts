@@ -17,6 +17,7 @@
 import { Command } from 'commander';
 import * as fs from 'fs';
 import * as path from 'path';
+import { getEmbeddingConfig } from '../../config/embedding-config.js';
 
 const colors = {
   reset: '\x1b[0m',
@@ -76,7 +77,7 @@ async function loadRvfBackend(storePath: string, options: { backend?: string } =
   const validPath = validateStorePath(storePath);
   const { RvfBackend } = await import('../../backends/rvf/RvfBackend.js');
   const backend = new RvfBackend({
-    dimension: 384, // Will be overridden on load
+    dimension: getEmbeddingConfig().dimension, // Will be overridden on load
     metric: 'cosine',
     storagePath: validPath,
     rvfBackend: (options.backend as 'auto' | 'node' | 'wasm') ?? 'auto',

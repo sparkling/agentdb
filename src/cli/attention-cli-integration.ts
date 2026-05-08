@@ -52,7 +52,7 @@ ${'\x1b[1m'}ATTENTION MECHANISM COMMANDS:${'\x1b[0m'}
       --keys-file <path>  Path to keys JSON file
       --values-file <path> Path to values JSON file (optional)
       --heads <n>         Number of attention heads (default: 8)
-      --dimension <n>     Attention dimension (default: 384)
+      --dimension <n>     Attention dimension (default: 768)
       --output <path>     Output file path
       --json              Output as JSON
     Example: agentdb attention compute --mechanism flash --query "search query" --keys-file keys.json

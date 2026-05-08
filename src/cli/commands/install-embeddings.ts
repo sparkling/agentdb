@@ -56,7 +56,7 @@ export async function installEmbeddingsCommand(options: InstallEmbeddingsOptions
       console.log(`${colors.bright}${colors.magenta}🎉 Next Steps:${colors.reset}`);
       console.log(`   1. Restart your AgentDB instance`);
       console.log(`   2. Real embeddings will be used automatically`);
-      console.log(`   3. First run will download model (~90MB): Xenova/all-MiniLM-L6-v2`);
+      console.log(`   3. First run will download model (~90MB): Xenova/all-mpnet-base-v2`);
       console.log('');
       console.log(`${colors.cyan}💡 Tip:${colors.reset} Set ${colors.yellow}HUGGINGFACE_API_KEY${colors.reset} for online models`);
       console.log('');

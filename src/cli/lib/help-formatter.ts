@@ -93,7 +93,7 @@ export class HelpFormatter {
             title: 'PARAMETERS',
             content: [
               '--nodes N               Node count (default: 100000)',
-              '--dimensions D          Vector dimensions (default: 384)',
+              '--dimensions D          Vector dimensions (default: 768)',
               '--m [8,16,32,64]       HNSW M parameter (default: 32)',
               '--ef-construction N     Build-time ef (default: 200)',
               '--ef-search N          Query-time ef (default: 100)',

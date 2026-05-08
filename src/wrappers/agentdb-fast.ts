@@ -7,6 +7,7 @@
 
 import { AgentDB } from '../core/AgentDB.js';
 import { EventEmitter } from 'events';
+import { getEmbeddingConfig } from '../config/embedding-config.js';
 
 export interface Episode {
   id?: string;
@@ -72,7 +73,7 @@ export class AgentDBFast extends EventEmitter {
 
     this.config = {
       path: config.path || '.agentdb-fast',
-      vectorDimensions: config.vectorDimensions || 384,
+      vectorDimensions: config.vectorDimensions || getEmbeddingConfig().dimension,
       enableHNSW: config.enableHNSW !== false,
       hnswM: config.hnswM || 16,
       hnswEfConstruction: config.hnswEfConstruction || 200
@@ -150,7 +151,7 @@ export class AgentDBFast extends EventEmitter {
   async retrieveEpisodes(options: EpisodeSearchOptions): Promise<Episode[]> {
     await this.initialize();
 
-    const dimensions = this.config.vectorDimensions ?? 384;
+    const dimensions = this.config.vectorDimensions ?? getEmbeddingConfig().dimension;
     const queryEmbedding = options.task
       ? await this.getEmbedding(options.task)
       : Array(dimensions).fill(0);

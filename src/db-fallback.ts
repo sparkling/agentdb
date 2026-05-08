@@ -75,6 +75,7 @@ function createSqlJsWrapper(SQL: any) {
       // In-memory database
       if (filename === ':memory:') {
         this.db = new SQL.Database();
+        this.db.run('PRAGMA journal_mode=DELETE'); // ADR-0080: prevent WAL — sql.js can't read WAL journals
       } else {
         // File-based database - use safe fs module (no eval)
         try {
@@ -88,6 +89,7 @@ function createSqlJsWrapper(SQL: any) {
           console.warn('⚠️  Could not read database file:', (error as Error).message);
           this.db = new SQL.Database();
         }
+        this.db.run('PRAGMA journal_mode=DELETE'); // ADR-0080: prevent WAL — sql.js can't read WAL journals
       }
 
       // Warn if too many active statements (memory leak detection)
@@ -96,6 +98,11 @@ function createSqlJsWrapper(SQL: any) {
           console.warn(`⚠️  Detected ${this.activeStatements.size} active SQL statements - possible memory leak`);
         }
       }, 10000);
+      // MM-002: Don't prevent process exit — allow Node.js to exit naturally
+      // even if the interval is still active (e.g., after CLI init --full)
+      if (this.intervalId.unref) {
+        this.intervalId.unref();
+      }
     }
 
     prepare(sql: string) {

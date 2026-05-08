@@ -18,6 +18,21 @@
  * - Suitable for datasets up to 100K vectors in browser
  */
 
+/** Lazy-cached default dimension from embedding config (browser-safe). */
+let _defaultDim: number | null = null;
+function getDefaultDim(): number {
+  if (_defaultDim === null) {
+    try {
+      const { getEmbeddingConfig } = require('../config/embedding-config.js');
+      _defaultDim = getEmbeddingConfig().dimension;
+    } catch {
+      // getEmbeddingConfig() failed — absolute fallback (browser env, no fs)
+      _defaultDim = 768;
+    }
+  }
+  return _defaultDim!;
+}
+
 export interface HNSWConfig {
   dimension: number;
   M: number;                    // Max connections per node (default: 16)
@@ -106,7 +121,7 @@ export class HNSWIndex {
 
   constructor(config: Partial<HNSWConfig> = {}) {
     this.config = {
-      dimension: config.dimension || 384,
+      dimension: config.dimension || getDefaultDim(),
       M: config.M || 16,
       efConstruction: config.efConstruction || 200,
       efSearch: config.efSearch || 50,

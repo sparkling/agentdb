@@ -16,6 +16,21 @@
  * WASM Module: ~157 KB (lazy loaded on demand)
  */
 
+/** Lazy-cached default dimension from embedding config (browser-safe). */
+let _defaultDim: number | null = null;
+function getDefaultDim(): number {
+  if (_defaultDim === null) {
+    try {
+      const { getEmbeddingConfig } = require('../config/embedding-config.js');
+      _defaultDim = getEmbeddingConfig().dimension;
+    } catch {
+      // getEmbeddingConfig() failed — absolute fallback (browser env, no fs)
+      _defaultDim = 768;
+    }
+  }
+  return _defaultDim!;
+}
+
 // ============================================================================
 // Product Quantization
 // ============================================================================
@@ -280,7 +295,7 @@ export async function benchmarkSearch(
   searchFn: (query: Float32Array, k: number) => any[],
   numQueries: number = 100,
   k: number = 10,
-  dimension: number = 384
+  dimension: number = getDefaultDim()
 ): Promise<{
   avgTimeMs: number;
   minTimeMs: number;

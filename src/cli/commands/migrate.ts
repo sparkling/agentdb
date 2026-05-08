@@ -7,6 +7,7 @@
 import { createDatabase } from '../../db-fallback.js';
 import * as fs from 'fs';
 import * as path from 'path';
+import { getEmbeddingConfig } from '../../config/embedding-config.js';
 
 // Color codes for beautiful output
 const colors = {
@@ -162,7 +163,7 @@ export async function migrateV2ToV3(
   const { wrapExistingSqlJsDatabase } = await import('../../db-fallback.js');
 
   const rvfBackend = new SqlJsRvfBackend({
-    dimension: 384,
+    dimension: getEmbeddingConfig().dimension,
     metric: 'cosine' as const,
     storagePath: targetRvfPath,
   } as import('../../backends/VectorBackend.js').VectorConfig & { storagePath: string });
@@ -403,7 +404,7 @@ export async function migrateCommand(options: MigrationOptions): Promise<void> {
       try {
         const { RvfBackend } = await import('../../backends/rvf/RvfBackend.js');
         const rvfBackend = new RvfBackend({
-          dimension: 384,
+          dimension: getEmbeddingConfig().dimension,
           metric: 'cosine',
           storagePath: rvfOutputPath,
         });
@@ -691,8 +692,8 @@ async function performGNNOptimization(
 
   for (const ep of episodes) {
     try {
-      // Generate mock embedding (384-dim)
-      const embedding = generateMockEmbedding(384);
+      // Generate mock embedding (config-derived dim)
+      const embedding = generateMockEmbedding(getEmbeddingConfig().dimension);
       const embeddingBlob = Buffer.from(new Float32Array(embedding).buffer);
       insertEmbedding.run(ep.id, embeddingBlob, 'migration-mock');
       stats.gnnOptimization.episodeEmbeddings++;

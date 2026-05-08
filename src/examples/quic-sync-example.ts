@@ -24,13 +24,13 @@ async function exampleQUICSync() {
 
   // Initialize embedding services
   const localEmbedder = new EmbeddingService({
-    model: 'Xenova/all-MiniLM-L6-v2',
-    dimension: 384,
+    model: 'Xenova/all-mpnet-base-v2',
+    dimension: 768,
     provider: 'transformers',
   });
   const remoteEmbedder = new EmbeddingService({
-    model: 'Xenova/all-MiniLM-L6-v2',
-    dimension: 384,
+    model: 'Xenova/all-mpnet-base-v2',
+    dimension: 768,
     provider: 'transformers',
   });
 

@@ -18,6 +18,7 @@
 
 import { GraphDatabaseAdapter, type GraphDatabaseConfig } from './backends/graph/GraphDatabaseAdapter.js';
 import { getDatabaseImplementation } from './db-fallback.js';
+import { getEmbeddingConfig } from './config/embedding-config.js';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -25,7 +26,7 @@ export type DatabaseMode = 'graph' | 'sqlite-legacy';
 
 export interface UnifiedDatabaseConfig {
   path: string;
-  dimensions?: number;       // Default: 384 (sentence-transformers standard)
+  dimensions?: number;       // Default: from embedding config
   forceMode?: DatabaseMode;  // Force specific mode
   autoMigrate?: boolean;     // Auto-migrate SQLite → Graph
 }
@@ -116,7 +117,7 @@ export class UnifiedDatabase {
       // Use RuVector GraphDatabase
       const config: GraphDatabaseConfig = {
         storagePath: this.config.path,
-        dimensions: this.config.dimensions || 384,
+        dimensions: this.config.dimensions || getEmbeddingConfig().dimension,
         distanceMetric: 'Cosine'
       };
 
@@ -171,7 +172,7 @@ export class UnifiedDatabase {
     const graphPath = sqlitePath.replace(/\.db$/, '.graph');
     const graphConfig: GraphDatabaseConfig = {
       storagePath: graphPath,
-      dimensions: this.config.dimensions || 384,
+      dimensions: this.config.dimensions || getEmbeddingConfig().dimension,
       distanceMetric: 'Cosine'
     };
 
@@ -315,7 +316,7 @@ export async function createUnifiedDatabase(
 ): Promise<UnifiedDatabase> {
   const config: UnifiedDatabaseConfig = {
     path,
-    dimensions: options?.dimensions || 384,
+    dimensions: options?.dimensions || getEmbeddingConfig().dimension,
     forceMode: options?.forceMode,
     autoMigrate: options?.autoMigrate ?? false  // Default: manual migration
   };

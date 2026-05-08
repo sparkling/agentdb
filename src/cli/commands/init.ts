@@ -7,6 +7,7 @@ import { createDatabase } from '../../db-fallback.js';
 import * as fs from 'fs';
 import * as path from 'path';
 import { fileURLToPath } from 'url';
+import { getEmbeddingConfig } from '../../config/embedding-config.js';
 
 // Color codes for beautiful output
 const colors = {
@@ -42,7 +43,7 @@ function getBackendColor(backend: 'ruvector' | 'hnswlib'): string {
 export async function initCommand(options: InitOptions = {}): Promise<void> {
   const {
     backend = 'auto',
-    dimension = 384,
+    dimension = getEmbeddingConfig().dimension,
     model,
     preset,
     inMemory = false,
@@ -79,7 +80,7 @@ export async function initCommand(options: InitOptions = {}): Promise<void> {
     const actualDbPath = inMemory ? ':memory:' : dbPath;
 
     // Determine embedding model (with dimension-aware defaults)
-    const embeddingModel = model || (dimension === 768 ? 'Xenova/bge-base-en-v1.5' : 'Xenova/all-MiniLM-L6-v2');
+    const embeddingModel = model || (dimension === getEmbeddingConfig().dimension ? getEmbeddingConfig().model : 'Xenova/all-mpnet-base-v2');
 
     console.log(`\n${colors.bright}${colors.cyan}🚀 Initializing AgentDB${colors.reset}\n`);
     console.log(`  Database:      ${colors.blue}${actualDbPath}${colors.reset}`);
@@ -96,6 +97,7 @@ export async function initCommand(options: InitOptions = {}): Promise<void> {
 
     // Configure for performance
     db.pragma('journal_mode = WAL');
+    db.pragma('busy_timeout = 5000'); // ADR-0069 A1: required with WAL mode
     db.pragma('synchronous = NORMAL');
     db.pragma('cache_size = -64000');
 

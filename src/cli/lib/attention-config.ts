@@ -5,6 +5,10 @@
 
 import * as fs from 'fs/promises';
 import * as path from 'path';
+import { getEmbeddingConfig } from '../../config/embedding-config.js';
+
+/** Default dimension from embedding config -- evaluated once at module load */
+const _DIM = getEmbeddingConfig().dimension;
 
 export interface AttentionMechanismConfig {
   enabled: boolean;
@@ -48,32 +52,32 @@ export const DEFAULT_ATTENTION_CONFIG: AttentionConfig = {
     flash: {
       enabled: true,
       heads: 8,
-      dimension: 384,
+      dimension: _DIM,
       blockSize: 64,
     },
     hyperbolic: {
       enabled: true,
       curvature: -1.0,
       heads: 8,
-      dimension: 384,
+      dimension: _DIM,
     },
     sparse: {
       enabled: true,
       sparsity: 0.9,
       heads: 8,
-      dimension: 384,
+      dimension: _DIM,
     },
     linear: {
       enabled: true,
       kernelSize: 32,
       heads: 8,
-      dimension: 384,
+      dimension: _DIM,
     },
     performer: {
       enabled: true,
       randomFeatures: 256,
       heads: 8,
-      dimension: 384,
+      dimension: _DIM,
     },
   },
   featureFlags: {

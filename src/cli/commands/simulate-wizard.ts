@@ -8,6 +8,10 @@ import { SimulationRunner } from '../lib/simulation-runner.js';
 import { ReportGenerator } from '../lib/report-generator.js';
 import { ConfigValidator, type SimulationConfig } from '../lib/config-validator.js';
 import chalk from 'chalk';
+import { getEmbeddingConfig } from '../../config/embedding-config.js';
+
+/** Default dimension from embedding config -- evaluated once at module load */
+const _DIM = getEmbeddingConfig().dimension;
 
 export async function runWizard(): Promise<void> {
   console.log(chalk.cyan.bold('\n🧙 AgentDB Simulation Wizard\n'));
@@ -118,7 +122,7 @@ async function scenarioWizard(): Promise<void> {
       type: 'number',
       name: 'dimensions',
       message: 'Vector dimensions:',
-      default: 384,
+      default: _DIM,
       validate: (value: number) => {
         if (value < 64 || value > 2048) {
           return 'Dimensions must be between 64 and 2048';
@@ -299,7 +303,7 @@ async function customWizard(): Promise<void> {
       type: 'number',
       name: 'dimensions',
       message: 'Vector dimensions:',
-      default: 384,
+      default: _DIM,
     },
     {
       type: 'number',

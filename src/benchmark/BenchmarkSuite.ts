@@ -293,7 +293,7 @@ export class VectorInsertBenchmark extends Benchmark {
   constructor(config: BenchmarkConfig = {}) {
     super();
     this.config = {
-      vectorDimension: config.vectorDimension ?? 384,
+      vectorDimension: config.vectorDimension ?? 768,
       warmupIterations: config.warmupIterations ?? 100,
       insertCounts: config.insertCounts ?? [1000, 10000, 100000],
       searchQueries: config.searchQueries ?? 1000,
@@ -428,7 +428,7 @@ export class VectorSearchBenchmark extends Benchmark {
   constructor(config: BenchmarkConfig = {}) {
     super();
     this.config = {
-      vectorDimension: config.vectorDimension ?? 384,
+      vectorDimension: config.vectorDimension ?? 768,
       warmupIterations: config.warmupIterations ?? 100,
       insertCounts: config.insertCounts ?? [1000, 10000, 100000],
       searchQueries: config.searchQueries ?? 1000,
@@ -532,7 +532,7 @@ export class MemoryUsageBenchmark extends Benchmark {
   constructor(config: BenchmarkConfig = {}) {
     super();
     this.config = {
-      vectorDimension: config.vectorDimension ?? 384,
+      vectorDimension: config.vectorDimension ?? 768,
       warmupIterations: config.warmupIterations ?? 100,
       insertCounts: config.insertCounts ?? [1000, 10000, 100000],
       searchQueries: config.searchQueries ?? 1000,
@@ -636,7 +636,7 @@ export class ConcurrencyBenchmark extends Benchmark {
   constructor(config: BenchmarkConfig = {}) {
     super();
     this.config = {
-      vectorDimension: config.vectorDimension ?? 384,
+      vectorDimension: config.vectorDimension ?? 768,
       warmupIterations: config.warmupIterations ?? 100,
       insertCounts: config.insertCounts ?? [1000, 10000, 100000],
       searchQueries: config.searchQueries ?? 1000,
@@ -771,7 +771,7 @@ export class QuantizationBenchmark extends Benchmark {
   constructor(config: BenchmarkConfig = {}) {
     super();
     this.config = {
-      vectorDimension: config.vectorDimension ?? 384,
+      vectorDimension: config.vectorDimension ?? 768,
       warmupIterations: config.warmupIterations ?? 100,
       insertCounts: config.insertCounts ?? [1000, 10000, 100000],
       searchQueries: config.searchQueries ?? 1000,
@@ -962,7 +962,7 @@ export class BenchmarkSuite {
 
   constructor(config: BenchmarkConfig = {}) {
     this.config = {
-      vectorDimension: config.vectorDimension ?? 384,
+      vectorDimension: config.vectorDimension ?? 768,
       warmupIterations: config.warmupIterations ?? 100,
       insertCounts: config.insertCounts ?? [1000, 10000, 100000],
       searchQueries: config.searchQueries ?? 1000,

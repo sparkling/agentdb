@@ -19,6 +19,7 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
+import { deriveHNSWParams, getEmbeddingConfig } from '../config/embedding-config.js';
 
 // Lazy-loaded hnswlib-node to avoid import failures on systems without build tools
 let HierarchicalNSW: any = null;
@@ -142,13 +143,14 @@ export class HNSWIndex {
 
   constructor(db: Database, config?: Partial<HNSWConfig>) {
     this.db = db;
+    const derived = deriveHNSWParams(config?.dimension);
     this.config = {
-      M: 16,
-      efConstruction: 200,
-      efSearch: 100,
+      M: derived.M,
+      efConstruction: derived.efConstruction,
+      efSearch: derived.efSearch,
       metric: 'cosine',
-      dimension: 1536,
-      maxElements: 100000,
+      dimension: getEmbeddingConfig().dimension, // ADR-0069: config-chain-aware
+      maxElements: derived.maxElements, // ADR-0069: config-chain capacity
       persistIndex: true,
       rebuildThreshold: 0.1, // Rebuild after 10% updates
       ...config,

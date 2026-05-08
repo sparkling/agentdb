@@ -129,7 +129,9 @@ export {
   type BenchmarkConfig,
 } from './benchmark/index.js';
 
-// Re-export all controllers for convenience
+// Re-export all controllers for convenience (also brings in MutationGuard,
+// AttestationLog, GuardedVectorBackend, vector-math, prerequisites — see
+// controllers/index.ts merge per ADR-0161)
 export * from './controllers/index.js';
 
 // LLM Router - Multi-provider LLM integration with RuvLLM support
@@ -139,3 +141,63 @@ export {
   type LLMConfig,
   type LLMResponse,
 } from './services/LLMRouter.js';
+
+// ============================================================================
+// Fork-side additions (ADR-0161 three-way merge — preserve alpha.14 above
+// AND add fork-side net-new exports below)
+// ============================================================================
+
+// Optimizations — RVFOptimizer (lifted in d7ca0f6)
+export { RVFOptimizer } from './optimizations/RVFOptimizer.js';
+export type { RVFConfig } from './optimizations/RVFOptimizer.js';
+
+// Security infrastructure (ADR-0061 Phase 0)
+export { ResourceTracker, RateLimiter, CircuitBreaker, SecurityError } from './security/limits.js';
+
+// Observability — telemetry
+export { TelemetryManager } from './observability/telemetry.js';
+export type { TelemetryConfig } from './observability/telemetry.js';
+
+// Services — RuVector package integrations (lifted fork-only files)
+export { SemanticRouter } from './services/SemanticRouter.js';
+export { SonaTrajectoryService } from './services/SonaTrajectoryService.js';
+export { GraphTransformerService } from './services/GraphTransformerService.js';
+export { GNNService } from './services/GNNService.js';
+export type { RouteResult, RouteConfig } from './services/SemanticRouter.js';
+export type { TrajectoryStep, StoredTrajectory, PredictionResult, SonaStats } from './services/SonaTrajectoryService.js';
+export type { GraphTransformerStats } from './services/GraphTransformerService.js';
+export type { GNNConfig, IntentResult } from './services/GNNService.js';
+
+// Consensus — Distributed coordination (lifted fork-only file, TODO-guarded)
+export { RaftConsensus } from './consensus/RaftConsensus.js';
+export type { RaftConfig, LogEntry, RaftState } from './consensus/RaftConsensus.js';
+
+// Thompson Sampling bandit (RVF backend)
+export { SolverBandit } from './backends/rvf/SolverBandit.js';
+export type { BanditArmStats, BanditConfig, BanditStats, BanditState } from './backends/rvf/SolverBandit.js';
+
+// Attention metrics (ADR-0050)
+export { AttentionMetricsCollector } from './utils/attention-metrics.js';
+export type { AttentionMetrics as ForkAttentionMetrics, OperationMetrics } from './utils/attention-metrics.js';
+
+// Index health monitoring (ADR-0050)
+export { IndexHealthMonitor } from './backends/rvf/AdaptiveIndexTuner.js';
+
+// Audit logging (ADR-0050)
+export { AuditLogger } from './services/audit-logger.service.js';
+export type { AuditEventType, AuditEvent } from './services/audit-logger.service.js';
+
+// Federated learning (ADR-0050)
+export { FederatedLearningManager } from './services/federated-learning.js';
+export type { FederatedAgentState, FederatedConfig } from './services/federated-learning.js';
+
+// Self-learning RVF backend (ADR-0050)
+export { SelfLearningRvfBackend } from './backends/rvf/SelfLearningRvfBackend.js';
+export type { SelfLearningConfig } from './backends/rvf/SelfLearningRvfBackend.js';
+
+// Native accelerator — JS fallback singleton (ADR-0050)
+export { NativeAccelerator, getAccelerator, resetAccelerator } from './backends/rvf/NativeAccelerator.js';
+
+// Embedding config (ADR-0052 / ADR-0069 config-driven framework)
+export { getEmbeddingConfig, resetEmbeddingConfig, getModelDimension, getTaskPrefix, applyTaskPrefix, deriveHNSWParams, MODEL_REGISTRY } from './config/embedding-config.js';
+export type { EmbeddingConfig as ForkEmbeddingConfig, HNSWParams, ModelInfo } from './config/embedding-config.js';

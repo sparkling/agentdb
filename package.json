@@ -181,6 +181,9 @@
   "engines": {
     "node": ">=18.0.0"
   },
+  "workspaces": [
+    "packages/*"
+  ],
   "files": [
     "dist/src/",
     "dist/schemas/",

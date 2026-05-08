@@ -37,6 +37,7 @@ import * as path from 'path';
 import * as zlib from 'zlib';
 import { fileURLToPath } from 'url';
 import { dirname } from 'path';
+import { getEmbeddingConfig } from '../config/embedding-config.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -148,6 +149,7 @@ class AgentDBCLI {
 
     // Configure for performance
     this.db.pragma('journal_mode = WAL');
+    this.db.pragma('busy_timeout = 5000'); // ADR-0069 A1: required with WAL mode
     this.db.pragma('synchronous = NORMAL');
     this.db.pragma('cache_size = -64000');
 
@@ -193,10 +195,11 @@ class AgentDBCLI {
     }
 
     // Initialize embedding service
+    const embCfg = getEmbeddingConfig();
     this.embedder = new EmbeddingService({
-      model: 'Xenova/all-MiniLM-L6-v2',
-      dimension: 384,
-      provider: 'transformers'
+      model: embCfg.model,
+      dimension: embCfg.dimension,
+      provider: (embCfg.provider === 'cohere' || embCfg.provider === 'custom') ? 'transformers' : embCfg.provider
     });
     await this.embedder.initialize();
 
@@ -888,7 +891,7 @@ class AgentDBCLI {
           key: params.key,
         },
         rateLimit: {
-          maxRequestsPerMinute: 60,
+          maxRequestsPerMinute: 100, // ADR-0069 A2: aligned with QUICServer default
           maxBytesPerMinute: 10 * 1024 * 1024, // 10MB
         },
       };
@@ -1752,7 +1755,7 @@ async function main() {
 
   // Handle init command with new v2 implementation
   if (command === 'init') {
-    const options: any = { dbPath: './agentdb.db', dimension: 384 };
+    const options: any = { dbPath: './agentdb.db', dimension: getEmbeddingConfig().dimension };
     for (let i = 1; i < args.length; i++) {
       const arg = args[i];
       if (arg === '--backend' && i + 1 < args.length) {
@@ -2019,7 +2022,7 @@ async function main() {
 async function handleInitCommand(args: string[]) {
   // Parse arguments
   let dbPath = './agentdb.db';
-  let dimension = 1536; // Default OpenAI ada-002
+  let dimension = 768; // ADR-0069: canonical dimension (all-mpnet-base-v2)
   let preset: 'small' | 'medium' | 'large' | null = null;
   let inMemory = false;
 
@@ -3157,8 +3160,8 @@ ${colors.bright}${colors.cyan}AgentDB v2 CLI - Vector Intelligence with Auto Bac
 ${colors.bright}CORE COMMANDS:${colors.reset}
   ${colors.cyan}init${colors.reset} [options]              Initialize database with backend detection
     --backend <type>           Backend: auto (default), ruvector, hnswlib
-    --dimension <n>            Vector dimension (default: 384)
-    --model <name>             Embedding model (default: Xenova/all-MiniLM-L6-v2)
+    --dimension <n>            Vector dimension (default: 768)
+    --model <name>             Embedding model (default: Xenova/all-mpnet-base-v2)
                                Popular: Xenova/bge-base-en-v1.5 (768d production)
                                         Xenova/bge-small-en-v1.5 (384d best quality)
     --dry-run                  Show detection info without initializing
@@ -3176,11 +3179,11 @@ ${colors.bright}USAGE:${colors.reset}
   agentdb <command> <subcommand> [options]
 
 ${colors.bright}SETUP COMMANDS:${colors.reset}
-  agentdb init [db-path] [--dimension 384] [--model <name>] [--preset small|medium|large] [--in-memory]
+  agentdb init [db-path] [--dimension 768] [--model <name>] [--preset small|medium|large] [--in-memory]
     Initialize a new AgentDB database (default: ./agentdb.db)
     Options:
-      --dimension <n>     Vector dimension (default: 384 for all-MiniLM, 768 for bge-base)
-      --model <name>      Embedding model (default: Xenova/all-MiniLM-L6-v2)
+      --dimension <n>     Vector dimension (default: 768 for all-mpnet, 384 for bge-small)
+      --model <name>      Embedding model (default: Xenova/all-mpnet-base-v2)
                           Examples:
                             Xenova/bge-small-en-v1.5 (384d) - Best quality at 384-dim
                             Xenova/bge-base-en-v1.5 (768d)  - Production quality

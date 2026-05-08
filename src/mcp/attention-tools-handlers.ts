@@ -1,7 +1,15 @@
 /**
  * Attention Tools MCP Handlers
  * Implements MCP tools for attention mechanism operations
+ *
+ * Dimension defaults are read from the embedding config at module load time.
+ * To change: edit embeddings.json or set AGENTDB_EMBEDDING_DIM env var.
  */
+
+import { getEmbeddingConfig } from '../config/embedding-config.js';
+
+/** Default dimension from embedding config — evaluated once at module load */
+const _DIM = getEmbeddingConfig().dimension;
 
 export const attentionComputeHandler = `
       case 'agentdb_attention_compute': {
@@ -10,7 +18,7 @@ export const attentionComputeHandler = `
         const keys = args?.keys as number[][] || [];
         const values = args?.values as number[][] || [];
         const heads = (args?.heads as number) || 8;
-        const dimension = (args?.dimension as number) || 384;
+        const dimension = (args?.dimension as number) || ${_DIM};
 
         if (!query && keys.length === 0) {
           return {
@@ -83,7 +91,7 @@ export const attentionBenchmarkHandler = `
         const mechanism = args?.mechanism as string;
         const all = (args?.all as boolean) ?? false;
         const iterations = (args?.iterations as number) || 100;
-        const dimension = (args?.dimension as number) || 384;
+        const dimension = (args?.dimension as number) || ${_DIM};
         const keyCount = (args?.key_count as number) || 100;
 
         const mechanismsToTest = all
@@ -204,32 +212,32 @@ export const attentionConfigureHandler = `
           flash: {
             enabled: true,
             heads: 8,
-            dimension: 384,
+            dimension: ${_DIM},
             blockSize: 64,
           },
           hyperbolic: {
             enabled: true,
             curvature: -1.0,
             heads: 8,
-            dimension: 384,
+            dimension: ${_DIM},
           },
           sparse: {
             enabled: true,
             sparsity: 0.9,
             heads: 8,
-            dimension: 384,
+            dimension: ${_DIM},
           },
           linear: {
             enabled: true,
             kernelSize: 32,
             heads: 8,
-            dimension: 384,
+            dimension: ${_DIM},
           },
           performer: {
             enabled: true,
             randomFeatures: 256,
             heads: 8,
-            dimension: 384,
+            dimension: ${_DIM},
           },
         };
 
@@ -393,7 +401,7 @@ function computeAttentionWeightsMCP(
 
 function applyAttentionWeightsMCP(weights: number[][], values: number[][]): number[][] {
   return weights.map(headWeights => {
-    const output = Array(values[0]?.length || 384).fill(0);
+    const output = Array(values[0]?.length || _DIM).fill(0);
     for (let i = 0; i < values.length; i++) {
       for (let j = 0; j < output.length; j++) {
         output[j] += headWeights[i] * (values[i]?.[j] || 0);
@@ -474,7 +482,7 @@ export const attentionTools = [
         dimension: {
           type: 'number',
           description: 'Attention dimension',
-          default: 384,
+          default: _DIM,
         },
       },
       required: [],
@@ -504,7 +512,7 @@ export const attentionTools = [
         dimension: {
           type: 'number',
           description: 'Vector dimension',
-          default: 384,
+          default: _DIM,
         },
         key_count: {
           type: 'number',

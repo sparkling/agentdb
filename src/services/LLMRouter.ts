@@ -15,8 +15,7 @@
  * - Privacy requirements (local models via RuvLLM or ONNX)
  */
 
-import * as fs from 'fs';
-import * as path from 'path';
+import { getEmbeddingConfig } from '../config/embedding-config.js';
 
 // Lazy-loaded RuvLLM to avoid import failures if not installed
 let RuvLLMEngine: any = null;
@@ -46,7 +45,7 @@ async function loadRuvLLM(): Promise<boolean> {
 function getRuvLLMInstance(config?: { embeddingDim?: number }): any {
   if (!RuvLLMEngine) return null;
   if (!ruvllmInstance) {
-    ruvllmInstance = new RuvLLMEngine(config || { embeddingDim: 768 });
+    ruvllmInstance = new RuvLLMEngine(config || { embeddingDim: getEmbeddingConfig().dimension });
   }
   return ruvllmInstance;
 }
@@ -58,7 +57,7 @@ export interface LLMConfig {
   maxTokens?: number;
   apiKey?: string;
   priority?: 'quality' | 'balanced' | 'cost' | 'speed' | 'privacy';
-  /** RuvLLM-specific: embedding dimension (384, 768, 1024) */
+  /** RuvLLM-specific: embedding dimension (from embedding config) */
   embeddingDim?: number;
   /** RuvLLM-specific: enable adaptive learning */
   learningEnabled?: boolean;
@@ -87,47 +86,26 @@ export class LLMRouter {
       maxTokens: config.maxTokens ?? 4096,
       apiKey: config.apiKey || this.getApiKey(config.provider),
       priority: config.priority || 'balanced',
-      embeddingDim: config.embeddingDim ?? 768,
+      embeddingDim: config.embeddingDim ?? getEmbeddingConfig().dimension,
       learningEnabled: config.learningEnabled ?? true
     };
   }
 
   /**
-   * Load environment variables from root .env file
+   * Load environment variables using dotenv
    */
   private loadEnv(): void {
     if (this.envLoaded) return;
 
     try {
-      // Look for .env in project root
-      const possiblePaths = [
-        path.join(process.cwd(), '.env'),
-        path.join(process.cwd(), '..', '..', '.env'),
-        '/workspaces/agentic-flow/.env'
-      ];
-
-      for (const envPath of possiblePaths) {
-        if (fs.existsSync(envPath)) {
-          const envContent = fs.readFileSync(envPath, 'utf-8');
-          const lines = envContent.split('\n');
-
-          for (const line of lines) {
-            const trimmed = line.trim();
-            if (trimmed && !trimmed.startsWith('#')) {
-              const [key, ...valueParts] = trimmed.split('=');
-              const value = valueParts.join('=').trim();
-              if (key && value && !process.env[key]) {
-                process.env[key] = value;
-              }
-            }
-          }
-
-          this.envLoaded = true;
-          break;
-        }
-      }
-    } catch (error) {
-      // Silent fail - environment variables may be set directly
+      // Lazy import — dotenv is a dev convenience, not a runtime requirement.
+      // In production, env vars are set by the caller's environment.
+      const dotenv = require('dotenv');
+      dotenv.config();
+      this.envLoaded = true;
+    } catch {
+      // dotenv not installed or config failed — env vars must be set directly
+      this.envLoaded = true;
     }
   }
 
@@ -298,7 +276,7 @@ export class LLMRouter {
     temperature: number,
     maxTokens: number
   ): Promise<{ content: string; tokensUsed: number; cost: number }> {
-    const engine = getRuvLLMInstance({ embeddingDim: this.config.embeddingDim || 768 });
+    const engine = getRuvLLMInstance({ embeddingDim: this.config.embeddingDim || getEmbeddingConfig().dimension });
 
     if (!engine) {
       throw new Error('RuvLLM not available. Install with: npm install @ruvector/ruvllm');
@@ -339,12 +317,12 @@ export class LLMRouter {
   }
 
   /**
-   * Get embeddings using RuvLLM (768-dimensional by default)
+   * Get embeddings using RuvLLM (dimension from embedding config)
    */
   async getEmbedding(text: string): Promise<Float32Array | null> {
     if (!this.ruvllmAvailable) return null;
 
-    const engine = getRuvLLMInstance({ embeddingDim: this.config.embeddingDim || 768 });
+    const engine = getRuvLLMInstance({ embeddingDim: this.config.embeddingDim || getEmbeddingConfig().dimension });
     if (!engine) return null;
 
     try {

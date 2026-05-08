@@ -10,6 +10,22 @@
  * @module browser/AttentionBrowser
  */
 
+/** Lazy-cached default dimension from embedding config (browser-safe). */
+let _defaultDim: number | null = null;
+function getDefaultDim(): number {
+  if (_defaultDim === null) {
+    try {
+      // Dynamic import would be async; use require-style for sync fallback
+      const { getEmbeddingConfig } = require('../config/embedding-config.js');
+      _defaultDim = getEmbeddingConfig().dimension;
+    } catch {
+      // getEmbeddingConfig() failed — absolute fallback (browser env, no fs)
+      _defaultDim = 768;
+    }
+  }
+  return _defaultDim!;
+}
+
 export interface AttentionConfig {
   dimension?: number;
   numHeads?: number;
@@ -37,7 +53,7 @@ export class AttentionBrowser {
 
   constructor(config: AttentionConfig = {}) {
     this.config = {
-      dimension: 384,
+      dimension: getDefaultDim(),
       numHeads: 4,
       blockSize: 64,
       curvature: -1.0,
@@ -83,8 +99,7 @@ export class AttentionBrowser {
       }
 
       // Dynamic import of WASM loader
-      // @ts-ignore - WASM loader generated during build
-      const wasmLoader = await import('../../dist/agentdb.wasm-loader.js');
+      const wasmLoader = await import('../../dist/agentdb.wasm-loader.js' as string);
       this.wasmModule = await wasmLoader.initWASM();
       this.loadingState = 'loaded';
     } catch (error) {
@@ -203,7 +218,7 @@ export class AttentionBrowser {
     keys: Float32Array,
     values: Float32Array
   ): Float32Array {
-    const { dimension = 384 } = this.config;
+    const { dimension = getDefaultDim() } = this.config;
     const seqLen = keys.length / dimension;
     const output = new Float32Array(query.length);
 
@@ -380,7 +395,7 @@ export function createFastAttention(): AttentionBrowser {
  */
 export function createAccurateAttention(): AttentionBrowser {
   return new AttentionBrowser({
-    dimension: 768,
+    dimension: getDefaultDim(),
     numHeads: 8,
     blockSize: 128,
     useWASM: true

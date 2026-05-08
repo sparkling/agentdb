@@ -8,6 +8,10 @@ import chalk from 'chalk';
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import { AttentionConfig, loadAttentionConfig, saveAttentionConfig } from '../lib/attention-config.js';
+import { getEmbeddingConfig } from '../../config/embedding-config.js';
+
+/** Default dimension from embedding config -- evaluated once at module load */
+const _DIM = getEmbeddingConfig().dimension;
 
 // Attention mechanism types
 type AttentionMechanism = 'flash' | 'hyperbolic' | 'sparse' | 'linear' | 'performer';
@@ -95,32 +99,32 @@ function createInitCommand(): Command {
             flash: {
               enabled: true,
               heads: 8,
-              dimension: 384,
+              dimension: _DIM,
               blockSize: 64,
             },
             hyperbolic: {
               enabled: true,
               curvature: -1.0,
               heads: 8,
-              dimension: 384,
+              dimension: _DIM,
             },
             sparse: {
               enabled: true,
               sparsity: 0.9,
               heads: 8,
-              dimension: 384,
+              dimension: _DIM,
             },
             linear: {
               enabled: true,
               kernelSize: 32,
               heads: 8,
-              dimension: 384,
+              dimension: _DIM,
             },
             performer: {
               enabled: true,
               randomFeatures: 256,
               heads: 8,
-              dimension: 384,
+              dimension: _DIM,
             },
           },
           featureFlags: {
@@ -164,7 +168,7 @@ function createComputeCommand(): Command {
     .option('-k, --keys-file <path>', 'Path to keys JSON file')
     .option('-v, --values-file <path>', 'Path to values JSON file')
     .option('--heads <n>', 'Number of attention heads', '8')
-    .option('--dimension <n>', 'Attention dimension', '384')
+    .option('--dimension <n>', 'Attention dimension', String(_DIM))
     .option('-o, --output <path>', 'Output file path')
     .option('--json', 'Output as JSON')
     .action(async (options: AttentionComputeOptions) => {
@@ -203,7 +207,7 @@ function createComputeCommand(): Command {
           keys,
           values,
           parseInt(String(options.heads || '8')),
-          parseInt(String(options.dimension || '384'))
+          parseInt(String(options.dimension || String(_DIM)))
         );
 
         // Save or display results
@@ -396,12 +400,12 @@ async function benchmarkMechanisms(
       const startTime = performance.now();
 
       // Simulate computation
-      const keys = generateRandomKeys(100, 384);
-      const query = Array(384).fill(0).map(() => Math.random());
+      const keys = generateRandomKeys(100, _DIM);
+      const query = Array(_DIM).fill(0).map(() => Math.random());
       const weights = computeAttentionWeights(mechanism, query, keys, 8);
 
       times.push(performance.now() - startTime);
-      memories.push(estimateMemory(100, 384, 8));
+      memories.push(estimateMemory(100, _DIM, 8));
 
       if (verbose && (i + 1) % (iterations / 10) === 0) {
         process.stdout.write('.');
@@ -451,7 +455,7 @@ async function optimizeMechanism(
       optimizedConfig = {
         curvature,
         heads: 8,
-        dimension: 384,
+        dimension: _DIM,
         usePoincareDistance: true,
       };
       performanceGain = Math.abs(curvature) > 0.5 ? 0.15 : 0.08;
@@ -462,7 +466,7 @@ async function optimizeMechanism(
       optimizedConfig = {
         sparsity,
         heads: 8,
-        dimension: 384,
+        dimension: _DIM,
         topK: Math.floor((1 - sparsity) * 100),
       };
       performanceGain = sparsity * 0.3;
@@ -472,7 +476,7 @@ async function optimizeMechanism(
     default:
       optimizedConfig = {
         heads: 8,
-        dimension: 384,
+        dimension: _DIM,
       };
       performanceGain = 0.1;
       memoryReduction = 0.05;
@@ -555,7 +559,7 @@ function computeAttentionWeights(
 
 function applyAttentionWeights(weights: number[][], values: number[][]): number[][] {
   return weights.map(headWeights => {
-    const output = Array(values[0]?.length || 384).fill(0);
+    const output = Array(values[0]?.length || _DIM).fill(0);
     for (let i = 0; i < values.length; i++) {
       for (let j = 0; j < output.length; j++) {
         output[j] += headWeights[i] * (values[i]?.[j] || 0);

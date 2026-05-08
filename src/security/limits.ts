@@ -335,6 +335,11 @@ export const globalResourceTracker = new ResourceTracker();
 
 /**
  * Default rate limiters
+ *
+ * ADR-0069 A2: These are intentionally per-second token-bucket limiters for DB operations,
+ * distinct from the per-minute rate limiters in agentic-flow's security/mcp/sdk modules.
+ * The different granularity is by design — DB ops need sub-second burst control.
+ * Config chain awareness is deferred until agentdb gets its own RuntimeConfig bridge.
  */
 export const rateLimiters = {
   // 100 inserts per second

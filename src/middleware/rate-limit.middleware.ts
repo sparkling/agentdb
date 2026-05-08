@@ -37,6 +37,11 @@ export interface RateLimitConfig {
 
 /**
  * Default rate limit configuration
+ *
+ * ADR-0069 A2: These are intentionally HTTP middleware policies with 15-min/1-hr windows,
+ * distinct from the per-minute rate limiters in agentic-flow's security/mcp/sdk modules.
+ * The different window sizes are by design — HTTP endpoints need longer sliding windows.
+ * Config chain awareness is deferred until agentdb gets its own RuntimeConfig bridge.
  */
 export const RATE_LIMIT_CONFIG = {
   // General API endpoints

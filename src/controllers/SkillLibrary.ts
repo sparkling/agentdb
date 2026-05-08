@@ -14,6 +14,7 @@ import { EmbeddingService } from './EmbeddingService.js';
 import { VectorBackend } from '../backends/VectorBackend.js';
 import type { GraphDatabaseAdapter } from '../backends/graph/GraphDatabaseAdapter.js';
 import { NodeIdMapper } from '../utils/NodeIdMapper.js';
+import { cosineSimilarity } from '../utils/vector-math.js';
 import { QueryCache, type QueryCacheConfig } from '../core/QueryCache.js';
 
 export interface Skill {
@@ -52,12 +53,18 @@ export interface SkillQuery {
   preferRecent?: boolean;
 }
 
+// ADR-0076 A4: Dual-instance guard — prevent duplicate construction
+// when both ControllerRegistry and AgentDBService create this controller
+let _singleton: InstanceType<typeof SkillLibrary> | null = null;
+
 export class SkillLibrary {
   private db: IDatabaseConnection;
   private embedder: EmbeddingService;
   private vectorBackend: VectorBackend | null;
   private graphBackend?: any; // GraphBackend or GraphDatabaseAdapter
   private queryCache: QueryCache;
+
+  static _resetSingleton(): void { _singleton = null; }
 
   constructor(
     db: IDatabaseConnection,
@@ -66,11 +73,85 @@ export class SkillLibrary {
     graphBackend?: any,
     cacheConfig?: QueryCacheConfig
   ) {
+    if (_singleton) {
+      if (process.env.CLAUDE_FLOW_DEBUG) {
+        console.warn(`[${this.constructor.name}] Duplicate construction detected — returning existing instance`);
+      }
+      return _singleton as any;
+    }
+    _singleton = this;
     this.db = db;
     this.embedder = embedder;
     this.vectorBackend = vectorBackend || null;
     this.graphBackend = graphBackend;
     this.queryCache = new QueryCache(cacheConfig);
+    // ADR-0090 B5 skillLibrary fix: mirror pattern from ReasoningBank.ts:135,
+    // LearningSystem.ts, MemoryConsolidation etc. Constructor must create
+    // its own SQLite schema, otherwise `INSERT INTO skills` throws
+    // "no such table: skills" (silent in-memory fallback per ADR-0082).
+    // Schema mirrors `schemas/schema.sql:57-101`. Idempotent.
+    this.initializeSchema();
+  }
+
+  /**
+   * Initialize skills / skill_links / skill_embeddings tables.
+   *
+   * Mirrors `packages/agentdb/src/schemas/schema.sql` lines 57-101 so a
+   * freshly-constructed SkillLibrary can immediately accept
+   * `createSkill()` without requiring an external migration step.
+   *
+   * ADR-0090 B5 (2026-04-15): previously this schema only existed in
+   * `mcp/agentdb-mcp-server.js:71`, a separate standalone path never
+   * reached by the CLI-driven `getController('skills')` code path, so
+   * every CLI skill INSERT silently failed. This mirror restores the
+   * "controller constructs its own tables" invariant documented in
+   * ReasoningBank / LearningSystem / MemoryConsolidation / etc.
+   */
+  private initializeSchema(): void {
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS skills (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT UNIQUE NOT NULL,
+        description TEXT,
+        signature JSON NOT NULL,
+        code TEXT,
+        success_rate REAL DEFAULT 0.0,
+        uses INTEGER DEFAULT 0,
+        avg_reward REAL DEFAULT 0.0,
+        avg_latency_ms INTEGER DEFAULT 0,
+        created_from_episode INTEGER,
+        created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
+        updated_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
+        last_used_at INTEGER,
+        metadata JSON
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_skills_success ON skills(success_rate DESC);
+      CREATE INDEX IF NOT EXISTS idx_skills_uses ON skills(uses DESC);
+      CREATE INDEX IF NOT EXISTS idx_skills_name ON skills(name);
+
+      CREATE TABLE IF NOT EXISTS skill_links (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        parent_skill_id INTEGER NOT NULL,
+        child_skill_id INTEGER NOT NULL,
+        relationship TEXT NOT NULL,
+        weight REAL DEFAULT 1.0,
+        metadata JSON,
+        FOREIGN KEY(parent_skill_id) REFERENCES skills(id) ON DELETE CASCADE,
+        FOREIGN KEY(child_skill_id) REFERENCES skills(id) ON DELETE CASCADE,
+        UNIQUE(parent_skill_id, child_skill_id, relationship)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_skill_links_parent ON skill_links(parent_skill_id);
+      CREATE INDEX IF NOT EXISTS idx_skill_links_child ON skill_links(child_skill_id);
+
+      CREATE TABLE IF NOT EXISTS skill_embeddings (
+        skill_id INTEGER PRIMARY KEY,
+        embedding BLOB NOT NULL,
+        embedding_model TEXT DEFAULT 'all-MiniLM-L6-v2',
+        FOREIGN KEY(skill_id) REFERENCES skills(id) ON DELETE CASCADE
+      );
+    `);
   }
 
   /**
@@ -139,17 +220,35 @@ export class SkillLibrary {
     const text = this.buildSkillText(skill);
     const embedding = await this.embedder.embed(text);
 
-    // Store in VectorBackend with skill metadata (if available)
+    // ADR-0094 Phase 13.2 fix: ALWAYS persist embedding to SQLite
+    // skill_embeddings, regardless of whether a vectorBackend is wired.
+    // Previously only the `else` branch wrote to SQLite — so when the
+    // runtime (AgentDB.initialize) passed an in-memory vectorBackend,
+    // the embedding lived only in that per-process index. A subsequent
+    // CLI invocation had a fresh empty vectorBackend, and the read
+    // path in `retrieveSkills` couldn't find anything. SQLite is the
+    // cross-process truth store (.swarm/memory.db); the vectorBackend
+    // is an accelerator. Mirrors ReflexionMemory.storeEpisode which
+    // already does vectorBackend.insert + storeEmbedding in tandem.
+    this.storeSkillEmbeddingLegacy(skillId, embedding);
+
+    // Also populate the in-memory vectorBackend accelerator if available
     if (this.vectorBackend) {
-      this.vectorBackend.insert(`skill:${skillId}`, embedding, {
-        name: skill.name,
-        description: skill.description,
-        successRate: skill.successRate,
-        avgReward: skill.avgReward,
-      });
-    } else {
-      // Legacy: store in database
-      this.storeSkillEmbeddingLegacy(skillId, embedding);
+      try {
+        this.vectorBackend.insert(
+          `skill:${skillId}`,
+          embedding,
+          {
+            name: skill.name,
+            description: skill.description,
+            successRate: skill.successRate,
+            avgReward: skill.avgReward
+          }
+        );
+      } catch {
+        // vectorBackend insert failed — SQLite already has it, so
+        // retrieveSkillsLegacy will still find this skill on search.
+      }
     }
 
     return skillId;
@@ -253,58 +352,72 @@ export class SkillLibrary {
 
     // Use VectorBackend for semantic search (if available)
     if (this.vectorBackend) {
-      const searchResults = this.vectorBackend.search(queryEmbedding, k * 3);
+      try {
+        const searchResults = this.vectorBackend.search(queryEmbedding, k * 3);
 
-      // Map results back to skill IDs and fetch full skill data
-      const skillsWithSimilarity: (Skill & { similarity: number })[] = [];
+        // ADR-0094 Phase 13.2 fix: when the vectorBackend is empty (e.g.
+        // fresh process, only SQLite is persisted), fall through to the
+        // SQL-based retrieveSkillsLegacy instead of returning []. ADR-0082
+        // forbids silent-empty returns when a fallback path exists.
+        if (!searchResults || searchResults.length === 0) {
+          return this.retrieveSkillsLegacy(query);
+        }
 
-      // Prepare statement ONCE outside loop (better-sqlite3 best practice)
-      const getSkillStmt = this.db.prepare<DatabaseRows.Skill>('SELECT * FROM skills WHERE id = ?');
+        // Map results back to skill IDs and fetch full skill data
+        const skillsWithSimilarity: (Skill & { similarity: number })[] = [];
 
-      for (const result of searchResults) {
-        // Extract skill ID from vector ID (format: "skill:123")
-        const skillId = parseInt(result.id.replace('skill:', ''));
+        // Prepare statement ONCE outside loop (better-sqlite3 best practice)
+        const getSkillStmt = this.db.prepare('SELECT * FROM skills WHERE id = ?');
 
-        // Fetch full skill data from database
-        const row = getSkillStmt.get(skillId);
+        for (const result of searchResults) {
+          // Extract skill ID from vector ID (format: "skill:123")
+          const skillId = parseInt(result.id.replace('skill:', ''));
 
-        if (!row) continue;
+          // Fetch full skill data from database
+          const row = getSkillStmt.get(skillId);
 
-        // Apply filters
-        if (row.success_rate < minSuccessRate) continue;
+          if (!row) continue;
 
-        skillsWithSimilarity.push({
-          id: row.id,
-          name: row.name,
-          description: row.description ?? undefined,
-          signature: JSON.parse(row.signature),
-          code: row.code ?? undefined,
-          successRate: row.success_rate,
-          uses: row.uses,
-          avgReward: row.avg_reward,
-          avgLatencyMs: row.avg_latency_ms,
-          createdFromEpisode: row.created_from_episode ?? undefined,
-          metadata: row.metadata ? JSON.parse(row.metadata) : undefined,
-          similarity: result.similarity,
+          // Apply filters
+          if (row.success_rate < minSuccessRate) continue;
+
+          skillsWithSimilarity.push({
+            id: row.id,
+            name: row.name,
+            description: row.description,
+            signature: JSON.parse(row.signature),
+            code: row.code,
+            successRate: row.success_rate,
+            uses: row.uses,
+            avgReward: row.avg_reward,
+            avgLatencyMs: row.avg_latency_ms,
+            createdFromEpisode: row.created_from_episode,
+            metadata: row.metadata ? JSON.parse(row.metadata) : undefined,
+            similarity: result.similarity
+          });
+        }
+
+        // ADR-0094 Phase 13.2 fix: vectorBackend returned candidates but
+        // none survived the SQLite join (e.g. vectorBackend state is stale
+        // — ids in the in-memory index don't match rows in skills table).
+        // Fall through to SQL similarity search rather than return empty.
+        if (skillsWithSimilarity.length === 0) {
+          return this.retrieveSkillsLegacy(query);
+        }
+
+        // Compute composite scores
+        skillsWithSimilarity.sort((a, b) => {
+          const scoreA = this.computeSkillScore(a);
+          const scoreB = this.computeSkillScore(b);
+          return scoreB - scoreA;
         });
-      }
 
-      // Compute composite scores
-      skillsWithSimilarity.sort((a, b) => {
-        const scoreA = this.computeSkillScore(a);
-        const scoreB = this.computeSkillScore(b);
-        return scoreB - scoreA;
-      });
-
-      const results = skillsWithSimilarity.slice(0, k);
-
-      // Cache the results
-      this.queryCache.set(cacheKey, results);
-      return results;
-    } else {
-      // Legacy: use SQL-based similarity search
-      return this.retrieveSkillsLegacy(query);
+        return skillsWithSimilarity.slice(0, k);
+      } catch { /* vectorBackend search failed — fall through to SQL */ }
     }
+
+    // Legacy: use SQL-based similarity search
+    return this.retrieveSkillsLegacy(query);
   }
 
   /**
@@ -331,11 +444,44 @@ export class SkillLibrary {
 
     // Compute similarities
     const skillsWithSimilarity: (Skill & { similarity: number })[] = [];
+    // ADR-0094 Phase 13.2 fix: pre-embedded legacy fixtures (and skills
+    // created before the embedding write-through fix shipped) have rows
+    // in `skills` but no corresponding `skill_embeddings` row. Previously
+    // we silently skipped them (`if (!row.embedding) continue;`) which
+    // returned [] for every query against such a fixture — an ADR-0082
+    // silent-empty violation. Instead, when the embedding is missing,
+    // fall back to a substring match on name/description/code using the
+    // raw task text so the skill is still retrievable.
+    const taskLower = task.toLowerCase();
     for (const row of rows) {
-      if (!row.embedding) continue;
+      if (!row.embedding) {
+        // No embedding — use text-match similarity as a proxy
+        const haystack = [row.name, row.description ?? '', row.code ?? '']
+          .join('\n')
+          .toLowerCase();
+        const textMatch = haystack.includes(taskLower);
+        if (!textMatch) continue;
+        skillsWithSimilarity.push({
+          id: row.id,
+          name: row.name,
+          description: row.description ?? undefined,
+          signature: JSON.parse(row.signature),
+          code: row.code ?? undefined,
+          successRate: row.success_rate,
+          uses: row.uses,
+          avgReward: row.avg_reward,
+          avgLatencyMs: row.avg_latency_ms,
+          createdFromEpisode: row.created_from_episode ?? undefined,
+          metadata: row.metadata ? JSON.parse(row.metadata) : undefined,
+          // Conservative similarity score: lower than a real vector match
+          // but above zero so the result is ranked and returned.
+          similarity: 0.5,
+        });
+        continue;
+      }
 
       const embedding = new Float32Array(row.embedding.buffer);
-      const similarity = this.cosineSimilarity(queryEmbedding, embedding);
+      const similarity = cosineSimilarity(queryEmbedding, embedding);
 
       skillsWithSimilarity.push({
         id: row.id,
@@ -374,23 +520,6 @@ export class SkillLibrary {
     `);
     const buffer = Buffer.from(embedding.buffer);
     stmt.run(skillId, buffer);
-  }
-
-  /**
-   * Cosine similarity between two vectors
-   */
-  private cosineSimilarity(a: Float32Array, b: Float32Array): number {
-    let dotProduct = 0;
-    let normA = 0;
-    let normB = 0;
-
-    for (let i = 0; i < a.length; i++) {
-      dotProduct += a[i] * b[i];
-      normA += a[i] * a[i];
-      normB += b[i] * b[i];
-    }
-
-    return dotProduct / (Math.sqrt(normA) * Math.sqrt(normB));
   }
 
   /**
@@ -513,71 +642,76 @@ export class SkillLibrary {
     }> = [];
 
     for (const candidate of candidates) {
-      const episodeIds = candidate.episode_ids.split(',').map(Number);
+      try {
+        const episodeIds = candidate.episode_ids.split(',').map(Number);
 
-      // Extract patterns from successful episodes if requested
-      let extractedPatterns: string[] = [];
-      let successIndicators: string[] = [];
-      let enhancedDescription = `Auto-generated skill from successful episodes`;
+        // Extract patterns from successful episodes if requested
+        let extractedPatterns: string[] = [];
+        let successIndicators: string[] = [];
+        let enhancedDescription = `Auto-generated skill from successful episodes`;
 
-      if (extractPatterns) {
-        const patternData = await this.extractPatternsFromEpisodes(episodeIds);
-        extractedPatterns = patternData.commonPatterns;
-        successIndicators = patternData.successIndicators;
+        if (extractPatterns) {
+          const patternData = await this.extractPatternsFromEpisodes(episodeIds);
+          extractedPatterns = patternData.commonPatterns;
+          successIndicators = patternData.successIndicators;
 
-        if (extractedPatterns.length > 0) {
-          enhancedDescription = `Skill learned from ${episodeIds.length} successful episodes. Common patterns: ${extractedPatterns.slice(0, 3).join(', ')}`;
+          if (extractedPatterns.length > 0) {
+            enhancedDescription = `Skill learned from ${episodeIds.length} successful episodes. Common patterns: ${extractedPatterns.slice(0, 3).join(', ')}`;
+          }
+
+          patterns.push({
+            task: candidate.task,
+            commonPatterns: extractedPatterns,
+            successIndicators: successIndicators,
+            avgReward: candidate.avg_reward,
+          });
         }
 
-        patterns.push({
-          task: candidate.task,
-          commonPatterns: extractedPatterns,
-          successIndicators: successIndicators,
-          avgReward: candidate.avg_reward,
-        });
-      }
+        // Check if skill already exists
+        const existing = this.db.prepare('SELECT id FROM skills WHERE name = ?').get(candidate.task);
 
-      // Check if skill already exists
-      const existing = this.db.prepare('SELECT id FROM skills WHERE name = ?').get(candidate.task);
+        if (!existing) {
+          // Create new skill with extracted patterns
+          const skill: Skill = {
+            name: candidate.task,
+            description: enhancedDescription,
+            signature: {
+              inputs: { task: 'string' },
+              outputs: { result: 'any' },
+            },
+            successRate: candidate.success_rate,
+            uses: candidate.attempt_count,
+            avgReward: candidate.avg_reward,
+            avgLatencyMs: candidate.avg_latency ?? 0,
+            createdFromEpisode: candidate.latest_episode_id,
+            metadata: {
+              sourceEpisodes: episodeIds,
+              autoGenerated: true,
+              consolidatedAt: Date.now(),
+              extractedPatterns: extractedPatterns,
+              successIndicators: successIndicators,
+              patternConfidence: this.calculatePatternConfidence(
+                episodeIds.length,
+                candidate.success_rate
+              ),
+            },
+          };
 
-      if (!existing) {
-        // Create new skill with extracted patterns
-        const skill: Skill = {
-          name: candidate.task,
-          description: enhancedDescription,
-          signature: {
-            inputs: { task: 'string' },
-            outputs: { result: 'any' },
-          },
-          successRate: candidate.success_rate,
-          uses: candidate.attempt_count,
-          avgReward: candidate.avg_reward,
-          avgLatencyMs: candidate.avg_latency ?? 0,
-          createdFromEpisode: candidate.latest_episode_id,
-          metadata: {
-            sourceEpisodes: episodeIds,
-            autoGenerated: true,
-            consolidatedAt: Date.now(),
-            extractedPatterns: extractedPatterns,
-            successIndicators: successIndicators,
-            patternConfidence: this.calculatePatternConfidence(
-              episodeIds.length,
-              candidate.success_rate
-            ),
-          },
-        };
-
-        await this.createSkill(skill);
-        created++;
-      } else {
-        // Update existing skill stats
-        this.updateSkillStats(
-          (existing as any).id,
-          candidate.success_rate > 0.5,
-          candidate.avg_reward,
-          candidate.avg_latency ?? 0
-        );
-        updated++;
+          await this.createSkill(skill);
+          created++;
+        } else {
+          // Update existing skill stats
+          this.updateSkillStats(
+            (existing as any).id,
+            candidate.success_rate > 0.5,
+            candidate.avg_reward,
+            candidate.avg_latency ?? 0
+          );
+          updated++;
+        }
+      } catch (error) {
+        // Per-candidate error isolation — one bad candidate doesn't abort the rest
+        console.warn(`[SkillLibrary] Failed to consolidate candidate '${candidate.task}':`, error);
       }
     }
 

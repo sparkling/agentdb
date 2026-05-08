@@ -41,6 +41,7 @@ import * as path from 'path';
 import * as fs from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname } from 'path';
+import { getEmbeddingConfig } from '../config/embedding-config.js';
 
 // ES module equivalent of __dirname
 const __filename = fileURLToPath(import.meta.url);
@@ -224,12 +225,52 @@ function cosineSimilarity(a: Float32Array, b: Float32Array): number {
 // Initialize Database and Controllers
 // ============================================================================
 const dbPath = process.env.AGENTDB_PATH || './agentdb.db';
-const db = await createDatabase(dbPath);
+
+// ADR-0056: Unified backend — RVF primary, SQLite fallback
+const embCfg = getEmbeddingConfig();
+
+// Initialize embedding service (needed before unified DB creation)
+const embeddingService = new EmbeddingService({
+  model: embCfg.model,
+  dimension: embCfg.dimension,
+  provider: embCfg.provider as 'transformers' | 'openai' | 'local',
+});
+await embeddingService.initialize();
+
+// Database: try unified (RVF + SQLite), fall back to SQLite-only
+let db: any;
+try {
+  const { createUnifiedDatabase } = await import('../db-unified.js');
+  const unified = await createUnifiedDatabase(dbPath, embeddingService, {
+    dimensions: embCfg.dimension,
+  });
+  db = unified.getSQLiteDatabase() ?? unified;
+  console.error('✅ Unified database backend loaded (RVF + SQLite)');
+} catch {
+  // Unified not available — pure SQLite fallback
+  db = await createDatabase(dbPath);
+  console.error('ℹ️  Using SQLite-only database backend (unified not available)');
+}
 
 // Configure for performance
 db.pragma('journal_mode = WAL');
+db.pragma('busy_timeout = 5000'); // ADR-0069 A1: required with WAL mode
 db.pragma('synchronous = NORMAL');
 db.pragma('cache_size = -64000');
+
+// Vector backend: auto-detect best available (RuVector > RVF > HNSWLib > brute-force)
+let vectorBackend: any = null;
+try {
+  const { createBackend } = await import('../backends/factory.js');
+  vectorBackend = await createBackend('auto', {
+    dimension: embCfg.dimension,
+    metric: 'cosine',
+  });
+  console.error('✅ Vector backend loaded:', vectorBackend?.constructor?.name || 'auto');
+} catch {
+  // No vector backend — controllers use brute-force SQL fallback
+  console.error('ℹ️  No vector backend available — using brute-force SQL fallback');
+}
 
 // Initialize schema automatically on server start using SQL files
 const schemaPath = path.join(__dirname, '../schemas/schema.sql');
@@ -255,23 +296,39 @@ try {
   initializeSchema(db);
 }
 
-// Initialize embedding service
-const embeddingService = new EmbeddingService({
-  model: 'Xenova/all-MiniLM-L6-v2',
-  dimension: 384,
-  provider: 'transformers'
-});
-await embeddingService.initialize();
+// ADR-0056: Branch tables for COW operations
+db.exec(`
+  CREATE TABLE IF NOT EXISTS branches (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE,
+    parent_id TEXT,
+    created_at INTEGER DEFAULT (strftime('%s','now')),
+    status TEXT DEFAULT 'active',
+    metadata TEXT
+  );
+  CREATE TABLE IF NOT EXISTS branch_entries (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    branch_id TEXT NOT NULL,
+    table_name TEXT NOT NULL,
+    original_id INTEGER,
+    content TEXT,
+    embedding BLOB,
+    created_at INTEGER DEFAULT (strftime('%s','now')),
+    FOREIGN KEY (branch_id) REFERENCES branches(id) ON DELETE CASCADE
+  );
+`);
 
 // Initialize all controllers
+// ADR-0056: pass vectorBackend to controllers that support it
+const reflexion = new ReflexionMemory(db, embeddingService, vectorBackend);
+const skills = new SkillLibrary(db, embeddingService, vectorBackend);
+const causalRecall = new CausalRecall(db, embeddingService, vectorBackend);
+const reasoningBank = new ReasoningBank(db, embeddingService, vectorBackend);
+// These don't take vectorBackend:
 const causalGraph = new CausalMemoryGraph(db);
-const reflexion = new ReflexionMemory(db, embeddingService);
-const skills = new SkillLibrary(db, embeddingService);
-const causalRecall = new CausalRecall(db, embeddingService);
 const learner = new NightlyLearner(db, embeddingService);
 const learningSystem = new LearningSystem(db, embeddingService);
 const batchOps = new BatchOperations(db, embeddingService);
-const reasoningBank = new ReasoningBank(db, embeddingService);
 const caches = new MCPToolCaches();
 
 // ============================================================================
@@ -878,6 +935,49 @@ const tools = [
         },
       },
       required: ['patterns'],
+    },
+  },
+
+  // ==========================================================================
+  // ADR-0056: BRANCH TOOLS (COW operations)
+  // ==========================================================================
+  {
+    name: 'agentdb_branch_create',
+    description: 'Create a named COW branch of the current database state for A/B experimentation',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        branch_name: { type: 'string', description: 'Branch name (must be unique)' },
+        parent_branch: { type: 'string', description: 'Parent branch ID (omit for root)' },
+      },
+      required: ['branch_name'],
+    },
+  },
+  {
+    name: 'agentdb_branch_query',
+    description: 'Query a branch — search overlay first, then parent. Also supports status queries.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        branch_id: { type: 'string', description: 'Branch ID' },
+        action: { type: 'string', enum: ['search', 'status', 'list'], description: 'Query action (default: status)' },
+        query: { type: 'string', description: 'Search query (for action=search)' },
+        k: { type: 'number', description: 'Max results (default: 5)' },
+      },
+      required: ['branch_id'],
+    },
+  },
+  {
+    name: 'agentdb_branch_merge',
+    description: 'Atomically merge a branch into its parent. Copies overlay entries and deletes branch.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        branch_id: { type: 'string', description: 'Branch ID to merge' },
+        strategy: { type: 'string', enum: ['overwrite', 'skip'], description: 'Merge strategy (default: overwrite)' },
+        delete_after: { type: 'boolean', description: 'Delete branch after merge (default: true)' },
+      },
+      required: ['branch_id'],
     },
   },
 ];
@@ -2260,6 +2360,126 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         };
       }
 
+      // ======================================================================
+      // ADR-0056: BRANCH TOOLS (COW operations)
+      // ======================================================================
+      case 'agentdb_branch_create': {
+        const branchName = args.branch_name as string;
+        const parentId = (args.parent_branch as string) || null;
+        const branchId = `branch_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+
+        try {
+          const stmt = db.prepare('INSERT INTO branches (id, name, parent_id) VALUES (?, ?, ?)');
+          stmt.run(branchId, branchName, parentId);
+          stmt.finalize();
+          return { content: [{ type: 'text', text: JSON.stringify({ success: true, branch_id: branchId, name: branchName }) }] };
+        } catch (error: any) {
+          if (error.message?.includes('UNIQUE')) {
+            return { content: [{ type: 'text', text: JSON.stringify({ success: false, error: `Branch '${branchName}' already exists` }) }] };
+          }
+          return { content: [{ type: 'text', text: JSON.stringify({ success: false, error: error.message }) }] };
+        }
+      }
+
+      case 'agentdb_branch_query': {
+        const branchId = args.branch_id as string;
+        const action = (args.action as string) || 'status';
+
+        try {
+          if (action === 'list') {
+            const stmt = db.prepare('SELECT id, name, parent_id, created_at, status, (SELECT COUNT(*) FROM branch_entries WHERE branch_id = branches.id) as entry_count FROM branches WHERE status = ?');
+            const branches = stmt.all('active');
+            stmt.finalize();
+            return { content: [{ type: 'text', text: JSON.stringify({ success: true, branches }) }] };
+          }
+
+          if (action === 'status') {
+            const stmt = db.prepare('SELECT id, name, parent_id, created_at, status, metadata FROM branches WHERE id = ? OR name = ?');
+            const branch = stmt.get(branchId, branchId);
+            stmt.finalize();
+            if (!branch) return { content: [{ type: 'text', text: JSON.stringify({ success: false, error: 'Branch not found' }) }] };
+
+            const countStmt = db.prepare('SELECT COUNT(*) as count FROM branch_entries WHERE branch_id = ?');
+            const { count } = countStmt.get(branch.id);
+            countStmt.finalize();
+
+            return { content: [{ type: 'text', text: JSON.stringify({ success: true, ...branch, entry_count: count }) }] };
+          }
+
+          if (action === 'search') {
+            const query = args.query as string;
+            const k = (args.k as number) || 5;
+            // Search branch overlay first
+            const branchStmt = db.prepare('SELECT content, created_at FROM branch_entries WHERE branch_id = ? ORDER BY created_at DESC LIMIT ?');
+            const branchResults = branchStmt.all(branchId, k);
+            branchStmt.finalize();
+
+            return { content: [{ type: 'text', text: JSON.stringify({ success: true, results: branchResults, source: 'branch_overlay' }) }] };
+          }
+
+          return { content: [{ type: 'text', text: JSON.stringify({ success: false, error: `Unknown action: ${action}` }) }] };
+        } catch (error: any) {
+          return { content: [{ type: 'text', text: JSON.stringify({ success: false, error: error.message }) }] };
+        }
+      }
+
+      case 'agentdb_branch_merge': {
+        const branchId = args.branch_id as string;
+        const strategy = (args.strategy as string) || 'overwrite';
+        const deleteAfter = args.delete_after !== false;
+
+        try {
+          // Verify branch exists
+          const branchStmt = db.prepare('SELECT id, name, status FROM branches WHERE id = ? OR name = ?');
+          const branch = branchStmt.get(branchId, branchId);
+          branchStmt.finalize();
+          if (!branch) return { content: [{ type: 'text', text: JSON.stringify({ success: false, error: 'Branch not found' }) }] };
+          if (branch.status === 'merged') return { content: [{ type: 'text', text: JSON.stringify({ success: false, error: 'Branch already merged' }) }] };
+
+          // Count entries to merge
+          const countStmt = db.prepare('SELECT COUNT(*) as count FROM branch_entries WHERE branch_id = ?');
+          const { count } = countStmt.get(branch.id);
+          countStmt.finalize();
+
+          // Atomic merge within transaction
+          const merge = db.transaction(() => {
+            // Copy branch entries to episodes table
+            const entries = db.prepare('SELECT table_name, content, embedding FROM branch_entries WHERE branch_id = ?').all(branch.id);
+
+            let merged = 0;
+            for (const entry of entries) {
+              if (entry.table_name === 'episodes' && entry.content) {
+                const insertStmt = db.prepare('INSERT INTO episodes (task, input, output, reward, success, metadata, created_at) VALUES (?, ?, ?, ?, ?, ?, strftime(\'%s\',\'now\'))');
+                try {
+                  const data = JSON.parse(entry.content);
+                  insertStmt.run(data.task || '', data.input || '', data.output || '', data.reward || 0, data.success ? 1 : 0, entry.content);
+                  merged++;
+                } catch { /* skip malformed entries */ }
+                insertStmt.finalize();
+              }
+            }
+
+            // Mark branch as merged
+            const updateStmt = db.prepare('UPDATE branches SET status = ? WHERE id = ?');
+            updateStmt.run('merged', branch.id);
+            updateStmt.finalize();
+
+            // Optionally delete branch entries
+            if (deleteAfter) {
+              db.prepare('DELETE FROM branch_entries WHERE branch_id = ?').run(branch.id);
+            }
+
+            return merged;
+          });
+
+          const mergedCount = merge();
+
+          return { content: [{ type: 'text', text: JSON.stringify({ success: true, branch: branch.name, entries_merged: mergedCount, total_entries: count, deleted: deleteAfter }) }] };
+        } catch (error: any) {
+          return { content: [{ type: 'text', text: JSON.stringify({ success: false, error: error.message }) }] };
+        }
+      }
+
       default:
         throw new Error(`Unknown tool: ${name}`);
     }
@@ -2283,11 +2503,11 @@ async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
 
-  console.error('🚀 AgentDB MCP Server v2.0.0 running on stdio');
-  console.error('📦 32 tools available (5 core + 9 frontier + 10 learning + 5 AgentDB + 3 batch ops)');
+  console.error('🚀 AgentDB MCP Server v2.1.0 running on stdio');
+  console.error('📦 35 tools available (5 core + 9 frontier + 10 learning + 5 AgentDB + 3 batch ops + 3 branch)');
   console.error('🧠 Embedding service initialized');
   console.error('🎓 Learning system ready (9 RL algorithms)');
-  console.error('⚡ NEW v2.0: Batch operations (3-4x faster), format parameters, enhanced validation');
+  console.error('⚡ NEW v2.1: Unified backend (RVF + SQLite), branch COW tools, vector backend auto-detect');
   console.error('🔬 Features: transfer learning, XAI explanations, reward shaping, intelligent caching');
 
   // Keep the process alive - the StdioServerTransport handles stdin/stdout

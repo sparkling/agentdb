@@ -12,9 +12,11 @@
  * - SIMD optimizations when available
  */
 
-import { fileURLToPath } from 'url';
-import { dirname, join, resolve } from 'path';
+import { cosineSimilarity as sharedCosineSimilarity } from '../utils/vector-math.js';
+import type { AttentionService } from './AttentionService.js';
+import { resolve, dirname, join } from 'path';
 import { existsSync } from 'fs';
+import { fileURLToPath } from 'url';
 
 // Database type from db-fallback
 type Database = any;
@@ -33,6 +35,8 @@ export interface VectorSearchConfig {
   enableSIMD: boolean;
   batchSize: number;
   indexThreshold: number; // Build ANN index when vectors exceed this
+  /** Enable attention-enhanced search (ADR-064). Default: true */
+  useAttention?: boolean;
 }
 
 export interface VectorSearchResult {
@@ -57,7 +61,7 @@ export class WASMVectorSearch {
   private wasmAvailable: boolean = false;
   private simdAvailable: boolean = false;
   private vectorIndex: VectorIndex | null = null;
-  private wasmInitPromise: Promise<void> | null = null;
+  private attentionService: AttentionService | null = null;
 
   constructor(db: Database, config?: Partial<VectorSearchConfig>) {
     this.db = db;
@@ -66,6 +70,7 @@ export class WASMVectorSearch {
       enableSIMD: true,
       batchSize: 100,
       indexThreshold: 1000,
+      useAttention: true,
       ...config,
     };
 
@@ -74,96 +79,37 @@ export class WASMVectorSearch {
   }
 
   /**
-   * Wait for WASM initialization to complete
+   * Set the AttentionService for attention-enhanced search (ADR-064).
    */
-  async waitForInit(): Promise<boolean> {
-    if (this.wasmInitPromise) {
-      await this.wasmInitPromise;
-    }
-    return this.wasmAvailable;
+  setAttentionService(svc: AttentionService): void {
+    this.attentionService = svc;
   }
 
   /**
-   * Get the directory of the current module
-   */
-  private getCurrentModuleDir(): string {
-    try {
-      // ESM context - use import.meta.url if available
-      if (typeof import.meta !== 'undefined' && import.meta.url) {
-        return dirname(fileURLToPath(import.meta.url));
-      }
-    } catch {
-      // Fallback for CJS context
-    }
-
-    // CommonJS context or fallback
-    if (typeof __dirname !== 'undefined') {
-      return __dirname;
-    }
-
-    // Last resort: use process.cwd()
-    return process.cwd();
-  }
-
-  /**
-   * Build list of potential WASM module paths
+   * Get search paths for WASM module resolution.
    */
   private getWASMSearchPaths(): string[] {
-    const currentDir = this.getCurrentModuleDir();
-    const moduleName = 'reasoningbank_wasm.js';
-
-    // Build a comprehensive list of potential paths
-    const searchPaths: string[] = [];
-
-    // 1. Environment variable override (highest priority)
-    if (process.env.AGENTDB_WASM_PATH) {
-      searchPaths.push(join(process.env.AGENTDB_WASM_PATH, moduleName));
-    }
-
-    // 2. Relative to current file (src/controllers -> wasm paths)
-    // From src/controllers/WASMVectorSearch.ts up to project roots
-    searchPaths.push(
-      // Direct path in agentic-flow package
-      resolve(currentDir, '..', '..', '..', 'agentic-flow', 'wasm', 'reasoningbank', moduleName),
-      // From packages/agentdb to workspace root
-      resolve(currentDir, '..', '..', '..', '..', 'agentic-flow', 'wasm', 'reasoningbank', moduleName),
-      // Monorepo structure: packages/agentdb -> packages/agentic-flow
-      resolve(currentDir, '..', '..', '..', 'agentic-flow', 'wasm', 'reasoningbank', moduleName),
-    );
-
-    // 3. From dist directory (compiled output)
-    searchPaths.push(
-      resolve(currentDir, '..', '..', '..', '..', 'agentic-flow', 'wasm', 'reasoningbank', moduleName),
-    );
-
-    // 4. Relative to process.cwd() (package root)
-    searchPaths.push(
-      resolve(process.cwd(), 'wasm', 'reasoningbank', moduleName),
-      resolve(process.cwd(), 'node_modules', '@ruvector', 'wasm', moduleName),
-      resolve(process.cwd(), '..', 'agentic-flow', 'wasm', 'reasoningbank', moduleName),
-    );
-
-    // 5. Workspace-level paths (for monorepo setups)
-    searchPaths.push(
-      '/workspaces/agentic-flow/agentic-flow/wasm/reasoningbank/' + moduleName,
-      '/workspaces/agentic-flow/packages/agentic-flow/wasm/reasoningbank/' + moduleName,
-    );
-
-    // 6. Check for installed npm package
+    const paths: string[] = [];
     try {
-      const npmPath = require.resolve('@ruvector/wasm/reasoningbank_wasm.js');
-      if (npmPath) {
-        searchPaths.unshift(npmPath); // Prioritize npm package
-      }
+      const thisDir = dirname(fileURLToPath(import.meta.url));
+      paths.push(
+        join(thisDir, '..', '..', 'wasm', 'reasoning_bank_bg.wasm'),
+        join(thisDir, '..', 'wasm', 'reasoning_bank_bg.wasm'),
+        join(thisDir, 'reasoning_bank_bg.wasm'),
+      );
     } catch {
-      // @ruvector/wasm not installed as npm package
+      // import.meta.url unavailable in some contexts
     }
-
-    return searchPaths;
+    // Check node_modules paths
+    paths.push(
+      resolve('node_modules', '@sparkleideas', 'agentdb', 'wasm', 'reasoning_bank_bg.wasm'),
+      resolve('node_modules', 'agentdb', 'wasm', 'reasoning_bank_bg.wasm'),
+    );
+    return paths;
   }
 
   /**
-   * Initialize WASM module with robust path resolution
+   * Initialize WASM module
    */
   private async initializeWASM(): Promise<void> {
     if (!this.config.enableWASM) {
@@ -259,37 +205,10 @@ export class WASMVectorSearch {
 
   /**
    * Calculate cosine similarity between two vectors (optimized)
+   * Delegates to shared vector-math utility with 4x loop unrolling.
    */
   cosineSimilarity(a: Float32Array, b: Float32Array): number {
-    if (a.length !== b.length) {
-      throw new Error('Vectors must have same length');
-    }
-
-    // Standard calculation with loop unrolling
-    let dotProduct = 0;
-    let normA = 0;
-    let normB = 0;
-
-    // Unroll loop for better performance
-    const len = a.length;
-    const remainder = len % 4;
-    const loopEnd = len - remainder;
-
-    for (let i = 0; i < loopEnd; i += 4) {
-      dotProduct += a[i] * b[i] + a[i+1] * b[i+1] + a[i+2] * b[i+2] + a[i+3] * b[i+3];
-      normA += a[i] * a[i] + a[i+1] * a[i+1] + a[i+2] * a[i+2] + a[i+3] * a[i+3];
-      normB += b[i] * b[i] + b[i+1] * b[i+1] + b[i+2] * b[i+2] + b[i+3] * b[i+3];
-    }
-
-    // Handle remainder
-    for (let i = loopEnd; i < len; i++) {
-      dotProduct += a[i] * b[i];
-      normA += a[i] * a[i];
-      normB += b[i] * b[i];
-    }
-
-    const denom = Math.sqrt(normA) * Math.sqrt(normB);
-    return denom === 0 ? 0 : dotProduct / denom;
+    return sharedCosineSimilarity(a, b);
   }
 
   /**
@@ -426,6 +345,85 @@ export class WASMVectorSearch {
     // Sort by similarity and take top k
     results.sort((a, b) => b.similarity - a.similarity);
     return results.slice(0, k);
+  }
+
+  /**
+   * Attention-enhanced search (ADR-064 Phase 1).
+   * Combines cosine similarity with Flash Attention scores for improved relevance.
+   *
+   * @param query      - Query vector
+   * @param vectors    - Corpus of vectors with IDs and optional metadata
+   * @param topK       - Number of results to return
+   * @param useAttention - Override config to enable/disable attention scoring
+   */
+  async searchWithAttention(
+    query: number[],
+    vectors: Array<{ id: string; vector: number[]; metadata?: any }>,
+    topK: number = 10,
+    useAttention?: boolean
+  ): Promise<Array<{ id: string; score: number; metadata?: any }>> {
+    const doAttention = useAttention ?? this.config.useAttention ?? true;
+
+    if (!doAttention || !this.attentionService) {
+      return this.searchBasic(query, vectors, topK);
+    }
+
+    // Compute cosine similarities
+    const queryArr = new Float32Array(query);
+    const cosineSims = vectors.map(v => ({
+      id: v.id,
+      cosine: this.cosineSimilarity(queryArr, new Float32Array(v.vector)),
+      metadata: v.metadata,
+    }));
+
+    // Apply Flash Attention for relevance boost
+    let attentionScores: number[];
+    try {
+      const keys = vectors.map(v => v.vector);
+      const values = vectors.map(v => v.vector);
+      attentionScores = await this.attentionService.applyFlashAttention(
+        query, keys, values, { headCount: 8 }
+      );
+    } catch {
+      // If attention fails, fall back to pure cosine
+      return cosineSims
+        .sort((a, b) => b.cosine - a.cosine)
+        .slice(0, topK)
+        .map(r => ({ id: r.id, score: r.cosine, metadata: r.metadata }));
+    }
+
+    // Combine cosine similarity (70%) + attention weight (30%)
+    const results = cosineSims.map((r, i) => {
+      const attWeight = i < attentionScores.length ? Math.abs(attentionScores[i]) : 0;
+      return {
+        id: r.id,
+        score: r.cosine * 0.7 + attWeight * 0.3,
+        metadata: r.metadata,
+      };
+    });
+
+    return results
+      .sort((a, b) => b.score - a.score)
+      .slice(0, topK);
+  }
+
+  /**
+   * Basic cosine-only search (no attention).
+   */
+  private searchBasic(
+    query: number[],
+    vectors: Array<{ id: string; vector: number[]; metadata?: any }>,
+    topK: number
+  ): Array<{ id: string; score: number; metadata?: any }> {
+    const queryArr = new Float32Array(query);
+    const results = vectors.map(v => ({
+      id: v.id,
+      score: this.cosineSimilarity(queryArr, new Float32Array(v.vector)),
+      metadata: v.metadata,
+    }));
+    return results
+      .sort((a, b) => b.score - a.score)
+      .slice(0, topK);
   }
 
   /**

@@ -220,6 +220,13 @@ export class RuVectorLearning {
   }
 
   /**
+   * Check if GNN layer is initialized and ready for use
+   */
+  isInitialized(): boolean {
+    return this.initialized;
+  }
+
+  /**
    * Get current state
    */
   getState(): {

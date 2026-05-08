@@ -50,6 +50,11 @@ export class ModelCacheLoader {
       if (fs.existsSync(modelDir)) {
         return { localPath: envPath, fromBundle: false };
       }
+      // Fallback: check model ID directly (e.g. nomic-ai/nomic-embed-text-v1.5)
+      const directModelDir = path.join(envPath, modelId);
+      if (fs.existsSync(directModelDir)) {
+        return { localPath: envPath, fromBundle: false };
+      }
     }
 
     // 2. Check for bundled .rvf
@@ -60,13 +65,22 @@ export class ModelCacheLoader {
     }
 
     // 3. Check existing transformers.js cache locations
+    //    Includes persistent cache at /tmp/agentdb-models (survives across processes)
+    //    and user home cache (survives across npm installs)
     const cacheDirs = [
       path.join(process.cwd(), 'node_modules', '@xenova', 'transformers', '.cache'),
       path.join(os.homedir(), '.cache', 'huggingface', 'hub'),
+      path.join(os.homedir(), '.cache', 'agentdb-models'),
     ];
     for (const cacheDir of cacheDirs) {
+      // Check Xenova-prefixed path first (legacy)
       const onnxPath = path.join(cacheDir, 'Xenova', modelId, 'onnx', 'model_quantized.onnx');
       if (fs.existsSync(onnxPath)) {
+        return { localPath: cacheDir, fromBundle: false };
+      }
+      // Fallback: check model ID directly (e.g. nomic-ai/nomic-embed-text-v1.5)
+      const directOnnxPath = path.join(cacheDir, modelId, 'onnx', 'model_quantized.onnx');
+      if (fs.existsSync(directOnnxPath)) {
         return { localPath: cacheDir, fromBundle: false };
       }
     }
@@ -74,6 +88,11 @@ export class ModelCacheLoader {
     // 4. Check previously extracted temp dir
     const tempOnnx = path.join(TEMP_MODEL_DIR, 'Xenova', modelId, 'onnx', 'model_quantized.onnx');
     if (fs.existsSync(tempOnnx)) {
+      return { localPath: TEMP_MODEL_DIR, fromBundle: true };
+    }
+    // Fallback: check model ID directly in temp dir
+    const tempDirectOnnx = path.join(TEMP_MODEL_DIR, modelId, 'onnx', 'model_quantized.onnx');
+    if (fs.existsSync(tempDirectOnnx)) {
       return { localPath: TEMP_MODEL_DIR, fromBundle: true };
     }
 

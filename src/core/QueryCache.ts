@@ -60,6 +60,7 @@ export class QueryCache {
   private config: Required<QueryCacheConfig>;
   private cache: Map<string, CacheEntry>;
   private accessOrder: string[]; // LRU tracking
+  private _cleanupTimer: ReturnType<typeof setInterval> | null = null;
   private stats: {
     hits: number;
     misses: number;
@@ -81,6 +82,12 @@ export class QueryCache {
       misses: 0,
       evictions: 0,
     };
+
+    // Background cleanup to evict expired entries in long-running daemons
+    this._cleanupTimer = setInterval(() => this.pruneExpired(), 60_000);
+    if (this._cleanupTimer.unref) {
+      this._cleanupTimer.unref();
+    }
   }
 
   /**
@@ -301,6 +308,17 @@ export class QueryCache {
     if (!enabled) {
       this.clear();
     }
+  }
+
+  /**
+   * Destroy the cache, clearing the background cleanup timer
+   */
+  destroy(): void {
+    if (this._cleanupTimer) {
+      clearInterval(this._cleanupTimer);
+      this._cleanupTimer = null;
+    }
+    this.clear();
   }
 
   /**

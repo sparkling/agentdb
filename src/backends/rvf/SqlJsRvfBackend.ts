@@ -111,6 +111,7 @@ export class SqlJsRvfBackend implements VectorBackendAsync {
     }
 
     this.db = fileBuffer ? new SQL.Database(fileBuffer) : new SQL.Database();
+    this.db.run('PRAGMA journal_mode=DELETE'); // ADR-0080: prevent WAL — sql.js can't read WAL journals
     this.createSchema();
     this.rebuildCache();
     this.initialized = true;
@@ -197,6 +198,7 @@ export class SqlJsRvfBackend implements VectorBackendAsync {
       this.db.close();
     }
     this.db = new SQL.Database(buffer);
+    this.db.run('PRAGMA journal_mode=DELETE'); // ADR-0080: prevent WAL — sql.js can't read WAL journals
     this.createSchema(); // ensure schema exists
     this.rebuildCache();
     this.storagePath = loadPath;

@@ -38,6 +38,7 @@ export class ToolCache<T = any> {
   private hits: number;
   private misses: number;
   private evictions: number;
+  private _cleanupTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(maxSize = 1000, defaultTTLMs = 60000) {
     this.cache = new Map();
@@ -46,6 +47,12 @@ export class ToolCache<T = any> {
     this.hits = 0;
     this.misses = 0;
     this.evictions = 0;
+
+    // Background cleanup to evict expired entries in long-running daemons
+    this._cleanupTimer = setInterval(() => this.evictExpired(), 60_000);
+    if (this._cleanupTimer.unref) {
+      this._cleanupTimer.unref();
+    }
   }
 
   /**
@@ -177,6 +184,17 @@ export class ToolCache<T = any> {
       this.cache.delete(lruKey);
       this.evictions++;
     }
+  }
+
+  /**
+   * Destroy the cache, clearing the background cleanup timer
+   */
+  destroy(): void {
+    if (this._cleanupTimer) {
+      clearInterval(this._cleanupTimer);
+      this._cleanupTimer = null;
+    }
+    this.clear();
   }
 
   /**
@@ -313,6 +331,16 @@ export class MCPToolCaches {
     this.patterns.clear();
     this.searches.clear();
     this.metrics.clear();
+  }
+
+  /**
+   * Destroy all caches, clearing background cleanup timers
+   */
+  destroy(): void {
+    this.stats.destroy();
+    this.patterns.destroy();
+    this.searches.destroy();
+    this.metrics.destroy();
   }
 
   /**

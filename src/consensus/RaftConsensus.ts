@@ -1,3 +1,4 @@
+// TODO: ADR required before activation — ADR-0161 lift, no production wiring
 /**
  * RaftConsensus - Fault-Tolerant Distributed Consensus
  *

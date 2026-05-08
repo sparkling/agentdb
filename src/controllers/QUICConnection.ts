@@ -1,3 +1,4 @@
+// TODO: ADR required before activation — ADR-0161 lift, no production wiring
 /**
  * QUICConnection - Enhanced QUIC Connection with 0-RTT, BBR, and Migration
  *

@@ -1,3 +1,4 @@
+// TODO: ADR required before activation — ADR-0161 lift, no production wiring
 /**
  * QUICConnectionPool - Connection Pooling for QUIC Protocol
  *

@@ -1,3 +1,4 @@
+// TODO: ADR required before activation — ADR-0161 lift, no production wiring
 /**
  * QUICStreamManager - Stream Multiplexing for QUIC Connections
  *

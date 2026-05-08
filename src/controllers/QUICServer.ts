@@ -78,11 +78,13 @@ export class QUICServer {
     this.db = db;
     this.config = {
       host: config.host || '0.0.0.0',
-      port: config.port || 4433,
+      port: config.port || parseInt(process.env.QUIC_PORT || '') || 4433, // ADR-0069 H6: config-chain ports
       maxConnections: config.maxConnections || 100,
       authToken: config.authToken || '',
+      // ADR-0069 A2: config-chain rate limits — align default with other per-minute limiters (100/min).
+      // Config chain is loaded in agentic-flow; agentdb reads from constructor config only.
       rateLimit: config.rateLimit || {
-        maxRequestsPerMinute: 60,
+        maxRequestsPerMinute: 100,
         maxBytesPerMinute: 10 * 1024 * 1024, // 10MB
       },
       tlsConfig: config.tlsConfig || {},

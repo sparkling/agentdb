@@ -26,7 +26,7 @@
     "gpu-acceleration"
   ],
   "dependencies": {
-    "agentdb": "3.0.0-alpha.14-patch.1",
+    "agentdb": "*",
     "onnxruntime-node": "^1.20.1",
     "@xenova/transformers": "^2.17.2",
     "commander": "^12.1.0",

@@ -48,10 +48,7 @@ export class MultiHeadAttention {
 
     try {
       // Create native Rust instance
-      this.nativeInstance = new nativeAttention.MultiHeadAttention({
-        dim: this.hiddenDim,
-        numHeads: this.numHeads
-      });
+      this.nativeInstance = new nativeAttention.MultiHeadAttention(this.hiddenDim, this.numHeads) /* ADR-0161: positional args for installed @ruvector/attention version */;
     } catch (error: any) {
       throw new Error(`Failed to initialize native MultiHeadAttention: ${error.message}`);
     }
@@ -161,9 +158,7 @@ export class LinearAttention {
     try {
       // LinearAttention constructor: (hiddenDim, seqLen)
       // We'll use hiddenDim for both since seqLen varies per forward call
-      this.nativeInstance = new nativeAttention.LinearAttention({
-        dim: this.hiddenDim
-      });
+      this.nativeInstance = new nativeAttention.LinearAttention(this.hiddenDim, this.hiddenDim) /* ADR-0161: positional args */;
     } catch (error: any) {
       throw new Error(`Failed to initialize native LinearAttention: ${error.message}`);
     }
@@ -316,7 +311,7 @@ export function scaledDotProductAttention(
  */
 export function isNativeAttentionAvailable(): boolean {
   try {
-    const test = new nativeAttention.MultiHeadAttention({ dim: 128, numHeads: 4 });
+    const test = new nativeAttention.MultiHeadAttention(128, 4) /* ADR-0161: positional args */;
     return true;
   } catch {
     return false;

@@ -2364,8 +2364,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       // ADR-0056: BRANCH TOOLS (COW operations)
       // ======================================================================
       case 'agentdb_branch_create': {
-        const branchName = args.branch_name as string;
-        const parentId = (args.parent_branch as string) || null;
+        const branchName = args!.branch_name as string;
+        const parentId = (args!.parent_branch as string) || null;
         const branchId = `branch_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 
         try {
@@ -2382,8 +2382,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'agentdb_branch_query': {
-        const branchId = args.branch_id as string;
-        const action = (args.action as string) || 'status';
+        const branchId = args!.branch_id as string;
+        const action = (args!.action as string) || 'status';
 
         try {
           if (action === 'list') {
@@ -2407,8 +2407,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           }
 
           if (action === 'search') {
-            const query = args.query as string;
-            const k = (args.k as number) || 5;
+            const query = args!.query as string;
+            const k = (args!.k as number) || 5;
             // Search branch overlay first
             const branchStmt = db.prepare('SELECT content, created_at FROM branch_entries WHERE branch_id = ? ORDER BY created_at DESC LIMIT ?');
             const branchResults = branchStmt.all(branchId, k);
@@ -2424,9 +2424,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'agentdb_branch_merge': {
-        const branchId = args.branch_id as string;
-        const strategy = (args.strategy as string) || 'overwrite';
-        const deleteAfter = args.delete_after !== false;
+        const branchId = args!.branch_id as string;
+        const strategy = (args!.strategy as string) || 'overwrite';
+        const deleteAfter = args!.delete_after !== false;
 
         try {
           // Verify branch exists

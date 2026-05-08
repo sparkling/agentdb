@@ -78,7 +78,8 @@ let _singleton: InstanceType<typeof LearningSystem> | null = null;
 
 export class LearningSystem {
   private db: Database;
-  private embedder: EmbeddingService;
+  // ADR-0076 A4: definite-assignment due to _singleton early-return pattern in ctor
+  private embedder!: EmbeddingService;
   private activeSessions: Map<string, LearningSession> = new Map();
 
   // Phase 2: RuVector GNN and Sona integration

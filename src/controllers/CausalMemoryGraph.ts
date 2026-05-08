@@ -105,12 +105,13 @@ export interface CausalQuery {
 let _singleton: InstanceType<typeof CausalMemoryGraph> | null = null;
 
 export class CausalMemoryGraph {
-  private db: IDatabaseConnection;
+  // ADR-0076 A4: definite-assignment due to _singleton early-return pattern in ctor
+  private db!: IDatabaseConnection;
   private graphBackend?: any; // GraphBackend or GraphDatabaseAdapter
   private attentionService?: AttentionService;
   private embedder?: EmbeddingService;
   private vectorBackend?: VectorBackend;
-  private config: CausalMemoryGraphConfig;
+  private config!: CausalMemoryGraphConfig;
 
   /**
    * Constructor supports both v1 (legacy) and v2 (with attention) modes

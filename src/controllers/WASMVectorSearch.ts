@@ -59,6 +59,7 @@ export class WASMVectorSearch {
   private config: VectorSearchConfig;
   private wasmModule: any;
   private wasmAvailable: boolean = false;
+  private wasmInitPromise: Promise<void> | null = null;
   private simdAvailable: boolean = false;
   private vectorIndex: VectorIndex | null = null;
   private attentionService: AttentionService | null = null;
@@ -377,13 +378,19 @@ export class WASMVectorSearch {
     }));
 
     // Apply Flash Attention for relevance boost
+    // ADR-0161: alpha.14 flashAttention takes Float32Array + AttentionConfig,
+    // returns AttentionResult with .output Float32Array. Convert to number[]
+    // for downstream blend with cosine scores.
     let attentionScores: number[];
     try {
       const keys = vectors.map(v => v.vector);
       const values = vectors.map(v => v.vector);
-      attentionScores = await this.attentionService.applyFlashAttention(
-        query, keys, values, { headCount: 8 }
+      const flat = new Float32Array(keys.flat());
+      const result = await this.attentionService.flashAttention(
+        new Float32Array(query), flat, new Float32Array(values.flat()),
+        { numHeads: 8, headDim: query.length, embedDim: query.length } as any
       );
+      attentionScores = Array.from((result as any).output ?? []);
     } catch {
       // If attention fails, fall back to pure cosine
       return cosineSims

@@ -94,7 +94,8 @@ export class ExplainableRecall {
   private db: Database;
   private attentionService?: AttentionService;
   private embedder?: EmbeddingService;
-  private config: ExplainableRecallConfig;
+  // ADR-0076 A4: definite-assignment due to _singleton early-return pattern in ctor
+  private config!: ExplainableRecallConfig;
 
   /**
    * Constructor supports both v1 (legacy) and v2 (with GraphRoPE) modes

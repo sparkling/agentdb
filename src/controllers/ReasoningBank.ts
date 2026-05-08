@@ -91,9 +91,10 @@ export interface LearningBackend {
 let _singleton: InstanceType<typeof ReasoningBank> | null = null;
 
 export class ReasoningBank {
-  private db: IDatabaseConnection;
-  private embedder: EmbeddingService;
-  private cache: Map<string, any>;
+  // ADR-0076 A4: definite-assignment due to _singleton early-return pattern in ctor
+  private db!: IDatabaseConnection;
+  private embedder!: EmbeddingService;
+  private cache!: Map<string, any>;
 
   // v2: Optional vector backend (uses legacy if not provided)
   private vectorBackend?: VectorBackend;

@@ -49,8 +49,10 @@ function applyMigration(dbPath: string, migrationFile: string): MigrationResult 
     // Open database
     const db = new Database(dbPath);
 
-    // Enable foreign keys
+    // Enable foreign keys and concurrency pragmas (ADR-0063 M3)
     db.pragma('foreign_keys = ON');
+    db.pragma('journal_mode = WAL');
+    db.pragma('busy_timeout = 5000');
 
     // Read migration SQL
     const migrationSQL = fs.readFileSync(migrationPath, 'utf-8');

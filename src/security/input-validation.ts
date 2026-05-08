@@ -61,6 +61,7 @@ const ALLOWED_PRAGMAS = new Set([
   'temp_store',
   'mmap_size',
   'wal_autocheckpoint',
+  'busy_timeout',
 ]);
 
 /**

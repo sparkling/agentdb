@@ -1,6 +1,6 @@
 {
   "name": "agentdb-core",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Foundation plugin for AgentDB — pattern store, search, stats. Required by other agentdb-* plugins.",
   "author": {
     "name": "ruvnet",

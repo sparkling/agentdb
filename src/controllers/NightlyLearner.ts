@@ -6,7 +6,8 @@
  * 2. Run A/B experiments on promising hypotheses
  * 3. Calculate uplift for completed experiments
  * 4. Prune low-confidence edges
- * 5. Update rerank weights based on performance
+ * 5. Consolidate episodes into reusable skills via SkillLibrary
+ * 6. Update rerank weights based on performance
  *
  * Based on doubly robust learner:
  * τ̂(x) = μ1(x) − μ0(x) + [a*(y−μ1(x)) / e(x)] − [(1−a)*(y−μ0(x)) / (1−e(x))]
@@ -24,7 +25,9 @@ import { CausalMemoryGraph, CausalEdge } from './CausalMemoryGraph.js';
 import { ReflexionMemory } from './ReflexionMemory.js';
 import { SkillLibrary } from './SkillLibrary.js';
 import { EmbeddingService } from './EmbeddingService.js';
-import { AttentionService, type FlashAttentionConfig } from '../services/AttentionService.js';
+import { AttentionService, type FlashAttentionConfig } from '../utils/LegacyAttentionAdapter.js';
+import { cosineSimilarity } from '../utils/vector-math.js';
+import { getEmbeddingConfig } from '../config/embedding-config.js';
 
 export interface LearnerConfig {
   minSimilarity: number; // Min similarity to consider for causal edge (default: 0.7)
@@ -52,6 +55,9 @@ export interface LearnerReport {
   experimentsCreated: number;
   avgUplift: number;
   avgConfidence: number;
+  skillsCreated: number;
+  skillsUpdated: number;
+  patternsExtracted: number;
   recommendations: string[];
 }
 
@@ -76,16 +82,136 @@ export class NightlyLearner {
       autoExperiments: true,
       experimentBudget: 10,
       ENABLE_FLASH_CONSOLIDATION: false,
-    }
+    },
+    causalGraph?: CausalMemoryGraph,
+    reflexion?: ReflexionMemory,
+    skillLibrary?: SkillLibrary,
+    attentionService?: AttentionService,
   ) {
     this.db = db;
     this.embedder = embedder;
-    this.causalGraph = new CausalMemoryGraph(db);
-    this.reflexion = new ReflexionMemory(db, embedder);
-    this.skillLibrary = new SkillLibrary(db, embedder);
 
-    // Initialize AttentionService if FlashAttention enabled
-    if (this.config.ENABLE_FLASH_CONSOLIDATION) {
+    // ADR-0093 follow-up (advisory A1, 2026-04-21): the original DDL shipped
+    // in commit d7f613a auto-created causal_experiments with the OLD column
+    // list (ts, intervention_id, control_outcome, treatment_outcome, uplift,
+    // sample_size, metadata) lifted verbatim from
+    // packages/agentdb/src/mcp/agentdb-mcp-server.ts:147-175. That old DDL was
+    // out of sync with CausalMemoryGraph.createExperiment (which INSERTs
+    // name/hypothesis/treatment_id/treatment_type/control_id/start_time/
+    // sample_size/status/metadata) and CausalMemoryGraph.calculateUplift
+    // (which UPDATEs treatment_mean/control_mean/p_value/
+    // confidence_interval_low/confidence_interval_high/status). Canonical
+    // schema lives in packages/agentdb/src/schemas/frontier-schema.sql:51-105.
+    //
+    // Because `CREATE TABLE IF NOT EXISTS` is a no-op when the table already
+    // exists, installations that booted against the old DDL silently keep
+    // the old columns and subsequent INSERTs using the new column names fail
+    // at runtime. This block detects the old schema via PRAGMA table_info
+    // and DROPs+recreates both tables when an old column is present.
+    //
+    // Safety: `causal_experiments` and `causal_observations` hold ephemeral
+    // A/B-test telemetry (no user-authored content), so a destructive
+    // recreate is acceptable when schemas are incompatible. ADR-0086's
+    // "preserve user content across migrations" rule does not apply.
+    //
+    // ADR-0082: any SQLite error here MUST throw loudly, not silently fall
+    // through to the old schema — no catch-and-continue.
+    try {
+      const OLD_COLS = new Set([
+        'intervention_id',
+        'control_outcome',
+        'treatment_outcome',
+      ]);
+      const NEW_REQUIRED = [
+        'name',
+        'treatment_id',
+        'treatment_type',
+        'control_id',
+        'start_time',
+        'status',
+        'treatment_mean',
+        'control_mean',
+        'p_value',
+        'confidence_interval_low',
+        'confidence_interval_high',
+      ];
+
+      const existingExpCols = (this.db.prepare(`PRAGMA table_info(causal_experiments)`).all() as any[])
+        .map((row: any) => String(row.name));
+      const existingObsCols = (this.db.prepare(`PRAGMA table_info(causal_observations)`).all() as any[])
+        .map((row: any) => String(row.name));
+
+      const hasOldExp = existingExpCols.some((col: string) => OLD_COLS.has(col));
+      const missingNew = NEW_REQUIRED.filter((col: string) => !existingExpCols.includes(col));
+      const needsRecreate = existingExpCols.length > 0 && (hasOldExp || missingNew.length > 0);
+
+      const oldObsCols = new Set(['action', 'outcome', 'reward', 'session_id']);
+      const hasOldObs = existingObsCols.some((col: string) => oldObsCols.has(col)) &&
+                        !existingObsCols.includes('experiment_id');
+
+      if (needsRecreate || hasOldObs) {
+        console.warn(
+          `[NightlyLearner] Incompatible causal_experiments/observations schema detected ` +
+          `(hasOldExp=${hasOldExp}, missingNewCols=${missingNew.join(',') || 'none'}, hasOldObs=${hasOldObs}). ` +
+          `Dropping and recreating — ephemeral A/B-test telemetry, no user content.`
+        );
+        // Order matters: drop child (observations) before parent (experiments)
+        // to avoid FK constraint failures if FKs are enabled.
+        this.db.exec(`DROP TABLE IF EXISTS causal_observations;`);
+        this.db.exec(`DROP TABLE IF EXISTS causal_experiments;`);
+      }
+
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS causal_experiments (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          name TEXT NOT NULL,
+          hypothesis TEXT,
+          treatment_id INTEGER,
+          treatment_type TEXT,
+          control_id INTEGER,
+          start_time INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
+          end_time INTEGER,
+          sample_size INTEGER DEFAULT 0,
+          treatment_mean REAL,
+          control_mean REAL,
+          uplift REAL,
+          p_value REAL,
+          confidence_interval_low REAL,
+          confidence_interval_high REAL,
+          status TEXT NOT NULL DEFAULT 'running',
+          confidence REAL,
+          metadata TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_causal_experiments_status ON causal_experiments(status);
+        CREATE INDEX IF NOT EXISTS idx_causal_experiments_treatment ON causal_experiments(treatment_id);
+
+        CREATE TABLE IF NOT EXISTS causal_observations (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          experiment_id INTEGER NOT NULL,
+          episode_id INTEGER,
+          is_treatment INTEGER NOT NULL DEFAULT 0,
+          outcome_value REAL NOT NULL,
+          outcome_type TEXT,
+          context TEXT,
+          ts INTEGER DEFAULT (strftime('%s', 'now')),
+          FOREIGN KEY(experiment_id) REFERENCES causal_experiments(id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_causal_observations_exp ON causal_observations(experiment_id);
+      `);
+    } catch (err: any) {
+      console.error(`[NightlyLearner] causal_experiments/observations DDL+migration failed: ${err?.message || err}`);
+      throw err;
+    }
+
+    // ADR-0040: accept pre-created singletons to avoid duplicate instances
+    this.causalGraph = causalGraph || new CausalMemoryGraph(db);
+    this.reflexion = reflexion || new ReflexionMemory(db, embedder);
+    this.skillLibrary = skillLibrary || new SkillLibrary(db, embedder);
+
+    // Use injected AttentionService if provided, else create one when needed
+    if (attentionService) {
+      this.attentionService = attentionService;
+    } else if (this.config.ENABLE_FLASH_CONSOLIDATION) {
       this.attentionService = new AttentionService(db, {
         flash: {
           enabled: true,
@@ -111,6 +237,9 @@ export class NightlyLearner {
       experimentsCreated: 0,
       avgUplift: 0,
       avgConfidence: 0,
+      skillsCreated: 0,
+      skillsUpdated: 0,
+      patternsExtracted: 0,
       recommendations: []
     };
 
@@ -139,12 +268,27 @@ export class NightlyLearner {
         console.log(`   ✓ Pruned ${report.edgesPruned} edges\n`);
       }
 
-      // Step 5: Calculate statistics
+      // Step 5: Consolidate episodes into reusable skills
+      try {
+        const consolidation = await this.skillLibrary.consolidateEpisodesIntoSkills({
+          minAttempts: 3,
+          minReward: this.config.confidenceThreshold || 0.7,
+          timeWindowDays: this.config.edgeMaxAgeDays || 30,
+          extractPatterns: true,
+        });
+        report.skillsCreated = consolidation.created;
+        report.skillsUpdated = consolidation.updated;
+        report.patternsExtracted = consolidation.patterns?.length ?? 0;
+      } catch (error) {
+        // Non-fatal — skill consolidation is a bonus, not critical
+      }
+
+      // Step 6: Calculate statistics
       const stats = this.calculateStats();
       report.avgUplift = stats.avgUplift;
       report.avgConfidence = stats.avgConfidence;
 
-      // Step 6: Generate recommendations
+      // Step 7: Generate recommendations
       report.recommendations = this.generateRecommendations(report);
 
       report.executionTimeMs = Date.now() - startTime;
@@ -245,7 +389,8 @@ export class NightlyLearner {
     }
 
     // Prepare queries (each episode is a query)
-    const dim = 384;
+    // Derive dimension from the first embedding rather than hardcoding
+    const dim = episodeEmbeddings.length > 0 ? episodeEmbeddings[0].length : getEmbeddingConfig().dimension;
     const queries = new Float32Array(episodes.length * dim);
     const keys = new Float32Array(episodes.length * dim);
     const values = new Float32Array(episodes.length * dim);
@@ -273,7 +418,7 @@ export class NightlyLearner {
         if (i === j) continue;
 
         const keyEmb = consolidatedEmbeddings.slice(j * dim, (j + 1) * dim);
-        const score = this.cosineSimilarity(queryEmb, keyEmb);
+        const score = cosineSimilarity(queryEmb, keyEmb);
 
         if (score >= this.config.minSimilarity) {
           similarities.push({ idx: j, score });
@@ -317,24 +462,6 @@ export class NightlyLearner {
       episodesProcessed: episodes.length,
       metrics: attentionResult.metrics,
     };
-  }
-
-  /**
-   * Helper: Cosine similarity between two vectors
-   */
-  private cosineSimilarity(a: Float32Array, b: Float32Array): number {
-    let dotProduct = 0;
-    let normA = 0;
-    let normB = 0;
-
-    for (let i = 0; i < a.length; i++) {
-      dotProduct += a[i] * b[i];
-      normA += a[i] * a[i];
-      normB += b[i] * b[i];
-    }
-
-    const denom = Math.sqrt(normA) * Math.sqrt(normB);
-    return denom === 0 ? 0 : dotProduct / denom;
   }
 
   private async discoverCausalEdges(): Promise<number> {
@@ -641,7 +768,10 @@ export class NightlyLearner {
     console.log(`    • Edges Discovered: ${report.edgesDiscovered}`);
     console.log(`    • Edges Pruned: ${report.edgesPruned}`);
     console.log(`    • Experiments Completed: ${report.experimentsCompleted}`);
-    console.log(`    • Experiments Created: ${report.experimentsCreated}\n`);
+    console.log(`    • Experiments Created: ${report.experimentsCreated}`);
+    console.log(`    • Skills Created: ${report.skillsCreated}`);
+    console.log(`    • Skills Updated: ${report.skillsUpdated}`);
+    console.log(`    • Patterns Extracted: ${report.patternsExtracted}\n`);
     console.log('  Statistics:');
     console.log(`    • Avg Uplift: ${report.avgUplift.toFixed(3)}`);
     console.log(`    • Avg Confidence: ${report.avgConfidence.toFixed(3)}\n`);

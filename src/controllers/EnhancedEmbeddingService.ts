@@ -7,6 +7,7 @@
 
 import { EmbeddingService, EmbeddingConfig } from './EmbeddingService.js';
 import { WASMVectorSearch } from './WASMVectorSearch.js';
+import { cosineSimilarity } from '../utils/vector-math.js';
 
 export interface EnhancedEmbeddingConfig extends EmbeddingConfig {
   enableWASM?: boolean;
@@ -86,7 +87,7 @@ export class EnhancedEmbeddingService extends EmbeddingService {
     }
 
     // Fallback to manual calculation
-    return this.cosineSimilarity(embeddingA, embeddingB);
+    return cosineSimilarity(embeddingA, embeddingB);
   }
 
   /**
@@ -106,7 +107,7 @@ export class EnhancedEmbeddingService extends EmbeddingService {
       similarities = this.wasmSearch.batchSimilarity(queryEmbedding, corpusEmbeddings);
     } else {
       similarities = corpusEmbeddings.map(emb =>
-        this.cosineSimilarity(queryEmbedding, emb)
+        cosineSimilarity(queryEmbedding, emb)
       );
     }
 
@@ -139,21 +140,4 @@ export class EnhancedEmbeddingService extends EmbeddingService {
     };
   }
 
-  /**
-   * Cosine similarity fallback
-   */
-  private cosineSimilarity(a: Float32Array, b: Float32Array): number {
-    let dotProduct = 0;
-    let normA = 0;
-    let normB = 0;
-
-    for (let i = 0; i < a.length; i++) {
-      dotProduct += a[i] * b[i];
-      normA += a[i] * a[i];
-      normB += b[i] * b[i];
-    }
-
-    const denom = Math.sqrt(normA) * Math.sqrt(normB);
-    return denom === 0 ? 0 : dotProduct / denom;
-  }
 }

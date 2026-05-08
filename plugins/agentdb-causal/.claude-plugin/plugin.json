@@ -1,6 +1,6 @@
 {
   "name": "agentdb-causal",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "Causal graph + hierarchical memory. Adds /link, /explain-link, and an investigator agent for root-cause traversal. Includes the delete tools shipped in agentdb 3.0.0-alpha.13.",
   "author": {
     "name": "ruvnet",

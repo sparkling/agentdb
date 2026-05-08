@@ -22,6 +22,7 @@ import type { IDatabaseConnection, DatabaseRows } from '../types/database.types.
 import { normalizeRowId } from '../types/database.types.js';
 import { EmbeddingService } from './EmbeddingService.js';
 import type { VectorBackend, SearchResult } from '../backends/VectorBackend.js';
+import { cosineSimilarity } from '../utils/vector-math.js';
 
 export interface ReasoningPattern {
   id?: number;
@@ -85,6 +86,10 @@ export interface LearningBackend {
   }>;
 }
 
+// ADR-0076 A4: Dual-instance guard — prevent duplicate construction
+// when both ControllerRegistry and AgentDBService create this controller
+let _singleton: InstanceType<typeof ReasoningBank> | null = null;
+
 export class ReasoningBank {
   private db: IDatabaseConnection;
   private embedder: EmbeddingService;
@@ -107,12 +112,21 @@ export class ReasoningBank {
    * New mode (v2 - with VectorBackend):
    *   new ReasoningBank(db, embedder, vectorBackend, learningBackend?)
    */
+  static _resetSingleton(): void { _singleton = null; }
+
   constructor(
     db: IDatabaseConnection,
     embedder: EmbeddingService,
     vectorBackend?: VectorBackend,
     learningBackend?: LearningBackend
   ) {
+    if (_singleton) {
+      if (process.env.CLAUDE_FLOW_DEBUG) {
+        console.warn(`[${this.constructor.name}] Duplicate construction detected — returning existing instance`);
+      }
+      return _singleton as any;
+    }
+    _singleton = this;
     this.db = db;
     this.embedder = embedder;
     this.vectorBackend = vectorBackend;
@@ -188,14 +202,19 @@ export class ReasoningBank {
     // Store embedding based on mode
     if (this.vectorBackend) {
       // v2: Use VectorBackend for high-performance search
-      const vectorId = `pattern_${this.nextVectorId++}`;
-      this.idMapping.set(patternId, vectorId);
+      try {
+        const vectorId = `pattern_${this.nextVectorId++}`;
+        this.idMapping.set(patternId, vectorId);
 
-      this.vectorBackend.insert(vectorId, embedding, {
-        patternId,
-        taskType: pattern.taskType,
-        successRate: pattern.successRate,
-      });
+        this.vectorBackend.insert(vectorId, embedding, {
+          patternId,
+          taskType: pattern.taskType,
+          successRate: pattern.successRate,
+        });
+      } catch {
+        // VectorBackend insert failed — fall back to SQLite storage
+        this.storePatternEmbedding(patternId, embedding);
+      }
     } else {
       // v1: Use legacy SQLite storage (backward compatible)
       this.storePatternEmbedding(patternId, embedding);
@@ -265,28 +284,33 @@ export class ReasoningBank {
     const threshold = query.threshold || 0.0;
     let queryEmbedding = query.taskEmbedding;
 
-    // Optional: Apply GNN enhancement
-    if (query.useGNN && this.learningBackend) {
-      // Get initial candidates for GNN context
-      const candidates = this.vectorBackend!.search(queryEmbedding, k * 3, { threshold: 0.0 });
+    try {
+      // Optional: Apply GNN enhancement
+      if (query.useGNN && this.learningBackend) {
+        // Get initial candidates for GNN context
+        const candidates = this.vectorBackend!.search(queryEmbedding, k * 3, { threshold: 0.0 });
 
-      if (candidates.length > 0) {
-        // Retrieve neighbor embeddings for GNN
-        const neighborEmbeddings = await this.getEmbeddingsForVectorIds(
-          candidates.map(c => c.id)
-        );
-        const weights = candidates.map(c => c.similarity);
+        if (candidates.length > 0) {
+          // Retrieve neighbor embeddings for GNN
+          const neighborEmbeddings = await this.getEmbeddingsForVectorIds(
+            candidates.map(c => c.id)
+          );
+          const weights = candidates.map(c => c.similarity);
 
-        // Enhance query using GNN
-        queryEmbedding = this.learningBackend.enhance(queryEmbedding, neighborEmbeddings, weights);
+          // Enhance query using GNN
+          queryEmbedding = this.learningBackend.enhance(queryEmbedding, neighborEmbeddings, weights);
+        }
       }
+
+      // Perform vector search
+      const results = this.vectorBackend!.search(queryEmbedding, k, { threshold });
+
+      // Hydrate with metadata from SQLite
+      return this.hydratePatterns(results);
+    } catch {
+      // VectorBackend search failed — fall back to legacy SQLite search
+      return this.searchPatternsLegacy(query);
     }
-
-    // Perform vector search
-    const results = this.vectorBackend!.search(queryEmbedding, k, { threshold });
-
-    // Hydrate with metadata from SQLite
-    return this.hydratePatterns(results);
   }
 
   /**
@@ -351,7 +375,7 @@ export class ReasoningBank {
         (row.embedding as Buffer).byteLength / 4
       );
 
-      const similarity = this.cosineSimilarity(query.taskEmbedding, embedding);
+      const similarity = cosineSimilarity(query.taskEmbedding, embedding);
 
       return {
         id: row.id,
@@ -651,25 +675,4 @@ export class ReasoningBank {
     this.cache.clear();
   }
 
-  /**
-   * Calculate cosine similarity between two vectors
-   */
-  private cosineSimilarity(a: Float32Array, b: Float32Array): number {
-    if (a.length !== b.length) {
-      throw new Error('Vectors must have same length');
-    }
-
-    let dotProduct = 0;
-    let normA = 0;
-    let normB = 0;
-
-    for (let i = 0; i < a.length; i++) {
-      dotProduct += a[i] * b[i];
-      normA += a[i] * a[i];
-      normB += b[i] * b[i];
-    }
-
-    const denom = Math.sqrt(normA) * Math.sqrt(normB);
-    return denom === 0 ? 0 : dotProduct / denom;
-  }
 }

@@ -19,6 +19,7 @@ import { CausalMemoryGraph, CausalEdge } from './CausalMemoryGraph.js';
 import { ExplainableRecall, RecallCertificate } from './ExplainableRecall.js';
 import { EmbeddingService } from './EmbeddingService.js';
 import type { VectorBackend } from '../backends/VectorBackend.js';
+import { cosineSimilarity } from '../utils/vector-math.js';
 
 export interface RerankConfig {
   alpha: number; // Similarity weight (default: 0.7)
@@ -68,13 +69,16 @@ export class CausalRecall {
       beta: 0.2,
       gamma: 0.1,
       minConfidence: 0.6
-    }
+    },
+    causalGraph?: CausalMemoryGraph,
+    explainableRecall?: ExplainableRecall,
   ) {
     this.db = db;
     this.embedder = embedder;
     this.vectorBackend = vectorBackend;
-    this.causalGraph = new CausalMemoryGraph(db);
-    this.explainableRecall = new ExplainableRecall(db);
+    // ADR-0040: accept pre-created singletons to avoid duplicate instances
+    this.causalGraph = causalGraph || new CausalMemoryGraph(db);
+    this.explainableRecall = explainableRecall || new ExplainableRecall(db);
   }
 
   /**
@@ -202,7 +206,7 @@ export class CausalRecall {
     for (const ep of episodes) {
       const episodeRow = ep as any;
       const embedding = this.deserializeEmbedding(episodeRow.embedding);
-      const similarity = this.cosineSimilarity(queryEmbedding, embedding);
+      const similarity = cosineSimilarity(queryEmbedding, embedding);
       results.push({
         id: episodeRow.id.toString(),
         type: episodeRow.type,
@@ -357,28 +361,6 @@ export class CausalRecall {
    */
   private deserializeEmbedding(buffer: Buffer): Float32Array {
     return new Float32Array(buffer.buffer, buffer.byteOffset, buffer.length / 4);
-  }
-
-  /**
-   * Cosine similarity between two vectors
-   */
-  private cosineSimilarity(a: Float32Array, b: Float32Array): number {
-    if (a.length !== b.length) {
-      throw new Error('Vector dimensions must match');
-    }
-
-    let dotProduct = 0;
-    let magnitudeA = 0;
-    let magnitudeB = 0;
-
-    for (let i = 0; i < a.length; i++) {
-      dotProduct += a[i] * b[i];
-      magnitudeA += a[i] * a[i];
-      magnitudeB += b[i] * b[i];
-    }
-
-    const magnitude = Math.sqrt(magnitudeA) * Math.sqrt(magnitudeB);
-    return magnitude === 0 ? 0 : dotProduct / magnitude;
   }
 
   /**

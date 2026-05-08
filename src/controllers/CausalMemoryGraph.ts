@@ -20,9 +20,10 @@ import type { IDatabaseConnection, DatabaseRows } from '../types/database.types.
 import { normalizeRowId } from '../types/database.types.js';
 import type { GraphDatabaseAdapter, CausalEdge as GraphCausalEdge } from '../backends/graph/GraphDatabaseAdapter.js';
 import { NodeIdMapper } from '../utils/NodeIdMapper.js';
-import { AttentionService, type HyperbolicAttentionConfig } from '../services/AttentionService.js';
+import { AttentionService, type HyperbolicAttentionConfig } from '../utils/LegacyAttentionAdapter.js';
 import { EmbeddingService } from './EmbeddingService.js';
 import type { VectorBackend } from '../backends/VectorBackend.js';
+import { getEmbeddingConfig } from '../config/embedding-config.js';
 
 /**
  * Configuration for CausalMemoryGraph
@@ -99,6 +100,10 @@ export interface CausalQuery {
   minUplift?: number;
 }
 
+// ADR-0076 A4: Dual-instance guard — prevent duplicate construction
+// when both ControllerRegistry and AgentDBService create this controller
+let _singleton: InstanceType<typeof CausalMemoryGraph> | null = null;
+
 export class CausalMemoryGraph {
   private db: IDatabaseConnection;
   private graphBackend?: any; // GraphBackend or GraphDatabaseAdapter
@@ -119,13 +124,23 @@ export class CausalMemoryGraph {
    * @param config - Optional configuration for hyperbolic attention
    * @param vectorBackend - Optional vector backend for optimized similarity search (150x faster than SQLite)
    */
+  static _resetSingleton(): void { _singleton = null; }
+
   constructor(
     db: IDatabaseConnection,
     graphBackend?: any,
     embedder?: EmbeddingService,
     config?: CausalMemoryGraphConfig,
-    vectorBackend?: VectorBackend
+    vectorBackend?: VectorBackend,
+    attentionService?: AttentionService,
   ) {
+    if (_singleton) {
+      if (process.env.CLAUDE_FLOW_DEBUG) {
+        console.warn(`[${this.constructor.name}] Duplicate construction detected — returning existing instance`);
+      }
+      return _singleton as any;
+    }
+    _singleton = this;
     this.db = db;
     this.graphBackend = graphBackend;
     this.embedder = embedder;
@@ -135,8 +150,51 @@ export class CausalMemoryGraph {
       ...config,
     };
 
-    // Initialize AttentionService if embedder provided
-    if (embedder && this.config.ENABLE_HYPERBOLIC_ATTENTION) {
+    // ADR-0090 B5 fix (W2-I3): initialize SQLite schema on construction.
+    // Previously only the standalone agentdb-mcp-server boot path ran the
+    // frontier-schema.sql DDL (line 14-49). When the fork's memory-router
+    // instantiated CausalMemoryGraph via ControllerRegistry the
+    // `causal_edges` table did not exist, so every downstream caller
+    // (CausalRecall.search, CausalRecall.getStats, NightlyLearner.
+    // discoverCausalEdges, ExplainableRecall.recall) threw SqliteError
+    // "no such table: causal_edges". This mirrors the ReflexionMemory fix
+    // in commit 7a977f1 and the class-level pattern used by ReasoningBank
+    // / LearningSystem / HierarchicalMemory / MemoryConsolidation /
+    // AttestationLog / SkillLibrary. Schema lifted verbatim from
+    // schemas/frontier-schema.sql lines 14-49 — idempotent, safe across
+    // restarts, and reflects the upstream source of truth.
+    if (this.db && typeof (this.db as any).exec === 'function') {
+      (this.db as any).exec(`
+        CREATE TABLE IF NOT EXISTS causal_edges (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          from_memory_id INTEGER NOT NULL,
+          from_memory_type TEXT NOT NULL,
+          to_memory_id INTEGER NOT NULL,
+          to_memory_type TEXT NOT NULL,
+          similarity REAL NOT NULL DEFAULT 0.0,
+          uplift REAL,
+          confidence REAL DEFAULT 0.5,
+          sample_size INTEGER,
+          evidence_ids TEXT,
+          experiment_ids TEXT,
+          confounder_score REAL,
+          mechanism TEXT,
+          created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
+          updated_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
+          last_validated_at INTEGER,
+          metadata JSON
+        );
+        CREATE INDEX IF NOT EXISTS idx_causal_edges_from ON causal_edges(from_memory_id, from_memory_type);
+        CREATE INDEX IF NOT EXISTS idx_causal_edges_to ON causal_edges(to_memory_id, to_memory_type);
+        CREATE INDEX IF NOT EXISTS idx_causal_edges_uplift ON causal_edges(uplift DESC);
+        CREATE INDEX IF NOT EXISTS idx_causal_edges_confidence ON causal_edges(confidence DESC);
+      `);
+    }
+
+    // Use injected AttentionService if provided, else create one when needed
+    if (attentionService) {
+      this.attentionService = attentionService;
+    } else if (embedder && this.config.ENABLE_HYPERBOLIC_ATTENTION) {
       this.attentionService = new AttentionService(db, {
         hyperbolic: {
           enabled: true,
@@ -161,7 +219,7 @@ export class CausalMemoryGraph {
       embedding = await this.embedder.embed(mechanismText);
     } else {
       // Fallback to zero embedding if no embedder available
-      embedding = new Float32Array(384).fill(0);
+      embedding = new Float32Array(getEmbeddingConfig().dimension).fill(0);
     }
 
     // Use GraphDatabaseAdapter if available (AgentDB v2)
@@ -653,20 +711,21 @@ export class CausalMemoryGraph {
     }
 
     // Prepare keys, values, and hierarchy for attention
+    const dim = getEmbeddingConfig().dimension;
     const nodeList = Array.from(allNodeIds);
-    const keys = new Float32Array(nodeList.length * 384);
-    const values = new Float32Array(nodeList.length * 384);
+    const keys = new Float32Array(nodeList.length * dim);
+    const values = new Float32Array(nodeList.length * dim);
     const hierarchyArray: number[] = [];
 
     nodeList.forEach((nodeId, idx) => {
       const embedding = nodeEmbeddings.get(nodeId)!;
-      keys.set(embedding, idx * 384);
-      values.set(embedding, idx * 384);
+      keys.set(embedding, idx * dim);
+      values.set(embedding, idx * dim);
       hierarchyArray.push(hierarchyLevels.get(nodeId) || 0);
     });
 
     // Apply HyperbolicAttention
-    const queries = new Float32Array(384);
+    const queries = new Float32Array(dim);
     queries.set(queryEmbedding);
 
     const attentionResult = await this.attentionService!.hyperbolicAttention(

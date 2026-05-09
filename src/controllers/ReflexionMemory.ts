@@ -132,6 +132,13 @@ export class ReflexionMemory {
   /**
    * Store a new episode with its critique and outcome
    * Invalidates relevant cache entries
+   *
+   * Persistence guarantee (issue #128 fix):
+   *   storeEpisode() always writes to the SQLite `episodes` and
+   *   `episode_embeddings` tables when a SQL-capable connection is present,
+   *   even when a graph or vector backend handles the primary index. This
+   *   ensures data survives process restarts (graph/vector backends are
+   *   often in-memory or rebuildable from SQL).
    */
   async storeEpisode(episode: Episode): Promise<number> {
     // Invalidate episode caches on write
@@ -168,6 +175,10 @@ export class ReflexionMemory {
 
       // Register mapping for later use by CausalMemoryGraph
       NodeIdMapper.getInstance().register(numericId, nodeId);
+
+      // #128: dual-write to SQL for restart-safe persistence. Graph adapter
+      // index is typically in-memory; SQL is the durable record.
+      this.dualWriteEpisodeToSQL(episode, taskEmbedding);
 
       return numericId;
     }
@@ -208,6 +219,9 @@ export class ReflexionMemory {
 
       // Register mapping for later use by CausalMemoryGraph
       NodeIdMapper.getInstance().register(numericId, nodeId);
+
+      // #128: dual-write to SQL for restart-safe persistence.
+      this.dualWriteEpisodeToSQL(episode, taskEmbedding);
 
       return numericId;
     }
@@ -1182,5 +1196,268 @@ export class ReflexionMemory {
         // Episodes are already loaded, cache will be populated on next access
       }
     });
+  }
+
+  /**
+   * Delete an episode by id. Closes the gap from issue #150 (downstream:
+   * ruflo#1784, RuVector#427) — once an episode is written there was no
+   * first-class way to remove it through any backend.
+   *
+   * Strategy mirrors storeEpisode: when a graph backend is present we go
+   * through it (`graphAdapter.deleteNode` / `graphBackend.deleteNode` —
+   * both Cypher-backed under the hood), and we ALWAYS also purge the SQL
+   * `episodes` and `episode_embeddings` rows so durable storage stays in
+   * sync. Vector backend entries are removed too when present.
+   *
+   * @returns True if the episode existed in any backend and was removed.
+   */
+  async deleteEpisode(id: number | string): Promise<boolean> {
+    const numericId = typeof id === 'number' ? id : parseInt(String(id), 10);
+    const stringId = String(id);
+
+    // Invalidate caches up front — failures below shouldn't leave stale reads.
+    this.queryCache.invalidateCategory('episodes');
+    this.queryCache.invalidateCategory('task-stats');
+
+    let removed = false;
+
+    // 1. Graph adapter (AgentDB v2 fast path)
+    if (this.graphBackend && 'storeEpisode' in this.graphBackend) {
+      const adapter = this.graphBackend as any;
+      if (typeof adapter.deleteNode === 'function') {
+        try {
+          // Adapter accepts either the canonical "episode-<id>" key or a raw
+          // id; try the canonical form first since that's what storeEpisode
+          // emits.
+          const r = await adapter.deleteNode(`episode-${numericId}`, { cascade: true });
+          if (r?.deletedNode) removed = true;
+          if (!removed) {
+            const r2 = await adapter.deleteNode(stringId, { cascade: true });
+            if (r2?.deletedNode) removed = true;
+          }
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          // eslint-disable-next-line no-console
+          console.warn(`[ReflexionMemory] deleteEpisode: graph adapter delete failed: ${msg}`);
+        }
+      }
+    }
+    // 2. Generic graph backend
+    else if (this.graphBackend && typeof (this.graphBackend as any).deleteNode === 'function') {
+      try {
+        const r = await (this.graphBackend as any).deleteNode(stringId);
+        if (r === true) removed = true;
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        // eslint-disable-next-line no-console
+        console.warn(`[ReflexionMemory] deleteEpisode: graph backend delete failed: ${msg}`);
+      }
+    }
+
+    // 3. Vector backend (HNSW/RuVector); some implementations don't expose
+    //    delete — guard with a feature check.
+    if (this.vectorBackend && typeof (this.vectorBackend as any).delete === 'function') {
+      try {
+        const r = await (this.vectorBackend as any).delete(String(numericId));
+        if (r === true) removed = true;
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        // eslint-disable-next-line no-console
+        console.warn(`[ReflexionMemory] deleteEpisode: vector backend delete failed: ${msg}`);
+      }
+    }
+
+    // 4. SQL durable storage — always attempt so persistence stays clean
+    //    even when the primary backend was a no-op.
+    if (this.db && typeof this.db.prepare === 'function' && Number.isFinite(numericId)) {
+      try {
+        const embStmt = this.db.prepare(
+          `DELETE FROM episode_embeddings WHERE episode_id = ?`
+        );
+        embStmt.run(numericId);
+        const stmt = this.db.prepare(`DELETE FROM episodes WHERE id = ?`);
+        const r = stmt.run(numericId);
+        const changes = (r as any)?.changes ?? 0;
+        if (changes > 0) removed = true;
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (!/no such table/i.test(msg)) {
+          // eslint-disable-next-line no-console
+          console.warn(`[ReflexionMemory] deleteEpisode: SQL delete failed: ${msg}`);
+        }
+      }
+    }
+
+    return removed;
+  }
+
+  /**
+   * Dual-write helper for issue #128.
+   *
+   * Inserts the given episode into the SQLite `episodes` and
+   * `episode_embeddings` tables when the underlying connection supports it.
+   * Used when a graph or vector backend handles the primary index but the
+   * caller still wants restart-safe persistence.
+   *
+   * Errors are swallowed and logged — the primary write to the graph/vector
+   * backend has already succeeded, and we don't want to fail the caller if
+   * SQL persistence is unavailable (e.g. read-only DB, schema not present).
+   */
+  private dualWriteEpisodeToSQL(episode: Episode, embedding?: Float32Array): void {
+    if (!this.db || typeof this.db.prepare !== 'function') return;
+    try {
+      const stmt = this.db.prepare(`
+        INSERT INTO episodes (
+          session_id, task, input, output, critique, reward, success,
+          latency_ms, tokens_used, tags, metadata
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `);
+      const tags = episode.tags ? JSON.stringify(episode.tags) : null;
+      const metadata = episode.metadata ? JSON.stringify(episode.metadata) : null;
+      const result = stmt.run(
+        episode.sessionId,
+        episode.task,
+        episode.input ?? null,
+        episode.output ?? null,
+        episode.critique ?? null,
+        episode.reward,
+        episode.success ? 1 : 0,
+        episode.latencyMs ?? null,
+        episode.tokensUsed ?? null,
+        tags,
+        metadata
+      );
+      if (embedding) {
+        const episodeId = normalizeRowId(result.lastInsertRowid);
+        this.storeEmbedding(episodeId, embedding);
+      }
+    } catch (err) {
+      // The expected failure here is "no such table: episodes" on databases
+      // that intentionally don't carry the v1 schema. Don't escalate — the
+      // primary backend already has the data.
+      const msg = err instanceof Error ? err.message : String(err);
+      if (!/no such table/i.test(msg)) {
+        // eslint-disable-next-line no-console
+        console.warn('[ReflexionMemory] dualWriteEpisodeToSQL failed:', msg);
+      }
+    }
+  }
+
+  /**
+   * Rebuild the in-memory vector index from the SQLite `episodes` /
+   * `episode_embeddings` tables, going through the proper backend channels
+   * so `retrieveRelevant()` sees the data afterwards.
+   *
+   * Fixes the user's recovery use-case from issue #129: rather than calling
+   * `vectorBackend.getInner().insert()` directly (which bypasses the
+   * GuardedBackend wrapper and confuses retrieveRelevant), call this method
+   * to re-hydrate the vector and graph indices from durable storage.
+   *
+   * Returns the number of episodes re-indexed. No-ops cleanly when the SQL
+   * tables are empty or absent.
+   */
+  async rebuildIndex(options: { fromTimestamp?: number } = {}): Promise<number> {
+    if (!this.db || typeof this.db.prepare !== 'function') return 0;
+
+    const where = options.fromTimestamp !== undefined ? 'WHERE e.ts >= ?' : '';
+    const params: any[] = options.fromTimestamp !== undefined ? [options.fromTimestamp] : [];
+    let rows: any[] = [];
+    try {
+      const stmt = this.db.prepare(`
+        SELECT
+          e.id, e.ts, e.session_id, e.task, e.input, e.output, e.critique,
+          e.reward, e.success, e.latency_ms, e.tokens_used, e.tags, e.metadata,
+          ee.embedding
+        FROM episodes e
+        LEFT JOIN episode_embeddings ee ON ee.episode_id = e.id
+        ${where}
+        ORDER BY e.id ASC
+      `);
+      rows = stmt.all(...params) as any[];
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (/no such table/i.test(msg)) return 0;
+      throw err;
+    }
+
+    let reindexed = 0;
+    for (const row of rows) {
+      const episode: Episode = {
+        id: row.id,
+        ts: row.ts,
+        sessionId: row.session_id,
+        task: row.task,
+        input: row.input ?? undefined,
+        output: row.output ?? undefined,
+        critique: row.critique ?? undefined,
+        reward: row.reward,
+        success: row.success === 1,
+        latencyMs: row.latency_ms ?? undefined,
+        tokensUsed: row.tokens_used ?? undefined,
+        tags: row.tags ? JSON.parse(row.tags) : undefined,
+        metadata: row.metadata ? JSON.parse(row.metadata) : undefined,
+      };
+
+      // Prefer the stored embedding; fall back to recomputing if missing.
+      let embedding: Float32Array | undefined;
+      if (row.embedding) {
+        const buf: Buffer = row.embedding;
+        embedding = new Float32Array(buf.buffer, buf.byteOffset, buf.length / 4);
+      } else {
+        embedding = await this.embedder.embed(this.buildEpisodeText(episode));
+      }
+
+      // Re-insert through the proper public APIs so the GuardedBackend
+      // wrapper, graph adapter, and HNSW all stay in sync.
+      if (this.vectorBackend) {
+        try {
+          this.vectorBackend.insert(String(row.id), embedding, {
+            type: 'episode',
+            sessionId: episode.sessionId,
+            reward: episode.reward,
+            success: episode.success,
+          });
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          // eslint-disable-next-line no-console
+          console.warn(`[ReflexionMemory] rebuildIndex: vector insert failed for ${row.id}: ${msg}`);
+        }
+      }
+
+      if (this.graphBackend && 'storeEpisode' in this.graphBackend) {
+        const adapter = this.graphBackend as any as GraphDatabaseAdapter;
+        try {
+          await adapter.storeEpisode(
+            {
+              id: `episode-${row.id}`,
+              sessionId: episode.sessionId,
+              task: episode.task,
+              reward: episode.reward,
+              success: episode.success,
+              input: episode.input,
+              output: episode.output,
+              critique: episode.critique,
+              createdAt: (episode.ts ?? Date.now() / 1000) * 1000,
+              tokensUsed: episode.tokensUsed,
+              latencyMs: episode.latencyMs,
+            },
+            embedding
+          );
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          // eslint-disable-next-line no-console
+          console.warn(`[ReflexionMemory] rebuildIndex: graph store failed for ${row.id}: ${msg}`);
+        }
+      }
+
+      reindexed++;
+    }
+
+    // Bust any stale read caches so the next retrieveRelevant sees the
+    // freshly-rebuilt index.
+    this.queryCache.invalidateCategory('episodes');
+    this.queryCache.invalidateCategory('task-stats');
+
+    return reindexed;
   }
 }

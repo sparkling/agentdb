@@ -8,6 +8,7 @@
 import { EmbeddingService, EmbeddingConfig } from './EmbeddingService.js';
 import { WASMVectorSearch } from './WASMVectorSearch.js';
 import { cosineSimilarity } from '../utils/vector-math.js';
+import { getEmbeddingConfig } from '../config/embedding-config.js';
 
 export interface EnhancedEmbeddingConfig extends EmbeddingConfig {
   enableWASM?: boolean;
@@ -19,14 +20,29 @@ export class EnhancedEmbeddingService extends EmbeddingService {
   private wasmSearch: WASMVectorSearch | null = null;
   private enhancedConfig: EnhancedEmbeddingConfig;
 
-  constructor(config: EnhancedEmbeddingConfig) {
-    super(config);
-    this.enhancedConfig = {
+  // ADR-0161 follow-up: default config when called without args.
+  // Upstream alpha.14 made config required, but the @sparkleideas/memory
+  // controller-registry hydrates this controller with `new EES()` (no args)
+  // because the registry has no embedding config to pass at hydration time.
+  // Pre-ADR-0161 vendored EnhancedEmbeddingService accepted () via
+  // constructor(config = {}) defaults. Restore that fork-side ergonomic so
+  // alpha.14 can hydrate at registry-init without a Cannot-read-properties
+  // error on first embed(). Defaults come from the project's centralized
+  // getEmbeddingConfig() so they match init-template (model, dimension)
+  // rather than diverging.
+  constructor(config?: EnhancedEmbeddingConfig) {
+    const baseDefaults = getEmbeddingConfig();
+    const resolved: EnhancedEmbeddingConfig = {
+      model: baseDefaults.model,
+      dimension: baseDefaults.dimension,
+      provider: 'transformers',
       enableWASM: true,
       enableBatchProcessing: true,
       batchSize: 100,
-      ...config,
+      ...(config ?? {}),
     };
+    super(resolved);
+    this.enhancedConfig = resolved;
 
     if (this.enhancedConfig.enableWASM) {
       this.initializeWASM();

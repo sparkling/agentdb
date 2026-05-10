@@ -1,6 +1,6 @@
 {
   "name": "agentdb",
-  "version": "3.0.0-alpha.14-patch.36",
+  "version": "3.0.0-alpha.14-patch.37",
   "description": "Self-learning vector memory for AI agents — single-file .rvf cognitive container with HNSW search, episodic Reflexion memory, causal graph + Cypher, 9 RL algorithms, Thompson Sampling bandit, 41 MCP tools, hybrid (BM25 + dense) retrieval, GNN attention. 150x faster than SQLite. Up to +36% search quality from feedback. Runs in Node, browsers (WASM), edge, offline. Backs the agentic-flow / ruflo / Claude Code memory layer.",
   "type": "module",
   "main": "dist/src/index.js",
@@ -201,8 +201,8 @@
     "@ruvector/graph-node": "2.0.3-patch.46",
     "@ruvector/router": "0.1.30-patch.45",
     "@ruvector/ruvllm": "2.5.5-patch.45",
-    "@ruvector/rvf": "0.2.0-patch.95",
-    "@ruvector/rvf-node": "0.1.7-patch.73",
+    "@ruvector/rvf": "0.2.0-patch.96",
+    "@ruvector/rvf-node": "0.1.7-patch.74",
     "@ruvector/rvf-solver": "0.1.7-patch.45",
     "@ruvector/rvf-wasm": "0.1.5-patch.45",
     "@ruvector/sona": "0.1.6-patch.45",
@@ -213,7 +213,7 @@
     "commander": "^12.1.0",
     "hnswlib-node": "^3.0.0",
     "inquirer": "^9.3.8",
-    "ruvector": "0.1.2-patch.519",
+    "ruvector": "0.1.2-patch.520",
     "ruvector-attention-wasm": "^0.1.32",
     "ruvector-graph-transformer-wasm": "^2.0.4"
   },

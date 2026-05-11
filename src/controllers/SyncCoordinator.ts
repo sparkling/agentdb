@@ -12,17 +12,40 @@
  * - Progress tracking and reporting
  * - Comprehensive error handling
  * - Sync state persistence
+ *
+ * ADR-0170 Phase B.12 — ported from SQLite/`Database = any` to PostgresBackend.
+ *
+ * - SQL ported to postgres dialect (BIGSERIAL, $N placeholders, EXTRACT EPOCH,
+ *   ON CONFLICT DO UPDATE, EXCLUDED references).
+ * - Constructor takes a `PostgresBackend` instance directly. The
+ *   better-sqlite3 / sql.js prepare/run/get/all surface is gone.
+ * - Cross-table reads now target the canonical Wave 1a schema:
+ *     · episodes              (owner: ReflexionMemory)        — has `ts`
+ *     · skills                (owner: SkillLibrary)           — uses `updated_at`
+ *     · skill_links           (owner: SkillLibrary)           — was `skill_edges`
+ *
+ *   The original SQLite-era code read `skill_edges` with columns
+ *   `from_skill_id`/`to_skill_id`/`co_occurrences`. That table never existed
+ *   in the canonical schema (`src/schemas/schema.sql:90` defines `skill_links`
+ *   with `parent_skill_id`/`child_skill_id`/`relationship`/`weight`/`metadata`).
+ *   Wire payload field names follow the new canonical columns. The matching
+ *   QUICServer port (Wave 1b, sibling controller) lands the read side.
+ * - `skill_links` has no timestamp column in the canonical schema, so the
+ *   edges-changed watermark is enforced by `id > lastEdgeIdSync` rather than
+ *   `ts > lastEdgeSync`. The persisted SyncState shape is widened (additive)
+ *   to carry the id watermark; existing rows missing the column read as 0.
+ * - The own `sync_state` table is bootstrapped as postgres DDL on first save.
+ * - Async surface: all DB-touching methods now return Promises and await the
+ *   PostgresBackend `query()` / `exec()` calls.
  */
 
 import chalk from 'chalk';
+import type { PostgresBackend } from '../backends/postgres/PostgresBackend.js';
 import { QUICClient, SyncOptions, SyncResult, PushResult } from './QUICClient.js';
 import { QUICServer, SyncRequest } from './QUICServer.js';
 
-// Database type from db-fallback
-type Database = any;
-
 export interface SyncCoordinatorConfig {
-  db: Database;
+  db: PostgresBackend;
   client?: QUICClient;
   server?: QUICServer;
   conflictStrategy?: 'local-wins' | 'remote-wins' | 'latest-wins' | 'merge';
@@ -35,7 +58,11 @@ export interface SyncState {
   lastSyncAt: number;
   lastEpisodeSync: number;
   lastSkillSync: number;
-  lastEdgeSync: number;
+  /**
+   * Highest skill_link id seen on the previous sync. The canonical schema
+   * has no `ts` column on `skill_links`, so the watermark is positional.
+   */
+  lastEdgeIdSync: number;
   totalItemsSynced: number;
   totalBytesSynced: number;
   syncCount: number;
@@ -64,13 +91,14 @@ export interface SyncReport {
 }
 
 export class SyncCoordinator {
-  private db: Database;
+  private db: PostgresBackend;
   private client?: QUICClient;
   private server?: QUICServer;
   private config: Required<Omit<SyncCoordinatorConfig, 'db' | 'client' | 'server'>>;
   private syncState: SyncState;
   private isSyncing: boolean = false;
   private autoSyncInterval: NodeJS.Timeout | null = null;
+  private ready: Promise<void>;
 
   constructor(config: SyncCoordinatorConfig) {
     this.db = config.db;
@@ -83,12 +111,88 @@ export class SyncCoordinator {
       syncIntervalMs: config.syncIntervalMs || 60000, // 1 minute
     };
 
-    // Load sync state
-    this.syncState = this.loadSyncState();
+    // Default state; bootstrapSchema() will overwrite from `sync_state` if
+    // a row exists.
+    this.syncState = {
+      lastSyncAt: 0,
+      lastEpisodeSync: 0,
+      lastSkillSync: 0,
+      lastEdgeIdSync: 0,
+      totalItemsSynced: 0,
+      totalBytesSynced: 0,
+      syncCount: 0,
+    };
 
-    // Start auto-sync if enabled
+    // Constructors can't be async; expose a `ready` promise that the public
+    // sync()/loadSyncState()/saveSyncState()/etc. methods await.
+    this.ready = this.bootstrapSchema();
+
     if (this.config.autoSync) {
-      this.startAutoSync();
+      // Defer auto-sync start until after the ready promise resolves so the
+      // first tick sees the persisted state, not the default zeroed one.
+      this.ready.then(() => this.startAutoSync()).catch((err) => {
+        console.error(chalk.red('[SyncCoordinator] auto-sync init failed:'), err);
+      });
+    }
+  }
+
+  /**
+   * Bootstrap the `sync_state` table and hydrate `this.syncState` from any
+   * existing row. Mirrors the ADR-0090 B5 controller-owns-schema pattern.
+   */
+  private async bootstrapSchema(): Promise<void> {
+    await this.db.exec(`
+      CREATE TABLE IF NOT EXISTS sync_state (
+        id INTEGER PRIMARY KEY,
+        last_sync_at BIGINT NOT NULL DEFAULT 0,
+        last_episode_sync BIGINT NOT NULL DEFAULT 0,
+        last_skill_sync BIGINT NOT NULL DEFAULT 0,
+        last_edge_id_sync BIGINT NOT NULL DEFAULT 0,
+        total_items_synced BIGINT NOT NULL DEFAULT 0,
+        total_bytes_synced BIGINT NOT NULL DEFAULT 0,
+        sync_count BIGINT NOT NULL DEFAULT 0,
+        last_error TEXT
+      );
+    `);
+
+    try {
+      const result = await this.db.query(
+        `SELECT last_sync_at, last_episode_sync, last_skill_sync,
+                last_edge_id_sync, total_items_synced, total_bytes_synced,
+                sync_count, last_error
+         FROM sync_state WHERE id = 1`
+      );
+      const row = result.rows[0] as
+        | {
+            last_sync_at: number | bigint | string;
+            last_episode_sync: number | bigint | string;
+            last_skill_sync: number | bigint | string;
+            last_edge_id_sync: number | bigint | string;
+            total_items_synced: number | bigint | string;
+            total_bytes_synced: number | bigint | string;
+            sync_count: number | bigint | string;
+            last_error: string | null;
+          }
+        | undefined;
+      if (row) {
+        this.syncState = {
+          lastSyncAt: toNumber(row.last_sync_at),
+          lastEpisodeSync: toNumber(row.last_episode_sync),
+          lastSkillSync: toNumber(row.last_skill_sync),
+          lastEdgeIdSync: toNumber(row.last_edge_id_sync),
+          totalItemsSynced: toNumber(row.total_items_synced),
+          totalBytesSynced: toNumber(row.total_bytes_synced),
+          syncCount: toNumber(row.sync_count),
+          lastError: row.last_error ?? undefined,
+        };
+      }
+    } catch (err) {
+      // Row absent or column mismatch from a prior schema version — keep
+      // the default zeroed state and let saveSyncState() reseed it.
+      const msg = (err as Error).message;
+      if (process.env.CLAUDE_FLOW_DEBUG) {
+        console.warn(`[SyncCoordinator] loadSyncState skipped: ${msg}`);
+      }
     }
   }
 
@@ -96,6 +200,8 @@ export class SyncCoordinator {
    * Perform bidirectional synchronization
    */
   async sync(onProgress?: (progress: SyncProgress) => void): Promise<SyncReport> {
+    await this.ready;
+
     if (this.isSyncing) {
       throw new Error('Sync already in progress');
     }
@@ -152,7 +258,7 @@ export class SyncCoordinator {
       this.syncState.totalBytesSynced += bytesTransferred;
       this.syncState.syncCount++;
       this.syncState.lastError = errors.length > 0 ? errors[0] : undefined;
-      this.saveSyncState();
+      await this.saveSyncState();
 
       const endTime = Date.now();
       const durationMs = endTime - startTime;
@@ -202,31 +308,41 @@ export class SyncCoordinator {
   }
 
   /**
-   * Detect changes since last sync
+   * Detect changes since last sync.
+   *
+   * Episodes watermark by `ts` (canonical column); skills watermark by
+   * `updated_at` (their mutation timestamp). `skill_links` has no temporal
+   * column in the canonical schema — we watermark positionally by `id`.
    */
   private async detectChanges(): Promise<{
     episodes: any[];
     skills: any[];
     edges: any[];
   }> {
-    const { lastEpisodeSync, lastSkillSync, lastEdgeSync } = this.syncState;
+    await this.ready;
 
-    // Detect new/modified episodes
-    const episodes = this.db
-      .prepare('SELECT * FROM episodes WHERE ts > ?')
-      .all(lastEpisodeSync);
+    const { lastEpisodeSync, lastSkillSync, lastEdgeIdSync } = this.syncState;
 
-    // Detect new/modified skills
-    const skills = this.db
-      .prepare('SELECT * FROM skills WHERE ts > ?')
-      .all(lastSkillSync);
+    const episodesResult = await this.db.query(
+      `SELECT * FROM episodes WHERE ts > $1`,
+      [lastEpisodeSync]
+    );
 
-    // Detect new/modified edges
-    const edges = this.db
-      .prepare('SELECT * FROM skill_edges WHERE ts > ?')
-      .all(lastEdgeSync);
+    const skillsResult = await this.db.query(
+      `SELECT * FROM skills WHERE updated_at > $1`,
+      [lastSkillSync]
+    );
 
-    return { episodes, skills, edges };
+    const edgesResult = await this.db.query(
+      `SELECT * FROM skill_links WHERE id > $1`,
+      [lastEdgeIdSync]
+    );
+
+    return {
+      episodes: episodesResult.rows,
+      skills: skillsResult.rows,
+      edges: edgesResult.rows,
+    };
   }
 
   /**
@@ -407,7 +523,7 @@ export class SyncCoordinator {
         allData.episodes = episodesResult.data;
         itemsPulled += episodesResult.itemsReceived;
         bytesTransferred += episodesResult.bytesTransferred;
-        this.syncState.lastEpisodeSync = Date.now();
+        this.syncState.lastEpisodeSync = Math.floor(Date.now() / 1000);
       } else {
         errors.push(episodesResult.error || 'Failed to sync episodes');
       }
@@ -431,7 +547,7 @@ export class SyncCoordinator {
         allData.skills = skillsResult.data;
         itemsPulled += skillsResult.itemsReceived;
         bytesTransferred += skillsResult.bytesTransferred;
-        this.syncState.lastSkillSync = Date.now();
+        this.syncState.lastSkillSync = Math.floor(Date.now() / 1000);
       } else {
         errors.push(skillsResult.error || 'Failed to sync skills');
       }
@@ -439,7 +555,7 @@ export class SyncCoordinator {
       // Pull edges
       const edgesResult = await this.client.sync({
         type: 'edges',
-        since: this.syncState.lastEdgeSync,
+        since: this.syncState.lastEdgeIdSync,
         batchSize: this.config.batchSize,
         onProgress: (progress) => {
           onProgress?.({
@@ -455,7 +571,13 @@ export class SyncCoordinator {
         allData.edges = edgesResult.data;
         itemsPulled += edgesResult.itemsReceived;
         bytesTransferred += edgesResult.bytesTransferred;
-        this.syncState.lastEdgeSync = Date.now();
+        // Advance the edge id watermark to the max id we just observed so
+        // the next sync picks up rows after the highest known link.
+        const maxId = (edgesResult.data as any[]).reduce<number>((acc, row) => {
+          const id = toNumber((row as any).id);
+          return id > acc ? id : acc;
+        }, this.syncState.lastEdgeIdSync);
+        this.syncState.lastEdgeIdSync = maxId;
       } else {
         errors.push(edgesResult.error || 'Failed to sync edges');
       }
@@ -504,157 +626,152 @@ export class SyncCoordinator {
   }
 
   /**
-   * Apply pulled changes to local database
+   * Apply pulled changes to local database.
+   *
+   * Uses postgres `INSERT ... ON CONFLICT (...) DO UPDATE` to replicate the
+   * `INSERT OR REPLACE` upsert semantics from the SQLite original. Column
+   * names track the canonical schema (`src/schemas/schema.sql`).
    */
   private async applyChanges(data: any): Promise<void> {
-    // Apply episodes
+    await this.ready;
+
     if (data.episodes && data.episodes.length > 0) {
-      const stmt = this.db.prepare(`
-        INSERT OR REPLACE INTO episodes (
-          id, ts, session_id, task, input, output, critique, reward, success,
-          latency_ms, tokens_used, tags, metadata
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `);
-
       for (const episode of data.episodes) {
-        stmt.run(
-          episode.id,
-          episode.ts,
-          episode.sessionId,
-          episode.task,
-          episode.input,
-          episode.output,
-          episode.critique,
-          episode.reward,
-          episode.success ? 1 : 0,
-          episode.latencyMs,
-          episode.tokensUsed,
-          JSON.stringify(episode.tags),
-          JSON.stringify(episode.metadata)
+        await this.db.query(
+          `INSERT INTO episodes (
+            id, ts, session_id, task, input, output, critique, reward, success,
+            latency_ms, tokens_used, tags, metadata
+          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+          ON CONFLICT (id) DO UPDATE SET
+            ts = EXCLUDED.ts,
+            session_id = EXCLUDED.session_id,
+            task = EXCLUDED.task,
+            input = EXCLUDED.input,
+            output = EXCLUDED.output,
+            critique = EXCLUDED.critique,
+            reward = EXCLUDED.reward,
+            success = EXCLUDED.success,
+            latency_ms = EXCLUDED.latency_ms,
+            tokens_used = EXCLUDED.tokens_used,
+            tags = EXCLUDED.tags,
+            metadata = EXCLUDED.metadata`,
+          [
+            episode.id,
+            episode.ts,
+            episode.sessionId,
+            episode.task,
+            episode.input ?? null,
+            episode.output ?? null,
+            episode.critique ?? null,
+            episode.reward,
+            episode.success === true,
+            episode.latencyMs ?? null,
+            episode.tokensUsed ?? null,
+            episode.tags ? JSON.stringify(episode.tags) : null,
+            episode.metadata ? JSON.stringify(episode.metadata) : null,
+          ]
         );
       }
     }
 
-    // Apply skills
     if (data.skills && data.skills.length > 0) {
-      const stmt = this.db.prepare(`
-        INSERT OR REPLACE INTO skills (
-          id, ts, name, description, code, success_rate, usage_count,
-          avg_reward, tags, metadata
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `);
-
       for (const skill of data.skills) {
-        stmt.run(
-          skill.id,
-          skill.ts,
-          skill.name,
-          skill.description,
-          skill.code,
-          skill.successRate,
-          skill.usageCount,
-          skill.avgReward,
-          JSON.stringify(skill.tags),
-          JSON.stringify(skill.metadata)
+        await this.db.query(
+          `INSERT INTO skills (
+            id, name, description, signature, code, success_rate, uses,
+            avg_reward, avg_latency_ms, created_at, updated_at, metadata
+          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+          ON CONFLICT (id) DO UPDATE SET
+            name = EXCLUDED.name,
+            description = EXCLUDED.description,
+            signature = EXCLUDED.signature,
+            code = EXCLUDED.code,
+            success_rate = EXCLUDED.success_rate,
+            uses = EXCLUDED.uses,
+            avg_reward = EXCLUDED.avg_reward,
+            avg_latency_ms = EXCLUDED.avg_latency_ms,
+            updated_at = EXCLUDED.updated_at,
+            metadata = EXCLUDED.metadata`,
+          [
+            skill.id,
+            skill.name,
+            skill.description ?? null,
+            skill.signature
+              ? JSON.stringify(skill.signature)
+              : JSON.stringify({ inputs: {}, outputs: {} }),
+            skill.code ?? null,
+            skill.successRate ?? 0,
+            Math.round(skill.uses ?? skill.usageCount ?? 0),
+            skill.avgReward ?? 0,
+            Math.round(skill.avgLatencyMs ?? 0),
+            skill.createdAt ?? Math.floor(Date.now() / 1000),
+            skill.updatedAt ?? Math.floor(Date.now() / 1000),
+            skill.metadata ? JSON.stringify(skill.metadata) : null,
+          ]
         );
       }
     }
 
-    // Apply edges
     if (data.edges && data.edges.length > 0) {
-      const stmt = this.db.prepare(`
-        INSERT OR REPLACE INTO skill_edges (
-          id, ts, from_skill_id, to_skill_id, weight, co_occurrences
-        ) VALUES (?, ?, ?, ?, ?, ?)
-      `);
-
       for (const edge of data.edges) {
-        stmt.run(
-          edge.id,
-          edge.ts,
-          edge.fromSkillId,
-          edge.toSkillId,
-          edge.weight,
-          edge.coOccurrences
+        // Tolerate both legacy (`fromSkillId`/`toSkillId`/`coOccurrences`)
+        // and canonical (`parentSkillId`/`childSkillId`/`relationship`)
+        // wire field names — the canonical schema is `skill_links` and the
+        // legacy SQLite-era `skill_edges` schema never existed in this fork.
+        const parentSkillId = edge.parentSkillId ?? edge.fromSkillId;
+        const childSkillId = edge.childSkillId ?? edge.toSkillId;
+        const relationship = edge.relationship ?? 'composition';
+        const weight = edge.weight ?? 1.0;
+        const metadata = edge.metadata ? JSON.stringify(edge.metadata) : null;
+
+        await this.db.query(
+          `INSERT INTO skill_links (
+            id, parent_skill_id, child_skill_id, relationship, weight, metadata
+          ) VALUES ($1, $2, $3, $4, $5, $6)
+          ON CONFLICT (id) DO UPDATE SET
+            parent_skill_id = EXCLUDED.parent_skill_id,
+            child_skill_id = EXCLUDED.child_skill_id,
+            relationship = EXCLUDED.relationship,
+            weight = EXCLUDED.weight,
+            metadata = EXCLUDED.metadata`,
+          [edge.id, parentSkillId, childSkillId, relationship, weight, metadata]
         );
       }
     }
   }
 
   /**
-   * Load sync state from database
+   * Persist sync state. The `sync_state` row uses id=1 as the singleton
+   * pkey, matching the SQLite-era convention.
    */
-  private loadSyncState(): SyncState {
+  private async saveSyncState(): Promise<void> {
     try {
-      const row = this.db
-        .prepare('SELECT * FROM sync_state WHERE id = 1')
-        .get();
-
-      if (row) {
-        return {
-          lastSyncAt: row.last_sync_at,
-          lastEpisodeSync: row.last_episode_sync,
-          lastSkillSync: row.last_skill_sync,
-          lastEdgeSync: row.last_edge_sync,
-          totalItemsSynced: row.total_items_synced,
-          totalBytesSynced: row.total_bytes_synced,
-          syncCount: row.sync_count,
-          lastError: row.last_error,
-        };
-      }
-    } catch (error) {
-      // Table might not exist yet
-    }
-
-    return {
-      lastSyncAt: 0,
-      lastEpisodeSync: 0,
-      lastSkillSync: 0,
-      lastEdgeSync: 0,
-      totalItemsSynced: 0,
-      totalBytesSynced: 0,
-      syncCount: 0,
-    };
-  }
-
-  /**
-   * Save sync state to database
-   */
-  private saveSyncState(): void {
-    try {
-      // Create table if not exists
-      this.db.exec(`
-        CREATE TABLE IF NOT EXISTS sync_state (
-          id INTEGER PRIMARY KEY,
-          last_sync_at INTEGER,
-          last_episode_sync INTEGER,
-          last_skill_sync INTEGER,
-          last_edge_sync INTEGER,
-          total_items_synced INTEGER,
-          total_bytes_synced INTEGER,
-          sync_count INTEGER,
-          last_error TEXT
-        )
-      `);
-
-      // Upsert state
-      this.db
-        .prepare(`
-          INSERT OR REPLACE INTO sync_state (
-            id, last_sync_at, last_episode_sync, last_skill_sync, last_edge_sync,
-            total_items_synced, total_bytes_synced, sync_count, last_error
-          ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?)
-        `)
-        .run(
+      await this.db.query(
+        `INSERT INTO sync_state (
+          id, last_sync_at, last_episode_sync, last_skill_sync,
+          last_edge_id_sync, total_items_synced, total_bytes_synced,
+          sync_count, last_error
+        ) VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8)
+        ON CONFLICT (id) DO UPDATE SET
+          last_sync_at = EXCLUDED.last_sync_at,
+          last_episode_sync = EXCLUDED.last_episode_sync,
+          last_skill_sync = EXCLUDED.last_skill_sync,
+          last_edge_id_sync = EXCLUDED.last_edge_id_sync,
+          total_items_synced = EXCLUDED.total_items_synced,
+          total_bytes_synced = EXCLUDED.total_bytes_synced,
+          sync_count = EXCLUDED.sync_count,
+          last_error = EXCLUDED.last_error`,
+        [
           this.syncState.lastSyncAt,
           this.syncState.lastEpisodeSync,
           this.syncState.lastSkillSync,
-          this.syncState.lastEdgeSync,
+          this.syncState.lastEdgeIdSync,
           this.syncState.totalItemsSynced,
           this.syncState.totalBytesSynced,
           this.syncState.syncCount,
-          this.syncState.lastError || null
-        );
+          this.syncState.lastError ?? null,
+        ]
+      );
     } catch (error) {
       const err = error as Error;
       console.error(chalk.red('✗ Failed to save sync state:'), err.message);
@@ -713,4 +830,11 @@ export class SyncCoordinator {
       state: this.getSyncState(),
     };
   }
+}
+
+function toNumber(v: number | bigint | string | null | undefined): number {
+  if (v === null || v === undefined) return 0;
+  if (typeof v === 'string') return parseInt(v, 10);
+  if (typeof v === 'bigint') return Number(v);
+  return v;
 }

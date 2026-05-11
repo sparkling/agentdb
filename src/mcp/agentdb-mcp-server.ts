@@ -237,14 +237,20 @@ const embeddingService = new EmbeddingService({
 });
 await embeddingService.initialize();
 
-// ADR-0166 Phase 3 (Option F): the SQLite handle is the primary substrate
-// for the `agentdb_*` axis. The pre-Phase-3 `unified.getSQLiteDatabase() ?? unified`
-// defang has been removed; we open SQLite directly and (best-effort) load the
-// sqlite-vec extension on top. The unified.getGraphDatabase() path remains
-// available for tools that want it, but the MCP server's primary handle is
-// the SQLite one — axis-separated per Amendment 2026-05-11f.
+// ADR-0170 Phase A.6: the legacy db-unified.ts "graph-mode vs sqlite-legacy"
+// switch is retired. PostgresBackend (pglite embedded or postgres:// server)
+// becomes the canonical relational substrate for the agentdb_* axis going
+// forward — see ADR-0170 §"Implementation pre-flight item 2".
+//
+// In Phase A the boot path still opens better-sqlite3 / sql.js via the
+// `createDatabase` helper below, so live controllers continue to write to
+// the SQLite handle. The PostgresBackend wiring activates per-controller in
+// Phase B's atomic commits; once all controllers are ported the
+// createDatabase() call retires. The unified.getGraphDatabase() path was
+// already removed by ADR-0166 Phase 3 (this comment block previously named
+// it); db-unified.ts itself is deleted by Phase A.6.
 const db: any = await createDatabase(dbPath);
-console.error('✅ SQLite backend loaded (agentdb_* axis — ADR-0166 Option F)');
+console.error('✅ SQLite backend loaded (agentdb_* axis — ADR-0166 Option F, Phase A bootstrap until Phase B controller ports)');
 
 // Configure for performance
 db.pragma('journal_mode = WAL');

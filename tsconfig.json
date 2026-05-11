@@ -30,8 +30,6 @@
   },
   "include": [
     "src/**/*",
-    "simulation/**/*",
-    "simulation/scenarios/**/*",
     "benchmarks/**/*",
     "examples/**/*",
     "tests/**/*"
@@ -45,6 +43,7 @@
     "src/db/migrations/**",
     "src/utils/crypto.utils.ts",
     "src/services/token.service.ts",
-    "src/services/auth.service.ts"
+    "src/services/auth.service.ts",
+    "simulation/**"
   ]
 }

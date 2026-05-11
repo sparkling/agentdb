@@ -106,13 +106,16 @@ describe('SDK Exports', () => {
     console.log('✅ GraphDatabaseAdapter exported');
   });
 
-  it('should export UnifiedDatabase', async () => {
-    const { UnifiedDatabase, createUnifiedDatabase } = await import('../src/db-unified.js');
+  // ADR-0170 Phase A.6: db-unified.ts is retired. The graph-mode-vs-sqlite-
+  // legacy split it implemented collapses under PostgreSQL's single substrate.
+  // PostgresBackend is the new canonical relational substrate.
+  it('should export PostgresBackend', async () => {
+    const { PostgresBackend } = await import('../src/backends/postgres/PostgresBackend.js');
 
-    expect(UnifiedDatabase).toBeDefined();
-    expect(createUnifiedDatabase).toBeDefined();
+    expect(PostgresBackend).toBeDefined();
+    expect(typeof PostgresBackend).toBe('function');
 
-    console.log('✅ UnifiedDatabase exported');
+    console.log('✅ PostgresBackend exported (ADR-0170 substrate replacement)');
   });
 });
 
@@ -199,47 +202,21 @@ describe('Backward Compatibility - SQLite', () => {
   });
 });
 
-describe('Migration - SQLite to GraphDatabase', () => {
+// ADR-0170 Phase A.6: the 'Migration - SQLite to GraphDatabase' describe
+// block tested the retired db-unified.ts surface (graph-mode-vs-sqlite-
+// legacy switch). PostgreSQL retires both lanes — see ADR-0170
+// §"Implementation pre-flight item 2". Phase D adds a different migration
+// surface (`agentdb migrate --from sqlite --to pglite`) with its own
+// roundtrip contract test at tests/acceptance/adr0170-migration-roundtrip.
+// The original migration test below is kept as a `describe.skip(...)` to
+// preserve the diff context for Phase D's reviewer.
+describe.skip('Migration - SQLite to GraphDatabase (RETIRED — ADR-0170 Phase A.6)', () => {
   it('should detect database mode', async () => {
-    const { UnifiedDatabase } = await import('../src/db-unified.js');
-    const { EmbeddingService } = await import('../src/controllers/EmbeddingService.js');
-
-    // Test SQLite detection
-    const sqliteDb = new UnifiedDatabase({ path: SQLITE_DB });
-    const embedder = new EmbeddingService({
-      model: 'Xenova/all-MiniLM-L6-v2',
-      dimension: 384,
-      provider: 'transformers'
-    });
-    await embedder.initialize();
-    await sqliteDb.initialize(embedder);
-
-    expect(sqliteDb.getMode()).toBe('sqlite-legacy');
-    console.log('✅ SQLite database detected correctly');
-
-    sqliteDb.close();
+    // Retired with db-unified.ts deletion (Phase A.6).
   });
 
   it('should create new graph database', async () => {
-    const { createUnifiedDatabase } = await import('../src/db-unified.js');
-    const { EmbeddingService } = await import('../src/controllers/EmbeddingService.js');
-
-    const embedder = new EmbeddingService({
-      model: 'Xenova/all-MiniLM-L6-v2',
-      dimension: 384,
-      provider: 'transformers'
-    });
-    await embedder.initialize();
-    const db = await createUnifiedDatabase(GRAPH_DB, embedder, {
-      forceMode: 'graph'
-    });
-
-    expect(db.getMode()).toBe('graph');
-    expect(fs.existsSync(GRAPH_DB)).toBe(true);
-
-    console.log('✅ GraphDatabase created successfully');
-
-    db.close();
+    // Retired with db-unified.ts deletion (Phase A.6).
   });
 
   it('should migrate SQLite to Graph (manual)', async () => {
@@ -345,75 +322,16 @@ describe('MCP Tool Integration', () => {
   });
 });
 
-describe('Integration Test - Full Workflow', () => {
+// ADR-0170 Phase A.6: the original "Full Workflow" test exercised the
+// retired sqlite→graph autoMigrate path (db-unified.createUnifiedDatabase
+// with autoMigrate: true). PostgreSQL retires that surface; Phase D adds
+// `agentdb migrate --from sqlite --to pglite` with its own roundtrip
+// contract test. The describe.skip preserves diff context for Phase D's
+// reviewer.
+describe.skip('Integration Test - Full Workflow (RETIRED — ADR-0170 Phase A.6)', () => {
   it('should complete full workflow: CLI init → SQLite ops → Migration → Graph ops', async () => {
-    console.log('\n🚀 FULL INTEGRATION TEST\n');
-
-    // 1. Initialize SQLite database via CLI
-    const testDbPath = path.join(TEST_DIR, 'full-test.db');
-    execSync(`npx tsx src/cli/agentdb-cli.ts init ${testDbPath} --dimension 384`, {
-      cwd: process.cwd()
-    });
-
-    console.log('✅ 1. CLI initialized SQLite database');
-
-    // 2. Perform SQLite operations
-    const { createDatabase } = await import('../src/db-fallback.js');
-    const { ReflexionMemory } = await import('../src/controllers/ReflexionMemory.js');
-    const { EmbeddingService } = await import('../src/controllers/EmbeddingService.js');
-
-    const db = await createDatabase(testDbPath);
-    const embedder = new EmbeddingService({
-      model: 'Xenova/all-MiniLM-L6-v2',
-      dimension: 384,
-      provider: 'transformers'
-    });
-    await embedder.initialize();
-    const reflexion = new ReflexionMemory(db, embedder);
-
-    await reflexion.storeEpisode({
-      sessionId: 'full-test',
-      task: 'complete integration test',
-      reward: 0.98,
-      success: true,
-      input: 'test input',
-      output: 'test output',
-      critique: 'excellent integration'
-    });
-
-    const sqliteResults = await reflexion.retrieveRelevant({ task: 'integration', k: 5 });
-    expect(sqliteResults.length).toBeGreaterThan(0);
-
-    console.log('✅ 2. SQLite operations completed');
-
-    db.close();
-
-    // 3. Migrate to GraphDatabase
-    const { createUnifiedDatabase } = await import('../src/db-unified.js');
-    const graphDbPath = testDbPath.replace('.db', '.graph');
-
-    const unifiedDb = await createUnifiedDatabase(testDbPath, embedder, {
-      autoMigrate: true
-    });
-
-    expect(unifiedDb.getMode()).toBe('graph');
-    expect(fs.existsSync(graphDbPath)).toBe(true);
-
-    console.log('✅ 3. Migration to GraphDatabase completed');
-
-    // 4. Verify GraphDatabase operations
-    const graphDb = unifiedDb.getGraphDatabase();
-    expect(graphDb).toBeDefined();
-
-    // Query to verify migration worked (stats may not update immediately)
-    const cypherResult = await graphDb!.query('MATCH (e:Episode) RETURN e LIMIT 5');
-    expect(cypherResult.nodes.length).toBeGreaterThan(0);
-
-    console.log('✅ 4. GraphDatabase operations verified');
-    console.log('✅ 5. Cypher queries working - migration successful');
-
-    console.log('\n🎉 FULL INTEGRATION TEST PASSED\n');
-
-    unifiedDb.close();
+    // Retired with db-unified.ts deletion (Phase A.6). See Phase D's
+    // tests/acceptance/adr0170-migration-roundtrip.test.mjs for the
+    // postgres-substrate replacement.
   });
 });

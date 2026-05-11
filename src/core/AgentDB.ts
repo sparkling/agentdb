@@ -36,6 +36,12 @@ import { fileURLToPath } from 'url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
+// ADR-0166 Phase 2: fire the `vectorBackend` deprecation warning at most
+// once per process to avoid spamming the CLI/acceptance harness output —
+// many ruflo call sites construct a fresh AgentDB per invocation and each
+// would otherwise emit the same line.
+let _adr0166DeprecationWarned = false;
+
 export interface AgentDBConfig {
   dbPath?: string;
   namespace?: string;
@@ -204,11 +210,14 @@ export class AgentDB {
     // `vectorBackend` alias for backward compat with ~9 ruflo call sites.
     const legacyVB = this.config.vectorBackend;
     const explicitVI = this.config.vectorIndex;
-    if (legacyVB !== undefined && explicitVI === undefined) {
-      // Emit deprecation warning to stderr — non-fatal; the alias still works.
+    if (legacyVB !== undefined && explicitVI === undefined && !_adr0166DeprecationWarned) {
+      // Emit deprecation warning to stderr — once per process. Non-fatal;
+      // the alias still works. Subsequent AgentDB instances within the same
+      // process honor the field silently.
+      _adr0166DeprecationWarned = true;
       console.warn(
         `[AgentDB] AgentDBConfig.vectorBackend='${legacyVB}' is deprecated (ADR-0166 Phase 2). ` +
-        `Use vectorIndex='${legacyVB}' instead. The alias will be removed in a future major.`
+        `Use vectorIndex='${legacyVB}' instead. The alias will be removed in a future major.`,
       );
     }
     const resolvedVI: 'auto' | 'ruvector' | 'hnswlib' | 'sqlite-vec' =

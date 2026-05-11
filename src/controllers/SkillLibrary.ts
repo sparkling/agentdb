@@ -63,6 +63,11 @@ export class SkillLibrary {
   private vectorBackend: VectorBackend | null;
   private graphBackend?: any; // GraphBackend or GraphDatabaseAdapter
   private queryCache: QueryCache;
+  /**
+   * ADR-0166 Phase 3 (Option F): true when skill_vec sqlite-vec virtual
+   * table is present on this.db. Detected once at construction.
+   */
+  private optionFEnabled: boolean = false;
 
   static _resetSingleton(): void { _singleton = null; }
 
@@ -91,6 +96,8 @@ export class SkillLibrary {
     // "no such table: skills" (silent in-memory fallback per ADR-0082).
     // Schema mirrors `schemas/schema.sql:57-101`. Idempotent.
     this.initializeSchema();
+    // ADR-0166 Phase 3 (Option F): detect virtual table availability once.
+    this.optionFEnabled = this.detectOptionF();
   }
 
   /**
@@ -520,6 +527,37 @@ export class SkillLibrary {
     `);
     const buffer = Buffer.from(embedding.buffer);
     stmt.run(skillId, buffer);
+
+    // ADR-0166 Phase 3 (Option F): mirror embedding into skill_vec for
+    // SQL-side k-NN via the sqlite-vec virtual table. vec0 doesn't support
+    // ON CONFLICT, so DELETE-then-INSERT for upsert semantics matching the
+    // skill_embeddings UPSERT above.
+    if (this.optionFEnabled) {
+      try {
+        this.db.prepare(`DELETE FROM skill_vec WHERE id = ?`).run(skillId);
+        const vecStmt = this.db.prepare(
+          `INSERT INTO skill_vec(id, embedding) VALUES (?, ?)`,
+        );
+        vecStmt.run(skillId, Buffer.from(embedding.buffer));
+      } catch (err) {
+        console.error(`[SkillLibrary] Option F vec mirror failed for skill=${skillId}: ${(err as Error).message}`);
+        throw err;
+      }
+    }
+  }
+
+  /**
+   * ADR-0166 Phase 3 (Option F): detect whether skill_vec exists.
+   */
+  private detectOptionF(): boolean {
+    try {
+      const row: any = (this.db as any).prepare?.(
+        `SELECT name FROM sqlite_master WHERE type='table' AND name='skill_vec'`,
+      )?.get?.();
+      return !!row;
+    } catch {
+      return false;
+    }
   }
 
   /**

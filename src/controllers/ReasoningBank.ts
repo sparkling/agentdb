@@ -105,6 +105,12 @@ export class ReasoningBank {
   private nextVectorId = 0;
 
   /**
+   * ADR-0166 Phase 3 (Option F): true when reasoning_pattern_vec sqlite-vec
+   * virtual table is present on this.db. Detected once at construction.
+   */
+  private optionFEnabled: boolean = false;
+
+  /**
    * Constructor supports both legacy (v1) and new (v2) modes
    *
    * Legacy mode (v1 - backward compatible):
@@ -134,6 +140,22 @@ export class ReasoningBank {
     this.learningBackend = learningBackend;
     this.cache = new Map();
     this.initializeSchema();
+    // ADR-0166 Phase 3 (Option F): detect virtual table availability once.
+    this.optionFEnabled = this.detectOptionF();
+  }
+
+  /**
+   * ADR-0166 Phase 3 (Option F): detect whether reasoning_pattern_vec exists.
+   */
+  private detectOptionF(): boolean {
+    try {
+      const row: any = (this.db as any).prepare?.(
+        `SELECT name FROM sqlite_master WHERE type='table' AND name='reasoning_pattern_vec'`,
+      )?.get?.();
+      return !!row;
+    } catch {
+      return false;
+    }
   }
 
   /**
@@ -200,6 +222,23 @@ export class ReasoningBank {
 
     const patternId = normalizeRowId(result.lastInsertRowid);
 
+    // ADR-0166 Phase 3 (Option F): always mirror to reasoning_pattern_vec
+    // when available, independent of which in-memory vectorBackend path is
+    // taken below. Provides a persistent SQL-side k-NN index alongside the
+    // ephemeral in-memory HNSW.
+    if (this.optionFEnabled) {
+      try {
+        this.db.prepare(`DELETE FROM reasoning_pattern_vec WHERE id = ?`).run(patternId);
+        const vecStmt = this.db.prepare(
+          `INSERT INTO reasoning_pattern_vec(id, embedding) VALUES (?, ?)`,
+        );
+        vecStmt.run(patternId, Buffer.from(embedding.buffer));
+      } catch (err) {
+        console.error(`[ReasoningBank] Option F vec mirror failed for pattern=${patternId}: ${(err as Error).message}`);
+        throw err;
+      }
+    }
+
     // Store embedding based on mode
     if (this.vectorBackend) {
       // v2: Use VectorBackend for high-performance search
@@ -229,6 +268,11 @@ export class ReasoningBank {
 
   /**
    * Store pattern embedding
+   *
+   * ADR-0166 Phase 3 (Option F): the reasoning_pattern_vec mirror runs
+   * earlier in createPattern() unconditionally, not here, so that the
+   * persistent k-NN index is populated regardless of which primary path
+   * (vectorBackend vs pattern_embeddings) handled the embedding.
    */
   private storePatternEmbedding(patternId: number, embedding: Float32Array): void {
     const blob = Buffer.from(embedding.buffer);
@@ -662,6 +706,15 @@ export class ReasoningBank {
   deletePattern(patternId: number): boolean {
     const stmt = this.db.prepare('DELETE FROM reasoning_patterns WHERE id = ?');
     const result = stmt.run(patternId);
+
+    // ADR-0166 Phase 3 (Option F): mirror delete into reasoning_pattern_vec.
+    if (this.optionFEnabled) {
+      try {
+        this.db.prepare(`DELETE FROM reasoning_pattern_vec WHERE id = ?`).run(patternId);
+      } catch (err) {
+        console.warn(`[ReasoningBank] Option F vec delete failed for pattern=${patternId}: ${(err as Error).message}`);
+      }
+    }
 
     // Invalidate cache
     this.cache.clear();

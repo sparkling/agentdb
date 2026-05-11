@@ -61,6 +61,11 @@ export class ReflexionMemory {
   private learningBackend?: LearningBackend;
   private graphBackend?: GraphBackend;
   private queryCache: QueryCache;
+  /**
+   * ADR-0166 Phase 3 (Option F): true when reflexion_episode_vec sqlite-vec
+   * virtual table is present. Detected once at construction.
+   */
+  private optionFEnabled: boolean = false;
 
   static _resetSingleton(): void { _singleton = null; }
 
@@ -126,6 +131,22 @@ export class ReflexionMemory {
           FOREIGN KEY(episode_id) REFERENCES episodes(id) ON DELETE CASCADE
         );
       `);
+    }
+    // ADR-0166 Phase 3 (Option F): detect virtual table availability once.
+    this.optionFEnabled = this.detectOptionF();
+  }
+
+  /**
+   * ADR-0166 Phase 3 (Option F): detect whether reflexion_episode_vec exists.
+   */
+  private detectOptionF(): boolean {
+    try {
+      const row: any = (this.db as any).prepare?.(
+        `SELECT name FROM sqlite_master WHERE type='table' AND name='reflexion_episode_vec'`,
+      )?.get?.();
+      return !!row;
+    } catch {
+      return false;
     }
   }
 
@@ -925,6 +946,20 @@ export class ReflexionMemory {
     `);
 
     stmt.run(episodeId, this.serializeEmbedding(embedding));
+
+    // ADR-0166 Phase 3 (Option F): mirror into reflexion_episode_vec for
+    // HNSW-indexed k-NN via SQL. Idempotent w.r.t. vectorBackend.
+    if (this.optionFEnabled) {
+      try {
+        const vecStmt = this.db.prepare(
+          `INSERT INTO reflexion_episode_vec(id, embedding) VALUES (?, ?)`,
+        );
+        vecStmt.run(episodeId, this.serializeEmbedding(embedding));
+      } catch (err) {
+        console.error(`[ReflexionMemory] Option F vec mirror failed for episode=${episodeId}: ${(err as Error).message}`);
+        throw err;
+      }
+    }
   }
 
   private serializeEmbedding(embedding: Float32Array): Buffer {
@@ -1275,6 +1310,16 @@ export class ReflexionMemory {
           `DELETE FROM episode_embeddings WHERE episode_id = ?`
         );
         embStmt.run(numericId);
+        // ADR-0166 Phase 3 (Option F): mirror delete into reflexion_episode_vec.
+        if (this.optionFEnabled) {
+          try {
+            this.db.prepare(`DELETE FROM reflexion_episode_vec WHERE id = ?`).run(numericId);
+          } catch (vecErr) {
+            const vecMsg = vecErr instanceof Error ? vecErr.message : String(vecErr);
+            // eslint-disable-next-line no-console
+            console.warn(`[ReflexionMemory] Option F vec delete failed for episode=${numericId}: ${vecMsg}`);
+          }
+        }
         const stmt = this.db.prepare(`DELETE FROM episodes WHERE id = ?`);
         const r = stmt.run(numericId);
         const changes = (r as any)?.changes ?? 0;

@@ -19,14 +19,19 @@
  * - Memory replay for reinforcement
  *
  * ADR-066 Phase P2-3
+ *
+ * ADR-0170 Phase B.1 (2026-05-11): ported from SQLite (better-sqlite3) to
+ * PostgreSQL via PostgresBackend. The SQLite code path and the Option F
+ * `hmem_vec` mirror writes were dead-stripped atomically with this commit.
+ * Native vector ops now live alongside the relational row (Phase C
+ * pgvector integration); the legacy `vectorBackend.insert(...)` parallel
+ * write path remains for the in-memory index until pgvector lands.
  */
 
+import type { PostgresBackend } from '../backends/postgres/PostgresBackend.js';
 import type { VectorBackend, SearchResult } from '../backends/VectorBackend.js';
 import { EmbeddingService } from './EmbeddingService.js';
 import { cosineSimilarity } from '../utils/vector-math.js';
-
-// Database type from db-fallback
-type Database = any;
 
 /** Memory tier in the hierarchy */
 export type MemoryTier = 'working' | 'episodic' | 'semantic';
@@ -124,18 +129,32 @@ export interface HierarchicalMemoryConfig {
   autoConsolidate: boolean;
 }
 
+/**
+ * Row shape returned by postgres SELECTs against `hierarchical_memory`.
+ * Field names match the (snake_case) column names; row hydration to
+ * MemoryItem happens in hydrateRow().
+ */
+interface HierarchicalMemoryRow {
+  id: string;
+  tier: MemoryTier;
+  content: string;
+  importance: number;
+  access_count: number;
+  created_at: number;
+  last_accessed_at: number;
+  last_rehearsed_at: number | null;
+  consolidated_at: number | null;
+  tags: string | null;
+  context: string | null;
+  metadata: string | null;
+}
+
 export class HierarchicalMemory {
-  private db: Database;
+  private backend: PostgresBackend;
   private embedder: EmbeddingService;
   private vectorBackend?: VectorBackend;
   private config: HierarchicalMemoryConfig;
-  /**
-   * ADR-0166 Phase 3 (Option F): set to true when the `hmem_vec` sqlite-vec
-   * virtual table is present on `this.db`. Detected once at init time by
-   * querying sqlite_master. When true, store/forget mirror writes into the
-   * virtual table and recall() can route k-NN through SQL.
-   */
-  private optionFEnabled: boolean = false;
+  private schemaReady: Promise<void>;
 
   // In-memory caches for fast access
   private workingMemoryCache = new Map<string, MemoryItem>();
@@ -150,12 +169,12 @@ export class HierarchicalMemory {
   };
 
   constructor(
-    db: Database,
+    backend: PostgresBackend,
     embedder: EmbeddingService,
     vectorBackend?: VectorBackend,
-    config?: Partial<HierarchicalMemoryConfig>
+    config?: Partial<HierarchicalMemoryConfig>,
   ) {
-    this.db = db;
+    this.backend = backend;
     this.embedder = embedder;
     this.vectorBackend = vectorBackend;
 
@@ -178,44 +197,33 @@ export class HierarchicalMemory {
       ...config,
     };
 
-    this.initializeDatabase();
-    this.optionFEnabled = this.detectOptionF();
+    this.schemaReady = this.initializeDatabase();
   }
 
   /**
-   * ADR-0166 Phase 3 (Option F): detect whether hmem_vec is available on
-   * `this.db`. Called once at construction; the result is cached on
-   * `this.optionFEnabled`. The virtual table is created by AgentDB SDK or
-   * the standalone MCP server at boot when sqlite-vec is loaded.
+   * Initialize database tables for hierarchical memory.
+   *
+   * The returned promise is awaited by every public method (`store`,
+   * `recall`, `forget`, `getStats`, …) before issuing its own SQL, so
+   * callers don't have to gate on a separate ready() promise.
+   *
+   * `backend.initialize()` is idempotent — the first controller to touch
+   * the shared PostgresBackend pays the cluster-warm-up cost; subsequent
+   * controllers no-op.
    */
-  private detectOptionF(): boolean {
-    try {
-      const row = this.db
-        .prepare(
-          `SELECT name FROM sqlite_master WHERE type='table' AND name='hmem_vec'`,
-        )
-        .get();
-      return !!row;
-    } catch {
-      return false;
-    }
-  }
-
-  /**
-   * Initialize database tables for hierarchical memory
-   */
-  private initializeDatabase(): void {
-    this.db.exec(`
+  private async initializeDatabase(): Promise<void> {
+    await this.backend.initialize();
+    await this.backend.exec(`
       CREATE TABLE IF NOT EXISTS hierarchical_memory (
         id TEXT PRIMARY KEY,
         tier TEXT NOT NULL,
         content TEXT NOT NULL,
         importance REAL NOT NULL,
-        access_count INTEGER DEFAULT 0,
-        created_at INTEGER NOT NULL,
-        last_accessed_at INTEGER NOT NULL,
-        last_rehearsed_at INTEGER,
-        consolidated_at INTEGER,
+        access_count BIGINT DEFAULT 0,
+        created_at BIGINT NOT NULL,
+        last_accessed_at BIGINT NOT NULL,
+        last_rehearsed_at BIGINT,
+        consolidated_at BIGINT,
         tags TEXT,
         context TEXT,
         metadata TEXT
@@ -239,8 +247,10 @@ export class HierarchicalMemory {
       tags?: string[];
       context?: Record<string, any>;
       metadata?: Record<string, any>;
-    }
+    },
   ): Promise<string> {
+    await this.schemaReady;
+
     const id = `mem-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
     const now = Date.now();
 
@@ -261,25 +271,23 @@ export class HierarchicalMemory {
       metadata: options?.metadata,
     };
 
-    // Store in database
-    const stmt = this.db.prepare(`
-      INSERT INTO hierarchical_memory (
+    await this.backend.query(
+      `INSERT INTO hierarchical_memory (
         id, tier, content, importance, access_count,
         created_at, last_accessed_at, tags, context, metadata
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `);
-
-    stmt.run(
-      id,
-      tier,
-      content,
-      importance,
-      0,
-      now,
-      now,
-      options?.tags ? JSON.stringify(options.tags) : null,
-      options?.context ? JSON.stringify(options.context) : null,
-      options?.metadata ? JSON.stringify(options.metadata) : null
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+      [
+        id,
+        tier,
+        content,
+        importance,
+        0,
+        now,
+        now,
+        options?.tags ? JSON.stringify(options.tags) : null,
+        options?.context ? JSON.stringify(options.context) : null,
+        options?.metadata ? JSON.stringify(options.metadata) : null,
+      ],
     );
 
     // Add to vector backend if available
@@ -290,24 +298,6 @@ export class HierarchicalMemory {
         createdAt: now,
         ...options?.metadata,
       });
-    }
-
-    // ADR-0166 Phase 3 (Option F): mirror embedding into the hmem_vec virtual
-    // table for SQL-side k-NN. Idempotent w.r.t. vectorBackend — both paths
-    // remain valid; recall() picks whichever is most appropriate per query.
-    if (this.optionFEnabled) {
-      try {
-        const vecStmt = this.db.prepare(
-          `INSERT INTO hmem_vec(id, embedding) VALUES (?, ?)`,
-        );
-        vecStmt.run(id, Buffer.from(new Float32Array(embedding).buffer));
-      } catch (err) {
-        // Loud trace per `feedback-no-fallbacks`: a write that succeeds on
-        // the relational table but fails on the vec mirror leaves them
-        // inconsistent. Surface the error rather than silently swallowing.
-        console.error(`[HierarchicalMemory] Option F vec mirror failed for id=${id}: ${(err as Error).message}`);
-        throw err;
-      }
     }
 
     // Cache in appropriate tier
@@ -330,10 +320,12 @@ export class HierarchicalMemory {
    * Retrieve memories matching the query
    */
   async recall(query: MemoryQuery): Promise<MemoryItem[]> {
+    await this.schemaReady;
+
     this.stats.totalAccesses++;
 
     // Generate embedding if not provided
-    const queryEmbedding = query.queryEmbedding || await this.embedder.embed(query.query);
+    const queryEmbedding = query.queryEmbedding || (await this.embedder.embed(query.query));
 
     // Determine which tiers to search
     const tiers = Array.isArray(query.tier)
@@ -367,16 +359,23 @@ export class HierarchicalMemory {
             item.metadata = { ...item.metadata, similarity: result.similarity };
           }
           return item;
-        })
-      ).then(items => items.filter((item): item is MemoryItem => item !== null));
+        }),
+      ).then((items) => items.filter((item): item is MemoryItem => item !== null));
     } else {
       // Fallback: manual search
-      results = await this.manualSearch(queryEmbedding, ['working', 'episodic', 'semantic'] as MemoryTier[], k, threshold);
+      results = await this.manualSearch(
+        queryEmbedding,
+        ['working', 'episodic', 'semantic'] as MemoryTier[],
+        k,
+        threshold,
+      );
     }
 
     // Apply forgetting curve if not including decayed
     if (!query.includeDecayed) {
-      results = results.filter(item => this.calculateRetention(item) >= this.config.forgetting.minRetention);
+      results = results.filter(
+        (item) => this.calculateRetention(item) >= this.config.forgetting.minRetention,
+      );
     }
 
     // Context-dependent recall
@@ -385,7 +384,7 @@ export class HierarchicalMemory {
     }
 
     // Update access tracking and promote if needed
-    await this.updateAccessTracking(results.map(r => r.id));
+    await this.updateAccessTracking(results.map((r) => r.id));
 
     return results.slice(0, k);
   }
@@ -429,15 +428,16 @@ export class HierarchicalMemory {
    * Rehearse a memory to strengthen retention
    */
   async rehearse(memoryId: string): Promise<void> {
+    await this.schemaReady;
+
     const now = Date.now();
 
-    const stmt = this.db.prepare(`
-      UPDATE hierarchical_memory
-      SET last_rehearsed_at = ?, access_count = access_count + 1
-      WHERE id = ?
-    `);
-
-    stmt.run(now, memoryId);
+    await this.backend.query(
+      `UPDATE hierarchical_memory
+       SET last_rehearsed_at = $1, access_count = access_count + 1
+       WHERE id = $2`,
+      [now, memoryId],
+    );
 
     // Update cache
     const item = this.workingMemoryCache.get(memoryId) || this.episodicMemoryIndex.get(memoryId);
@@ -461,7 +461,7 @@ export class HierarchicalMemory {
 
     // Calculate strength (inverse of decay rate)
     const baseStrength = 1 / this.config.forgetting.decayRate;
-    const importanceBoost = 1 + (item.importance * this.config.forgetting.importanceMultiplier);
+    const importanceBoost = 1 + item.importance * this.config.forgetting.importanceMultiplier;
     const rehearsalBoost = item.lastRehearsedAt ? this.config.forgetting.rehearsalBoost : 1.0;
 
     const strength = baseStrength * importanceBoost * rehearsalBoost;
@@ -476,56 +476,65 @@ export class HierarchicalMemory {
    * Get memory statistics
    */
   async getStats(): Promise<MemoryStats> {
-    const workingStats = this.db.prepare(`
-      SELECT
-        COUNT(*) as count,
-        AVG(importance) as avgImportance,
-        AVG(access_count) as avgAccessCount,
-        SUM(LENGTH(content)) as sizeBytes
-      FROM hierarchical_memory WHERE tier = 'working'
-    `).get();
+    await this.schemaReady;
 
-    const episodicStats = this.db.prepare(`
-      SELECT
-        COUNT(*) as count,
-        AVG(importance) as avgImportance,
-        AVG(? - created_at) as avgAge,
-        SUM(LENGTH(content)) as sizeBytes
-      FROM hierarchical_memory WHERE tier = 'episodic'
-    `).get(Date.now());
+    const workingRes = await this.backend.query(
+      `SELECT
+         COUNT(*)::BIGINT as count,
+         AVG(importance) as "avgImportance",
+         AVG(access_count) as "avgAccessCount",
+         SUM(LENGTH(content)) as "sizeBytes"
+       FROM hierarchical_memory WHERE tier = 'working'`,
+    );
+    const workingStats = (workingRes.rows[0] ?? {}) as Record<string, unknown>;
 
-    const semanticStats = this.db.prepare(`
-      SELECT
-        COUNT(*) as count,
-        AVG(importance) as avgImportance,
-        COUNT(CASE WHEN consolidated_at IS NOT NULL THEN 1 END) as consolidated,
-        SUM(LENGTH(content)) as sizeBytes
-      FROM hierarchical_memory WHERE tier = 'semantic'
-    `).get();
+    const episodicRes = await this.backend.query(
+      `SELECT
+         COUNT(*)::BIGINT as count,
+         AVG(importance) as "avgImportance",
+         AVG($1::BIGINT - created_at) as "avgAge",
+         SUM(LENGTH(content)) as "sizeBytes"
+       FROM hierarchical_memory WHERE tier = 'episodic'`,
+      [Date.now()],
+    );
+    const episodicStats = (episodicRes.rows[0] ?? {}) as Record<string, unknown>;
 
-    const totalMemories = workingStats.count + episodicStats.count + semanticStats.count;
+    const semanticRes = await this.backend.query(
+      `SELECT
+         COUNT(*)::BIGINT as count,
+         AVG(importance) as "avgImportance",
+         COUNT(CASE WHEN consolidated_at IS NOT NULL THEN 1 END)::BIGINT as consolidated,
+         SUM(LENGTH(content)) as "sizeBytes"
+       FROM hierarchical_memory WHERE tier = 'semantic'`,
+    );
+    const semanticStats = (semanticRes.rows[0] ?? {}) as Record<string, unknown>;
+
+    const workingCount = Number(workingStats.count ?? 0);
+    const episodicCount = Number(episodicStats.count ?? 0);
+    const semanticCount = Number(semanticStats.count ?? 0);
+    const semanticConsolidated = Number(semanticStats.consolidated ?? 0);
+
+    const totalMemories = workingCount + episodicCount + semanticCount;
     const promotionRate = totalMemories > 0 ? this.stats.promotions / totalMemories : 0;
 
     return {
       working: {
-        count: workingStats.count || 0,
-        sizeBytes: workingStats.sizeBytes || 0,
-        avgImportance: workingStats.avgImportance || 0,
-        avgAccessCount: workingStats.avgAccessCount || 0,
+        count: workingCount,
+        sizeBytes: Number(workingStats.sizeBytes ?? 0),
+        avgImportance: Number(workingStats.avgImportance ?? 0),
+        avgAccessCount: Number(workingStats.avgAccessCount ?? 0),
       },
       episodic: {
-        count: episodicStats.count || 0,
-        sizeBytes: episodicStats.sizeBytes || 0,
-        avgImportance: episodicStats.avgImportance || 0,
-        avgAge: episodicStats.avgAge || 0,
+        count: episodicCount,
+        sizeBytes: Number(episodicStats.sizeBytes ?? 0),
+        avgImportance: Number(episodicStats.avgImportance ?? 0),
+        avgAge: Number(episodicStats.avgAge ?? 0),
       },
       semantic: {
-        count: semanticStats.count || 0,
-        sizeBytes: semanticStats.sizeBytes || 0,
-        avgImportance: semanticStats.avgImportance || 0,
-        consolidationRate: semanticStats.count > 0
-          ? (semanticStats.consolidated || 0) / semanticStats.count
-          : 0,
+        count: semanticCount,
+        sizeBytes: Number(semanticStats.sizeBytes ?? 0),
+        avgImportance: Number(semanticStats.avgImportance ?? 0),
+        consolidationRate: semanticCount > 0 ? semanticConsolidated / semanticCount : 0,
       },
       totalMemories,
       forgottenCount: this.stats.forgotten,
@@ -542,7 +551,7 @@ export class HierarchicalMemory {
     if (currentSize > this.config.workingMemoryLimit) {
       // Get working memories sorted by importance * retention
       const memories = Array.from(this.workingMemoryCache.values())
-        .map(item => ({
+        .map((item) => ({
           ...item,
           score: item.importance * this.calculateRetention(item),
         }))
@@ -581,15 +590,16 @@ export class HierarchicalMemory {
    * Update memory tier
    */
   private async updateTier(memoryId: string, newTier: MemoryTier): Promise<void> {
+    await this.schemaReady;
+
     const now = Date.now();
 
-    const stmt = this.db.prepare(`
-      UPDATE hierarchical_memory
-      SET tier = ?, consolidated_at = ?
-      WHERE id = ?
-    `);
-
-    stmt.run(newTier, newTier === 'semantic' ? now : null, memoryId);
+    await this.backend.query(
+      `UPDATE hierarchical_memory
+       SET tier = $1, consolidated_at = $2
+       WHERE id = $3`,
+      [newTier, newTier === 'semantic' ? now : null, memoryId],
+    );
 
     // Update caches
     const item = this.workingMemoryCache.get(memoryId) || this.episodicMemoryIndex.get(memoryId);
@@ -623,7 +633,9 @@ export class HierarchicalMemory {
    * Forget (delete) a memory
    */
   private async forget(memoryId: string): Promise<void> {
-    this.db.prepare('DELETE FROM hierarchical_memory WHERE id = ?').run(memoryId);
+    await this.schemaReady;
+
+    await this.backend.query(`DELETE FROM hierarchical_memory WHERE id = $1`, [memoryId]);
     this.workingMemoryCache.delete(memoryId);
     this.episodicMemoryIndex.delete(memoryId);
     this.stats.forgotten++;
@@ -632,16 +644,27 @@ export class HierarchicalMemory {
     if (this.vectorBackend) {
       this.vectorBackend.remove(memoryId);
     }
+  }
 
-    // ADR-0166 Phase 3 (Option F): also delete from hmem_vec to keep both
-    // axes in sync. No-op when the virtual table isn't present.
-    if (this.optionFEnabled) {
-      try {
-        this.db.prepare('DELETE FROM hmem_vec WHERE id = ?').run(memoryId);
-      } catch (err) {
-        console.error(`[HierarchicalMemory] Option F vec delete failed for id=${memoryId}: ${(err as Error).message}`);
-      }
-    }
+  /**
+   * Hydrate a raw row into a MemoryItem. Shared by getMemoryById and
+   * manualSearch.
+   */
+  private hydrateRow(row: HierarchicalMemoryRow): MemoryItem {
+    return {
+      id: row.id,
+      tier: row.tier,
+      content: row.content,
+      importance: Number(row.importance),
+      accessCount: Number(row.access_count),
+      createdAt: Number(row.created_at),
+      lastAccessedAt: Number(row.last_accessed_at),
+      lastRehearsedAt: row.last_rehearsed_at != null ? Number(row.last_rehearsed_at) : undefined,
+      consolidatedAt: row.consolidated_at != null ? Number(row.consolidated_at) : undefined,
+      tags: row.tags ? JSON.parse(row.tags) : undefined,
+      context: row.context ? JSON.parse(row.context) : undefined,
+      metadata: row.metadata ? JSON.parse(row.metadata) : undefined,
+    };
   }
 
   /**
@@ -652,29 +675,14 @@ export class HierarchicalMemory {
     const cached = this.workingMemoryCache.get(id) || this.episodicMemoryIndex.get(id);
     if (cached) return cached;
 
-    // Fetch from database
-    const row = this.db.prepare(`
-      SELECT * FROM hierarchical_memory WHERE id = ?
-    `).get(id);
+    await this.schemaReady;
 
+    // Fetch from database
+    const res = await this.backend.query(`SELECT * FROM hierarchical_memory WHERE id = $1`, [id]);
+    const row = res.rows[0] as HierarchicalMemoryRow | undefined;
     if (!row) return null;
 
-    const item: MemoryItem = {
-      id: row.id,
-      tier: row.tier,
-      content: row.content,
-      importance: row.importance,
-      accessCount: row.access_count,
-      createdAt: row.created_at,
-      lastAccessedAt: row.last_accessed_at,
-      lastRehearsedAt: row.last_rehearsed_at,
-      consolidatedAt: row.consolidated_at,
-      tags: row.tags ? JSON.parse(row.tags) : undefined,
-      context: row.context ? JSON.parse(row.context) : undefined,
-      metadata: row.metadata ? JSON.parse(row.metadata) : undefined,
-    };
-
-    return item;
+    return this.hydrateRow(row);
   }
 
   /**
@@ -684,16 +692,19 @@ export class HierarchicalMemory {
     queryEmbedding: Float32Array,
     tiers: MemoryTier[],
     k: number,
-    threshold: number
+    threshold: number,
   ): Promise<MemoryItem[]> {
-    const tierFilter = tiers.map(t => `'${t}'`).join(',');
+    await this.schemaReady;
 
-    const rows = this.db.prepare(`
-      SELECT * FROM hierarchical_memory
-      WHERE tier IN (${tierFilter})
-      ORDER BY importance DESC
-      LIMIT ?
-    `).all(k * 2); // Get more to account for filtering
+    // postgres accepts an array bind for IN-list via `= ANY($1::TEXT[])`.
+    const res = await this.backend.query(
+      `SELECT * FROM hierarchical_memory
+       WHERE tier = ANY($1::TEXT[])
+       ORDER BY importance DESC
+       LIMIT $2`,
+      [tiers, k * 2],
+    );
+    const rows = res.rows as HierarchicalMemoryRow[];
 
     const results: Array<MemoryItem & { similarity: number }> = [];
 
@@ -702,20 +713,10 @@ export class HierarchicalMemory {
       const similarity = cosineSimilarity(queryEmbedding, embedding);
 
       if (similarity >= threshold) {
+        const item = this.hydrateRow(row);
         results.push({
-          id: row.id,
-          tier: row.tier,
-          content: row.content,
+          ...item,
           embedding,
-          importance: row.importance,
-          accessCount: row.access_count,
-          createdAt: row.created_at,
-          lastAccessedAt: row.last_accessed_at,
-          lastRehearsedAt: row.last_rehearsed_at,
-          consolidatedAt: row.consolidated_at,
-          tags: row.tags ? JSON.parse(row.tags) : undefined,
-          context: row.context ? JSON.parse(row.context) : undefined,
-          metadata: row.metadata ? JSON.parse(row.metadata) : undefined,
           similarity,
         });
       }
@@ -727,13 +728,16 @@ export class HierarchicalMemory {
   /**
    * Apply context filter to results
    */
-  private applyContextFilter(results: MemoryItem[], context: Record<string, any>): MemoryItem[] {
-    return results.filter(item => {
+  private applyContextFilter(
+    results: MemoryItem[],
+    context: Record<string, any>,
+  ): MemoryItem[] {
+    return results.filter((item) => {
       if (!item.context) return false;
 
       // Check if at least 50% of context keys match
       const keys = Object.keys(context);
-      const matches = keys.filter(key => item.context![key] === context[key]).length;
+      const matches = keys.filter((key) => item.context![key] === context[key]).length;
 
       return matches / keys.length >= 0.5;
     });
@@ -745,14 +749,16 @@ export class HierarchicalMemory {
   private async updateAccessTracking(ids: string[]): Promise<void> {
     if (ids.length === 0) return;
 
-    const now = Date.now();
-    const placeholders = ids.map(() => '?').join(',');
+    await this.schemaReady;
 
-    this.db.prepare(`
-      UPDATE hierarchical_memory
-      SET access_count = access_count + 1, last_accessed_at = ?
-      WHERE id IN (${placeholders})
-    `).run(now, ...ids);
+    const now = Date.now();
+
+    await this.backend.query(
+      `UPDATE hierarchical_memory
+       SET access_count = access_count + 1, last_accessed_at = $1
+       WHERE id = ANY($2::TEXT[])`,
+      [now, ids],
+    );
 
     // Update caches
     for (const id of ids) {
@@ -775,7 +781,9 @@ export class HierarchicalMemory {
 
     if (episodicCount >= this.config.consolidation.maxEpisodicSize) {
       // Trigger consolidation (will be handled by MemoryConsolidation service)
-      console.log(`⚠️ Episodic memory full (${episodicCount} items). Consolidation recommended.`);
+      console.log(
+        `⚠️ Episodic memory full (${episodicCount} items). Consolidation recommended.`,
+      );
     }
   }
 }

@@ -19,21 +19,13 @@ async function sqliteVecAvailable(): Promise<boolean> {
 }
 
 describe('ADR-0166 Phase 3 — per-controller Option F wiring', () => {
-  it('HierarchicalMemory.store mirrors embedding into hmem_vec', async () => {
-    if (!(await sqliteVecAvailable())) return;
-    const db = new AgentDB({ vectorIndex: 'sqlite-vec' });
-    await db.initialize();
-    expect(db.sqliteVecLoaded).toBe(true);
-
-    const hm: any = db.getController('hierarchicalMemory');
-    const memoryId = await hm.store('test-content-hmem', 0.5, 'working');
-    expect(typeof memoryId).toBe('string');
-
-    const rawDb = (db as any).db;
-    const rowCount = rawDb
-      .prepare(`SELECT COUNT(*) AS c FROM hmem_vec WHERE id = ?`)
-      .get(memoryId) as { c: number };
-    expect(rowCount.c).toBe(1);
+  // ADR-0170 Phase B.1 (2026-05-11): HierarchicalMemory ported to
+  // PostgresBackend; the `hmem_vec` Option F mirror writes were
+  // dead-stripped atomically with the port. This contract no longer
+  // applies — under postgres, vector ops live alongside the row via
+  // pgvector (Phase C), not a sidecar virtual table.
+  it.skip('HierarchicalMemory.store mirrors embedding into hmem_vec (RETIRED — ADR-0170 Phase B.1)', () => {
+    /* intentionally skipped */
   });
 
   it('ReflexionMemory.storeEpisode mirrors into reflexion_episode_vec', async () => {

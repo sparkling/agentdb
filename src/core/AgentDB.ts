@@ -19,6 +19,7 @@ import { BatchOperations } from '../optimizations/BatchOperations.js';
 import { HierarchicalMemory } from '../controllers/HierarchicalMemory.js';
 import { MemoryConsolidation } from '../controllers/MemoryConsolidation.js';
 import { WASMVectorSearch } from '../controllers/WASMVectorSearch.js';
+import { PostgresBackend } from '../backends/postgres/PostgresBackend.js';
 import { AuditLogger } from '../services/audit-logger.service.js';
 import { getEmbeddingConfig } from '../config/embedding-config.js';
 import { createGuardedBackend } from '../backends/factory.js';
@@ -151,6 +152,13 @@ export class AgentDB {
   private batchOperations?: BatchOperations;
   private hierarchicalMemory?: HierarchicalMemory;
   private memoryConsolidation?: MemoryConsolidation;
+  // ADR-0170 Phase B: shared PostgresBackend for postgres-dialect
+  // controllers. Lazy-constructed at first request from getController().
+  // pglite-embedded by default (config.connectionString opts into server
+  // mode). PostgresBackend.initialize() is idempotent; each controller
+  // awaits it before issuing SQL so the cluster warm-up cost is paid once
+  // per AgentDB instance.
+  private postgresBackend?: PostgresBackend;
   // sparkling/agentic-flow#6: lazy singleton for WASM vector search
   private wasmVectorSearch: any = null;
   // ADR-0069 F1: Phase 2 RuVector controllers (set externally or null)
@@ -396,6 +404,28 @@ export class AgentDB {
     this.initialized = true;
   }
 
+  /**
+   * Lazily construct the shared PostgresBackend instance used by
+   * postgres-dialect controllers (ADR-0170 Phase B). Embedded pglite by
+   * default; opt into server mode via `config.connectionString` or the
+   * `AGENTDB_POSTGRES_URL` env var.
+   *
+   * The backend's own `initialize()` is async; each consumer controller
+   * awaits it before its first SQL call, so this helper returns the
+   * (uninitialized) handle synchronously to fit the sync getController()
+   * contract. The construction itself is cheap — pglite/pg dynamic imports
+   * happen inside `initialize()`, not the constructor.
+   */
+  private getPostgresBackend(): PostgresBackend {
+    if (!this.postgresBackend) {
+      this.postgresBackend = new PostgresBackend({
+        metric: 'cosine',
+        connectionString: this.config.connectionString,
+      });
+    }
+    return this.postgresBackend;
+  }
+
   getController(name: string): any {
     if (!this.initialized) {
       throw new Error('AgentDB not initialized. Call initialize() first.');
@@ -442,7 +472,14 @@ export class AgentDB {
       case 'attentionService':
         return this.attentionService;
       case 'hierarchicalMemory':
-        return (this.hierarchicalMemory ??= new HierarchicalMemory(this.db, this.embedder));
+        // ADR-0170 Phase B.1: HierarchicalMemory runs on PostgresBackend
+        // (pglite-embedded by default, postgres-server when AGENTDB_POSTGRES_URL
+        // or config.connectionString is set). Sibling controllers retain
+        // their SQLite `this.db` handle until their own Phase B commit lands.
+        return (this.hierarchicalMemory ??= new HierarchicalMemory(
+          this.getPostgresBackend(),
+          this.embedder,
+        ));
       case 'memoryConsolidation':
         return (this.memoryConsolidation ??= new MemoryConsolidation(
           this.db,

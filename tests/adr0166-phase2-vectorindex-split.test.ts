@@ -73,10 +73,21 @@ describe('ADR-0166 Phase 2 — vectorIndex + primaryStorage split', () => {
     );
   });
 
-  it('rejects vectorIndex="sqlite-vec" until Phase 3 lands (loud-error)', async () => {
+  it('accepts vectorIndex="sqlite-vec" when the extension is installed (Phase 3)', async () => {
+    // ADR-0166 Phase 3 lifted the Phase 2 "not yet implemented" throw. If
+    // sqlite-vec is installed (optionalDependency), init succeeds. If not
+    // installed on this platform, init throws a loud "extension failed to load"
+    // error — the assertion captures either case strictly (one of two, not none).
     const db = new AgentDB({ vectorIndex: 'sqlite-vec' as const });
-    await expect(db.initialize()).rejects.toThrow(
-      /vectorIndex='sqlite-vec' is not yet implemented/,
-    );
+    try {
+      await db.initialize();
+      // Loaded path
+      expect(db.sqliteVecLoaded).toBe(true);
+    } catch (err) {
+      // Loud-error path: extension absent
+      expect((err as Error).message).toMatch(
+        /vectorIndex='sqlite-vec' requested but extension failed to load|requires native better-sqlite3 extension loading/,
+      );
+    }
   });
 });

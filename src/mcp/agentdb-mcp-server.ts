@@ -237,26 +237,37 @@ const embeddingService = new EmbeddingService({
 });
 await embeddingService.initialize();
 
-// Database: try unified (RVF + SQLite), fall back to SQLite-only
-let db: any;
-try {
-  const { createUnifiedDatabase } = await import('../db-unified.js');
-  const unified = await createUnifiedDatabase(dbPath, embeddingService, {
-    dimensions: embCfg.dimension,
-  });
-  db = unified.getSQLiteDatabase() ?? unified;
-  console.error('✅ Unified database backend loaded (RVF + SQLite)');
-} catch {
-  // Unified not available — pure SQLite fallback
-  db = await createDatabase(dbPath);
-  console.error('ℹ️  Using SQLite-only database backend (unified not available)');
-}
+// ADR-0166 Phase 3 (Option F): the SQLite handle is the primary substrate
+// for the `agentdb_*` axis. The pre-Phase-3 `unified.getSQLiteDatabase() ?? unified`
+// defang has been removed; we open SQLite directly and (best-effort) load the
+// sqlite-vec extension on top. The unified.getGraphDatabase() path remains
+// available for tools that want it, but the MCP server's primary handle is
+// the SQLite one — axis-separated per Amendment 2026-05-11f.
+const db: any = await createDatabase(dbPath);
+console.error('✅ SQLite backend loaded (agentdb_* axis — ADR-0166 Option F)');
 
 // Configure for performance
 db.pragma('journal_mode = WAL');
 db.pragma('busy_timeout = 5000'); // ADR-0069 A1: required with WAL mode
 db.pragma('synchronous = NORMAL');
 db.pragma('cache_size = -64000');
+
+// ADR-0166 Phase 3 (Option F): try to load sqlite-vec for vec0 virtual tables.
+// Failure to load is non-fatal here (the MCP server stays usable without
+// Option F augmentation); SDK boot has its own strict load path that fails
+// loudly when the user opts in via `vectorIndex='sqlite-vec'`.
+let sqliteVecLoaded = false;
+try {
+  const sqliteVec: any = await import('sqlite-vec');
+  const loadFn = sqliteVec.load ?? sqliteVec.default?.load;
+  if (typeof loadFn === 'function') {
+    loadFn(db);
+    sqliteVecLoaded = true;
+    console.error('✅ sqlite-vec extension loaded (Option F augmentation enabled)');
+  }
+} catch {
+  console.error('ℹ️  sqlite-vec extension unavailable — Option F augmentation disabled');
+}
 
 // Vector backend: auto-detect best available (RuVector > RVF > HNSWLib > brute-force)
 let vectorBackend: any = null;
@@ -287,6 +298,22 @@ try {
     const frontierSQL = fs.readFileSync(frontierSchemaPath, 'utf-8');
     db.exec(frontierSQL);
     console.error('✅ Frontier schema loaded');
+  }
+
+  // ADR-0166 Phase 3 (Option F): per-controller vec0 virtual tables.
+  // Same set as AgentDB SDK's createOptionFVirtualTables(). Idempotent.
+  if (sqliteVecLoaded) {
+    const dim = embCfg.dimension;
+    db.exec([
+      `CREATE VIRTUAL TABLE IF NOT EXISTS hmem_vec USING vec0(embedding float[${dim}]);`,
+      `CREATE VIRTUAL TABLE IF NOT EXISTS consolidated_vec USING vec0(embedding float[${dim}]);`,
+      `CREATE VIRTUAL TABLE IF NOT EXISTS reflexion_episode_vec USING vec0(embedding float[${dim}]);`,
+      `CREATE VIRTUAL TABLE IF NOT EXISTS skill_vec USING vec0(embedding float[${dim}]);`,
+      `CREATE VIRTUAL TABLE IF NOT EXISTS reasoning_pattern_vec USING vec0(embedding float[${dim}]);`,
+      `CREATE VIRTUAL TABLE IF NOT EXISTS recall_vec USING vec0(embedding float[${dim}]);`,
+      `CREATE VIRTUAL TABLE IF NOT EXISTS learning_vec USING vec0(embedding float[${dim}]);`,
+    ].join('\n'));
+    console.error('✅ Option F vec0 virtual tables created');
   }
 
   console.error('✅ Database schema initialized');

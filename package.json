@@ -215,7 +215,8 @@
     "inquirer": "^9.3.8",
     "ruvector": "0.1.2-patch.527",
     "ruvector-attention-wasm": "^0.1.32",
-    "ruvector-graph-transformer-wasm": "^2.0.4"
+    "ruvector-graph-transformer-wasm": "^2.0.4",
+    "sqlite-vec": "^0.1.6"
   },
   "overrides": {
     "@xenova/transformers": {

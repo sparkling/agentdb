@@ -124,6 +124,12 @@ export class AgentDB {
   private initialized = false;
   private config: AgentDBConfig;
   private usingWasm = false;
+  // ADR-0166 Phase 3 (Option F): tracks whether the sqlite-vec extension
+  // is loaded on `this.db`. Controllers consult this flag to decide whether
+  // to route vector ops through the `<controller>_vec` virtual tables
+  // (Option F augmentation) or fall back to the pre-Option-F path
+  // (createGuardedBackend → RuVector/HNSWLib/sql.js-RVF).
+  private _sqliteVecLoaded = false;
 
   constructor(config: AgentDBConfig = {}) {
     this.config = config;
@@ -220,23 +226,27 @@ export class AgentDB {
       );
     }
 
-    // ADR-0166 Phase 2/3 split: 'sqlite-vec' is reserved for Phase 3 (Option F).
-    // Until per-controller CREATE VIRTUAL TABLE statements land in schema.sql,
-    // refuse the value rather than silently falling back to 'auto' (which would
-    // violate `feedback-no-fallbacks` by masking incomplete delivery).
-    if (resolvedVI === 'sqlite-vec') {
-      throw new Error(
-        `[AgentDB] vectorIndex='sqlite-vec' is not yet implemented. ` +
-        `ADR-0166 Phase 3 (Option F) per-controller virtual-table augmentation has ` +
-        `not yet landed. Use 'auto', 'ruvector', or 'hnswlib' until Phase 3 ships.`
-      );
+    // ADR-0166 Phase 3 (Option F): try to load the sqlite-vec extension.
+    // - WASM substrate: extension loading unsupported; loud-error iff user
+    //   explicitly opted in (vectorIndex='sqlite-vec') per feedback-no-fallbacks.
+    // - Native substrate: try sqliteVec.load(); on failure, loud-error iff opted in,
+    //   else proceed in degraded mode (pre-Option-F path remains valid).
+    this._sqliteVecLoaded = await this.tryLoadSqliteVec(resolvedVI);
+    if (this._sqliteVecLoaded) {
+      this.createOptionFVirtualTables(dim);
     }
 
     // Initialize proof-gated vector backend (ADR-060)
     // ADR-0166 Phase 1: honor the resolved vectorIndex (was hard-coded 'auto').
+    // ADR-0166 Phase 3: when vectorIndex='sqlite-vec', the search axis runs via
+    // virtual tables (no in-memory backend needed); pass 'auto' to the factory
+    // so the in-memory backend still gets initialized (controllers fall back to
+    // it for ops not yet migrated to Option F).
+    const factoryType: 'auto' | 'ruvector' | 'hnswlib' =
+      resolvedVI === 'sqlite-vec' ? 'auto' : resolvedVI;
     let controllerVB: VectorBackend | null = null;
     try {
-      const { backend, guard, log } = await createGuardedBackend(resolvedVI as 'auto' | 'ruvector' | 'hnswlib', {
+      const { backend, guard, log } = await createGuardedBackend(factoryType, {
         dimensions: dim,
         metric: 'cosine',
         maxElements: this.config.maxElements ?? getEmbeddingConfig().maxElements, // ADR-0069: config-chain capacity
@@ -499,5 +509,103 @@ export class AgentDB {
   // Get vector backend info
   get vectorBackendName(): string {
     return this.vectorBackend?.name || 'none';
+  }
+
+  /**
+   * ADR-0166 Phase 3 (Option F): true when the sqlite-vec extension is loaded
+   * on `this.db` and per-controller virtual tables (`<controller>_vec`) are
+   * available for k-NN routing. Controllers consult this getter to pick between
+   * Option F (virtual-table path) and the pre-Option-F path.
+   */
+  get sqliteVecLoaded(): boolean {
+    return this._sqliteVecLoaded;
+  }
+
+  /**
+   * ADR-0166 Phase 3 (Option F): load the sqlite-vec extension on `this.db`
+   * when running on better-sqlite3. Returns true when loaded, false when
+   * gracefully degraded (extension absent and user did NOT opt in).
+   *
+   * Loud-error per `feedback-no-fallbacks` when:
+   *  - vectorIndex='sqlite-vec' on WASM substrate (no extension loader exists)
+   *  - vectorIndex='sqlite-vec' on native substrate and load() throws
+   */
+  private async tryLoadSqliteVec(
+    resolvedVI: 'auto' | 'ruvector' | 'hnswlib' | 'sqlite-vec',
+  ): Promise<boolean> {
+    if (this.usingWasm) {
+      if (resolvedVI === 'sqlite-vec') {
+        throw new Error(
+          `[AgentDB] vectorIndex='sqlite-vec' requires native better-sqlite3 ` +
+          `extension loading; the sql.js WASM substrate cannot host sqlite-vec ` +
+          `virtual tables. Either install better-sqlite3 or pick a different ` +
+          `vectorIndex for WASM environments.`,
+        );
+      }
+      return false;
+    }
+    try {
+      const sqliteVec: any = await import('sqlite-vec');
+      // sqlite-vec exposes `load(db)` which calls db.loadExtension under the hood.
+      const loadFn = sqliteVec.load ?? sqliteVec.default?.load;
+      if (typeof loadFn !== 'function') {
+        throw new Error('sqlite-vec module loaded but `load(db)` function not found');
+      }
+      loadFn(this.db);
+      console.log('[AgentDB] sqlite-vec extension loaded (ADR-0166 Option F augmentation enabled)');
+      return true;
+    } catch (err) {
+      const message = (err as Error).message ?? String(err);
+      if (resolvedVI === 'sqlite-vec') {
+        throw new Error(
+          `[AgentDB] vectorIndex='sqlite-vec' requested but extension failed to load: ` +
+          `${message}. Install with: npm install sqlite-vec`,
+        );
+      }
+      // Degraded mode: pre-Option-F path remains valid. No silent fallback —
+      // controllers explicitly check `sqliteVecLoaded` before routing through
+      // virtual tables.
+      return false;
+    }
+  }
+
+  /**
+   * ADR-0166 Phase 3 (Option F): create the per-controller vec0 virtual tables.
+   * Called from initialize() after the schemas are loaded and sqlite-vec is
+   * available. Idempotent (IF NOT EXISTS).
+   *
+   * The 9 augmented controllers per ADR-0166 §"Phase 3 — controllers to augment":
+   *   TRIVIAL:  hmem_vec, consolidated_vec, (SyncCoordinator has no vector ops)
+   *   MODERATE: reflexion_episode_vec, skill_vec, reasoning_pattern_vec,
+   *             recall_vec, learning_vec, quic_vec (when QUICServer has ops)
+   *
+   * The 5 PERMANENT_SQLITE_CARVE_OUT controllers are intentionally absent:
+   *   CausalMemoryGraph, CausalRecall, NightlyLearner, LearningSystem
+   *   aggregations, ReasoningBank GROUP BY queries.
+   */
+  private createOptionFVirtualTables(dim: number): void {
+    if (!this._sqliteVecLoaded) return;
+    const ddl = [
+      // TRIVIAL bucket
+      `CREATE VIRTUAL TABLE IF NOT EXISTS hmem_vec USING vec0(embedding float[${dim}]);`,
+      `CREATE VIRTUAL TABLE IF NOT EXISTS consolidated_vec USING vec0(embedding float[${dim}]);`,
+      // MODERATE bucket
+      `CREATE VIRTUAL TABLE IF NOT EXISTS reflexion_episode_vec USING vec0(embedding float[${dim}]);`,
+      `CREATE VIRTUAL TABLE IF NOT EXISTS skill_vec USING vec0(embedding float[${dim}]);`,
+      `CREATE VIRTUAL TABLE IF NOT EXISTS reasoning_pattern_vec USING vec0(embedding float[${dim}]);`,
+      `CREATE VIRTUAL TABLE IF NOT EXISTS recall_vec USING vec0(embedding float[${dim}]);`,
+      `CREATE VIRTUAL TABLE IF NOT EXISTS learning_vec USING vec0(embedding float[${dim}]);`,
+    ].join('\n');
+    try {
+      this.db.exec(ddl);
+    } catch (err) {
+      // sqlite-vec is loaded but vec0 module syntax was rejected. Loud-fail —
+      // this signals a sqlite-vec ABI break or version mismatch, not a graceful
+      // missing-feature situation.
+      throw new Error(
+        `[AgentDB] sqlite-vec extension loaded but vec0 virtual-table DDL failed: ` +
+        `${(err as Error).message}. Check sqlite-vec version compatibility.`,
+      );
+    }
   }
 }

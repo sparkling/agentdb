@@ -61,22 +61,52 @@ export interface AgentDBConfig {
    */
   vectorBackend?: 'auto' | 'ruvector' | 'hnswlib';
   /**
-   * Vector-search index engine (ADR-0166 Phase 2, Option E split).
+   * Vector-search index engine (ADR-0170 §Phase A item 4 widens the union).
    *
-   * `'auto'` resolves at runtime via factory detection. `'sqlite-vec'` is
-   * reserved for ADR-0166 Phase 3 (Option F) and currently throws a loud
-   * `not-yet-implemented` error per `feedback-no-fallbacks` if requested.
+   * Under ADR-0170 the valid values are:
+   *   - `'auto'` — runtime factory detection (cascades through available
+   *     backends; Phase C will prefer pgvector when it lands)
+   *   - `'pgvector'` — postgres-native HNSW/IVFFlat index (Phase C)
+   *   - `'postgres-cli'` — higher-level @ruvector/postgres-cli surface
+   *
+   * The legacy values `'ruvector'` and `'hnswlib'` are retired per
+   * ADR-0170 §"Implementation pre-flight item 1" — passing either throws
+   * a loud error at boot pointing users to `'pgvector'` or `'auto'`.
+   *
+   * Phase A keeps the broader union for forward declaration; the
+   * loud-rejection of 'ruvector'/'hnswlib' is implemented in
+   * initialize() below (config-validation throw).
+   *
+   * `'sqlite-vec'` remains in the declared union for Phase A diff
+   * cleanliness (the existing tryLoadSqliteVec() path checks for it),
+   * but Phase D removes it alongside Option F dead-strip.
    */
-  vectorIndex?: 'auto' | 'ruvector' | 'hnswlib' | 'sqlite-vec';
+  vectorIndex?: 'auto' | 'ruvector' | 'hnswlib' | 'sqlite-vec' | 'pgvector' | 'postgres-cli';
   /**
-   * Primary persistence substrate (ADR-0166 Phase 2, Option E split).
+   * Primary persistence substrate (ADR-0170 §Phase A item 4).
    *
-   * Only `'sqlite'` is valid under Amendment 2026-05-11f (Option F retired the
-   * substrate-flip path). The type is restricted to `'sqlite'`; passing any
-   * other value via the TS escape hatch (`as any`) triggers a loud-error boot
-   * per `feedback-no-fallbacks`.
+   * Under ADR-0170 the valid values are:
+   *   - `'pglite'` (default) — embedded WASM postgres 15 via
+   *     @electric-sql/pglite. Persists to <dataDir>/.
+   *   - `'postgres'` — real postgres server via node-postgres. Opt-in via
+   *     this field set to 'postgres' or via the AGENTDB_POSTGRES_URL env.
+   *
+   * The legacy value `'sqlite'` is REMOVED. There is no 'auto'-cascade for
+   * the relational substrate axis — passing 'auto' or anything other than
+   * 'pglite'/'postgres' throws a loud error at boot per
+   * memory feedback-no-fallbacks. See ADR-0170 §"No-fallback policy".
    */
-  primaryStorage?: 'sqlite';
+  primaryStorage?: 'pglite' | 'postgres';
+  /**
+   * Optional PostgreSQL connection string (ADR-0170 §Phase A item 4).
+   *
+   * When set, AgentDB runs in server mode against the supplied URL. When
+   * unset and primaryStorage='postgres', the AGENTDB_POSTGRES_URL env var
+   * is consulted next. When both are unset and primaryStorage='pglite'
+   * (or unset), AgentDB runs in embedded pglite mode against
+   * `<dataDir>/.swarm/memory.pglite/` (see PostgresBackend.resolveDataDir).
+   */
+  connectionString?: string;
   /** Vector dimension (default: 768 for nomic-embed-text-v1.5) */
   vectorDimension?: number;
   /** Embedding model ID (default: 'nomic-ai/nomic-embed-text-v1.5') */
@@ -220,18 +250,46 @@ export class AgentDB {
         `Use vectorIndex='${legacyVB}' instead. The alias will be removed in a future major.`,
       );
     }
-    const resolvedVI: 'auto' | 'ruvector' | 'hnswlib' | 'sqlite-vec' =
+    // ADR-0170 Phase A.4: the union widens to include 'pgvector' and
+    // 'postgres-cli' (Phase C-bound). 'ruvector' and 'hnswlib' are
+    // loud-rejected below — they never reach resolvedVI. The Phase A
+    // factory call still cascades through ruvector/rvf/hnswlib for the
+    // vector-index axis until Phase C wires pgvector as the preferred
+    // winner.
+    const resolvedVI: 'auto' | 'ruvector' | 'hnswlib' | 'sqlite-vec' | 'pgvector' | 'postgres-cli' =
       explicitVI ?? legacyVB ?? 'auto';
 
-    // ADR-0166 Phase 2: `primaryStorage` is `'sqlite'`-only under Option F.
-    // Per `feedback-no-fallbacks`, reject any other value loudly at boot
-    // rather than silently downgrading.
+    // ADR-0170 Phase A.4 config validation (replaces the ADR-0166 'sqlite'-
+    // only check). Valid values are 'pglite' | 'postgres'; 'sqlite' is
+    // retired. Per memory feedback-no-fallbacks, reject any other value
+    // (including 'auto' and the legacy 'sqlite') loudly at boot.
+    //
+    // NOTE: the SQLite open path below remains active in Phase A — the
+    // strict "pglite or postgres or throw" boot gate activates with
+    // Phase B's first controller commit per ADR-0170 §Phase A item 1.
+    // Phase A is plumbing; the substrate is not yet swapped under the
+    // running controllers.
     const ps = (this.config as any).primaryStorage;
-    if (ps !== undefined && ps !== 'sqlite') {
+    if (ps !== undefined && ps !== 'pglite' && ps !== 'postgres') {
       throw new Error(
         `[AgentDB] AgentDBConfig.primaryStorage='${ps}' is not supported. ` +
-        `ADR-0166 Amendment 2026-05-11f retired the substrate-flip; only 'sqlite' ` +
-        `is valid under Option F. See docs/adr/ADR-0166 §"Phase plan — final".`
+        `ADR-0170 retires SQLite for the agentdb_* axis; only 'pglite' (embedded) ` +
+        `and 'postgres' (server) are valid. See docs/adr/ADR-0170-agentdb-substrate-replacement-postgresql.md ` +
+        `§"No-fallback policy". The relational substrate axis has no 'auto' value.`
+      );
+    }
+
+    // ADR-0170 Phase A.4 config validation: vectorIndex 'ruvector' and
+    // 'hnswlib' are retired (vectors become first-class column types under
+    // pgvector in Phase C). Reject them loudly per feedback-no-fallbacks.
+    const viRaw = (this.config as any).vectorIndex;
+    if (viRaw === 'ruvector' || viRaw === 'hnswlib') {
+      throw new Error(
+        `[AgentDB] AgentDBConfig.vectorIndex='${viRaw}' is not supported. ` +
+        `ADR-0170 §"Implementation pre-flight item 1" retires the in-memory ` +
+        `vector-index axis selection — vectors become first-class column types ` +
+        `under pgvector in Phase C. Use vectorIndex='pgvector' or vectorIndex='auto' ` +
+        `instead.`
       );
     }
 
@@ -251,8 +309,15 @@ export class AgentDB {
     // virtual tables (no in-memory backend needed); pass 'auto' to the factory
     // so the in-memory backend still gets initialized (controllers fall back to
     // it for ops not yet migrated to Option F).
+    //
+    // ADR-0170 Phase A.4: 'pgvector' / 'postgres-cli' also route 'auto' to the
+    // factory in Phase A — pgvector tables don't exist yet (Phase C). The
+    // factory's vector-index auto-cascade picks the available in-memory
+    // backend until Phase C lights up pgvector.
     const factoryType: 'auto' | 'ruvector' | 'hnswlib' =
-      resolvedVI === 'sqlite-vec' ? 'auto' : resolvedVI;
+      resolvedVI === 'sqlite-vec' || resolvedVI === 'pgvector' || resolvedVI === 'postgres-cli'
+        ? 'auto'
+        : resolvedVI;
     let controllerVB: VectorBackend | null = null;
     try {
       const { backend, guard, log } = await createGuardedBackend(factoryType, {
@@ -540,7 +605,7 @@ export class AgentDB {
    *  - vectorIndex='sqlite-vec' on native substrate and load() throws
    */
   private async tryLoadSqliteVec(
-    resolvedVI: 'auto' | 'ruvector' | 'hnswlib' | 'sqlite-vec',
+    resolvedVI: 'auto' | 'ruvector' | 'hnswlib' | 'sqlite-vec' | 'pgvector' | 'postgres-cli',
   ): Promise<boolean> {
     if (this.usingWasm) {
       if (resolvedVI === 'sqlite-vec') {

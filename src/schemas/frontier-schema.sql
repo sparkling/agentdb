@@ -1,9 +1,16 @@
 -- ============================================================================
--- AgentDB Frontier Features Schema Extension
+-- AgentDB Frontier Features Schema Extension (PostgreSQL dialect — ADR-0170)
 -- ============================================================================
 -- Implements cutting-edge memory features:
 -- 1. Causal Memory Graph - Store edges with causal strength, not just similarity
 -- 2. Explainable Recall Certificates - Provenance and justification tracking
+-- ============================================================================
+--
+-- ADR-0170 Phase A.5 — ported from SQLite to PostgreSQL dialect (same rules
+-- as schema.sql). The `WITH RECURSIVE causal_chains` view uses postgres
+-- recursion syntax which is broadly the same as SQLite but the path
+-- concatenation uses `||` consistently (postgres has no TEXT vs TEXT
+-- coercion issues that SQLite sometimes has).
 -- ============================================================================
 
 -- ============================================================================
@@ -12,10 +19,10 @@
 
 -- Causal edges between memories with intervention effects
 CREATE TABLE IF NOT EXISTS causal_edges (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  from_memory_id INTEGER NOT NULL,
+  id BIGSERIAL PRIMARY KEY,
+  from_memory_id BIGINT NOT NULL,
   from_memory_type TEXT NOT NULL, -- 'episode', 'skill', 'note', 'fact'
-  to_memory_id INTEGER NOT NULL,
+  to_memory_id BIGINT NOT NULL,
   to_memory_type TEXT NOT NULL,
 
   -- Traditional similarity
@@ -24,7 +31,7 @@ CREATE TABLE IF NOT EXISTS causal_edges (
   -- Causal metrics
   uplift REAL, -- E[y|do(x)] - E[y]
   confidence REAL DEFAULT 0.5, -- Confidence in causal claim
-  sample_size INTEGER, -- Number of observations
+  sample_size BIGINT, -- Number of observations
 
   -- Evidence and provenance
   evidence_ids TEXT, -- JSON array of proof IDs
@@ -33,11 +40,11 @@ CREATE TABLE IF NOT EXISTS causal_edges (
 
   -- Metadata
   mechanism TEXT, -- Hypothesized causal mechanism
-  created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
-  updated_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
-  last_validated_at INTEGER,
+  created_at BIGINT NOT NULL DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT,
+  updated_at BIGINT NOT NULL DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT,
+  last_validated_at BIGINT,
 
-  metadata JSON
+  metadata JSONB
 
   -- Note: Foreign keys removed to allow flexible causal edges between any concepts
   -- from_memory_id and to_memory_id can be 0 for abstract causal relationships
@@ -50,17 +57,17 @@ CREATE INDEX IF NOT EXISTS idx_causal_edges_confidence ON causal_edges(confidenc
 
 -- Causal experiments (A/B tests for uplift estimation)
 CREATE TABLE IF NOT EXISTS causal_experiments (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  id BIGSERIAL PRIMARY KEY,
   name TEXT NOT NULL,
   hypothesis TEXT NOT NULL,
-  treatment_id INTEGER NOT NULL, -- Memory used as treatment
+  treatment_id BIGINT NOT NULL, -- Memory used as treatment
   treatment_type TEXT NOT NULL,
-  control_id INTEGER, -- Optional control memory
+  control_id BIGINT, -- Optional control memory
 
   -- Experiment design
-  start_time INTEGER NOT NULL,
-  end_time INTEGER,
-  sample_size INTEGER DEFAULT 0,
+  start_time BIGINT NOT NULL,
+  end_time BIGINT,
+  sample_size BIGINT DEFAULT 0,
 
   -- Results
   treatment_mean REAL,
@@ -73,8 +80,8 @@ CREATE TABLE IF NOT EXISTS causal_experiments (
   -- Status
   status TEXT DEFAULT 'running', -- 'running', 'completed', 'failed'
 
-  metadata JSON,
-  created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
+  metadata JSONB,
+  created_at BIGINT NOT NULL DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT
 );
 
 CREATE INDEX IF NOT EXISTS idx_causal_experiments_status ON causal_experiments(status);
@@ -82,9 +89,9 @@ CREATE INDEX IF NOT EXISTS idx_causal_experiments_treatment ON causal_experiment
 
 -- Causal observations (individual data points)
 CREATE TABLE IF NOT EXISTS causal_observations (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  experiment_id INTEGER NOT NULL,
-  episode_id INTEGER NOT NULL,
+  id BIGSERIAL PRIMARY KEY,
+  experiment_id BIGINT NOT NULL,
+  episode_id BIGINT NOT NULL,
 
   -- Treatment assignment
   is_treatment BOOLEAN NOT NULL,
@@ -94,8 +101,8 @@ CREATE TABLE IF NOT EXISTS causal_observations (
   outcome_type TEXT, -- 'reward', 'success', 'latency'
 
   -- Context
-  context JSON,
-  observed_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
+  context JSONB,
+  observed_at BIGINT NOT NULL DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT,
 
   FOREIGN KEY(experiment_id) REFERENCES causal_experiments(id) ON DELETE CASCADE,
   FOREIGN KEY(episode_id) REFERENCES episodes(id) ON DELETE CASCADE
@@ -134,20 +141,23 @@ CREATE TABLE IF NOT EXISTS recall_certificates (
   access_level TEXT, -- 'public', 'internal', 'confidential', 'restricted'
 
   -- Metadata
-  created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
-  latency_ms INTEGER,
+  created_at BIGINT NOT NULL DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT,
+  latency_ms BIGINT,
 
-  metadata JSON
+  metadata JSONB
 );
 
 CREATE INDEX IF NOT EXISTS idx_recall_certificates_query ON recall_certificates(query_id);
 CREATE INDEX IF NOT EXISTS idx_recall_certificates_created ON recall_certificates(created_at DESC);
+-- tsvector FTS over query_text (replaces SQLite FTS5 virtual table)
+CREATE INDEX IF NOT EXISTS idx_recall_certificates_query_text_fts
+  ON recall_certificates USING GIN (to_tsvector('english', query_text));
 
 -- Provenance sources (for Merkle tree construction)
 CREATE TABLE IF NOT EXISTS provenance_sources (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  id BIGSERIAL PRIMARY KEY,
   source_type TEXT NOT NULL, -- 'episode', 'skill', 'note', 'fact', 'external'
-  source_id INTEGER NOT NULL,
+  source_id BIGINT NOT NULL,
 
   -- Content hash
   content_hash TEXT NOT NULL UNIQUE,
@@ -157,10 +167,10 @@ CREATE TABLE IF NOT EXISTS provenance_sources (
   derived_from TEXT, -- JSON array of parent hashes
 
   -- Metadata
-  created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
+  created_at BIGINT NOT NULL DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT,
   creator TEXT, -- User or system identifier
 
-  metadata JSON
+  metadata JSONB
 );
 
 CREATE INDEX IF NOT EXISTS idx_provenance_sources_type ON provenance_sources(source_type, source_id);
@@ -169,7 +179,7 @@ CREATE INDEX IF NOT EXISTS idx_provenance_sources_parent ON provenance_sources(p
 
 -- Justification paths (why a chunk was included)
 CREATE TABLE IF NOT EXISTS justification_paths (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  id BIGSERIAL PRIMARY KEY,
   certificate_id TEXT NOT NULL,
   chunk_id TEXT NOT NULL,
   chunk_type TEXT NOT NULL,
@@ -192,7 +202,7 @@ CREATE INDEX IF NOT EXISTS idx_justification_paths_chunk ON justification_paths(
 -- ============================================================================
 
 -- High-confidence causal relationships
-CREATE VIEW IF NOT EXISTS strong_causal_edges AS
+CREATE OR REPLACE VIEW strong_causal_edges AS
 SELECT
   ce.*,
   CASE
@@ -207,11 +217,14 @@ WHERE ce.confidence >= 0.7
   AND ABS(ce.uplift) >= 0.1
 ORDER BY ABS(ce.uplift) * ce.confidence DESC;
 
--- Causal chains (multi-hop reasoning)
-CREATE VIEW IF NOT EXISTS causal_chains AS
+-- Causal chains (multi-hop reasoning) — WITH RECURSIVE works in postgres
+-- with slightly different LIKE-pattern syntax for the path-contains check.
+-- postgres uses `position(... in path)` instead of `path NOT LIKE '%...%'`
+-- semantics for cleaner intent, but the LIKE form is valid here.
+CREATE OR REPLACE VIEW causal_chains AS
 WITH RECURSIVE chain(from_id, to_id, depth, path, total_uplift) AS (
   SELECT from_memory_id, to_memory_id, 1,
-         from_memory_id || '->' || to_memory_id,
+         from_memory_id::TEXT || '->' || to_memory_id::TEXT,
          uplift
   FROM causal_edges
   WHERE confidence >= 0.6
@@ -219,13 +232,13 @@ WITH RECURSIVE chain(from_id, to_id, depth, path, total_uplift) AS (
   UNION ALL
 
   SELECT chain.from_id, ce.to_memory_id, chain.depth + 1,
-         chain.path || '->' || ce.to_memory_id,
+         chain.path || '->' || ce.to_memory_id::TEXT,
          chain.total_uplift + ce.uplift
   FROM chain
   JOIN causal_edges ce ON chain.to_id = ce.from_memory_id
   WHERE chain.depth < 5
     AND ce.confidence >= 0.6
-    AND chain.path NOT LIKE '%' || ce.to_memory_id || '%'
+    AND chain.path NOT LIKE '%' || ce.to_memory_id::TEXT || '%'
 )
 SELECT * FROM chain
 WHERE depth >= 2
@@ -236,7 +249,7 @@ ORDER BY total_uplift DESC, depth ASC;
 -- ============================================================================
 
 -- Certificate quality metrics
-CREATE VIEW IF NOT EXISTS certificate_quality AS
+CREATE OR REPLACE VIEW certificate_quality AS
 SELECT
   rc.id,
   rc.query_id,
@@ -247,10 +260,10 @@ SELECT
   rc.latency_ms
 FROM recall_certificates rc
 LEFT JOIN justification_paths jp ON rc.id = jp.certificate_id
-GROUP BY rc.id;
+GROUP BY rc.id, rc.query_id, rc.completeness_score, rc.redundancy_ratio, rc.latency_ms;
 
 -- Provenance lineage depth
-CREATE VIEW IF NOT EXISTS provenance_depth AS
+CREATE OR REPLACE VIEW provenance_depth AS
 WITH RECURSIVE lineage(hash, depth) AS (
   SELECT content_hash, 0
   FROM provenance_sources
@@ -272,27 +285,38 @@ FROM provenance_sources ps
 LEFT JOIN lineage l ON ps.content_hash = l.hash;
 
 -- ============================================================================
--- Triggers for Automatic Maintenance
+-- Triggers for Automatic Maintenance (PostgreSQL syntax)
 -- ============================================================================
 
 -- Update causal edge timestamp
-CREATE TRIGGER IF NOT EXISTS update_causal_edge_timestamp
-AFTER UPDATE ON causal_edges
+CREATE OR REPLACE FUNCTION trg_causal_edge_timestamp()
+RETURNS TRIGGER AS $$
 BEGIN
-  UPDATE causal_edges
-  SET updated_at = strftime('%s', 'now')
-  WHERE id = NEW.id;
+  NEW.updated_at := EXTRACT(EPOCH FROM NOW())::BIGINT;
+  RETURN NEW;
 END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS update_causal_edge_timestamp ON causal_edges;
+CREATE TRIGGER update_causal_edge_timestamp
+BEFORE UPDATE ON causal_edges
+FOR EACH ROW EXECUTE FUNCTION trg_causal_edge_timestamp();
 
 -- Validate causal confidence bounds
-CREATE TRIGGER IF NOT EXISTS validate_causal_confidence
-BEFORE INSERT ON causal_edges
+CREATE OR REPLACE FUNCTION trg_validate_causal_confidence()
+RETURNS TRIGGER AS $$
 BEGIN
-  SELECT CASE
-    WHEN NEW.confidence < 0 OR NEW.confidence > 1 THEN
-      RAISE(ABORT, 'Confidence must be between 0 and 1')
-  END;
+  IF NEW.confidence < 0 OR NEW.confidence > 1 THEN
+    RAISE EXCEPTION 'Confidence must be between 0 and 1';
+  END IF;
+  RETURN NEW;
 END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS validate_causal_confidence ON causal_edges;
+CREATE TRIGGER validate_causal_confidence
+BEFORE INSERT ON causal_edges
+FOR EACH ROW EXECUTE FUNCTION trg_validate_causal_confidence();
 
 -- ============================================================================
 -- Functions for Causal Inference (as SQL helpers)
@@ -302,7 +326,7 @@ END;
 -- SQL views that can assist with common causal queries
 
 -- Instrumental variables (potential instruments for causal inference)
-CREATE VIEW IF NOT EXISTS causal_instruments AS
+CREATE OR REPLACE VIEW causal_instruments AS
 SELECT
   e1.id as instrument_id,
   e1.task as instrument,
@@ -335,16 +359,9 @@ WHERE e1.id != e2.id AND e2.id != e3.id AND e1.id != e3.id
 -- ============================================================================
 -- Schema Version
 -- ============================================================================
--- Version: 2.0.0 (Frontier Features)
+-- Version: 2.1.0 (ADR-0170 postgres dialect — Frontier Features)
 -- Features: Causal Memory Graph, Explainable Recall Certificates
--- Compatible with: AgentDB 1.x
---
--- Performance Optimization:
--- Apply composite index migration (003_composite_indexes.sql) for:
---   - 30-50% faster causal edge queries
---   - Optimized causal chain traversal (multi-hop reasoning)
---   - Faster experiment analysis and A/B testing
---   - See: db/migrations/README.md for details
+-- Compatible with: PostgreSQL 15+ (pglite or server)
 -- ============================================================================
 
 -- ============================================================================
@@ -353,15 +370,15 @@ WHERE e1.id != e2.id AND e2.id != e3.id AND e1.id != e3.id
 
 -- Learning experiences for RL training
 CREATE TABLE IF NOT EXISTS learning_experiences (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  id BIGSERIAL PRIMARY KEY,
   session_id TEXT NOT NULL,
   state TEXT NOT NULL,
   action TEXT NOT NULL,
   reward REAL NOT NULL,
   next_state TEXT,
   success INTEGER NOT NULL DEFAULT 0,
-  timestamp INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
-  metadata JSON
+  timestamp BIGINT NOT NULL DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT,
+  metadata JSONB
 );
 
 CREATE INDEX IF NOT EXISTS idx_learning_experiences_session ON learning_experiences(session_id);
@@ -373,11 +390,11 @@ CREATE TABLE IF NOT EXISTS learning_sessions (
   id TEXT PRIMARY KEY,
   user_id TEXT NOT NULL,
   session_type TEXT NOT NULL,
-  config JSON NOT NULL,
-  start_time INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
-  end_time INTEGER,
+  config JSONB NOT NULL,
+  start_time BIGINT NOT NULL DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT,
+  end_time BIGINT,
   status TEXT NOT NULL DEFAULT 'active',
-  metadata JSON
+  metadata JSONB
 );
 
 CREATE INDEX IF NOT EXISTS idx_learning_sessions_user ON learning_sessions(user_id);

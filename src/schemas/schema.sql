@@ -1,5 +1,5 @@
 -- ============================================================================
--- AgentDB State-of-the-Art Memory Schema
+-- AgentDB State-of-the-Art Memory Schema (PostgreSQL dialect — ADR-0170)
 -- ============================================================================
 -- Implements 5 cutting-edge memory patterns for autonomous agents:
 -- 1. Reflexion-style episodic replay
@@ -8,9 +8,19 @@
 -- 4. Episodic segmentation and consolidation
 -- 5. Graph-aware recall
 -- ============================================================================
-
--- Enable foreign keys
-PRAGMA foreign_keys = ON;
+--
+-- ADR-0170 Phase A.5 — ported from SQLite to PostgreSQL:
+--   - INTEGER PRIMARY KEY AUTOINCREMENT      → BIGSERIAL PRIMARY KEY
+--   - INTEGER NOT NULL DEFAULT (strftime…)   → BIGINT NOT NULL DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT
+--   - BLOB                                   → BYTEA
+--   - PRAGMA foreign_keys = ON               → removed (postgres FKs on by default)
+--   - INSERT OR IGNORE / INSERT OR REPLACE   → INSERT ... ON CONFLICT ... (controller-level)
+--   - FTS5 virtual tables                    → tsvector + GIN indexes (only used where FTS is actually exercised — Phase B per-controller port)
+--
+-- This file is the BOOTSTRAP schema only — controllers may issue their own
+-- DDL/DML in postgres dialect during Phase B. Schema versions and migration
+-- bookkeeping are owned by the agentdb migrate CLI (Phase D).
+-- ============================================================================
 
 -- ============================================================================
 -- Pattern 1: Reflexion-Style Episodic Replay
@@ -19,20 +29,20 @@ PRAGMA foreign_keys = ON;
 -- Retrieve nearest failures and fixes before the next run.
 
 CREATE TABLE IF NOT EXISTS episodes (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  ts INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
+  id BIGSERIAL PRIMARY KEY,
+  ts BIGINT NOT NULL DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT,
   session_id TEXT NOT NULL,
   task TEXT NOT NULL,
   input TEXT,
   output TEXT,
   critique TEXT,
   reward REAL DEFAULT 0.0,
-  success BOOLEAN DEFAULT 0,
-  latency_ms INTEGER,
-  tokens_used INTEGER,
+  success BOOLEAN DEFAULT FALSE,
+  latency_ms BIGINT,
+  tokens_used BIGINT,
   tags TEXT, -- JSON array of tags
-  metadata JSON,
-  created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
+  metadata JSONB,
+  created_at BIGINT NOT NULL DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT
 );
 
 CREATE INDEX IF NOT EXISTS idx_episodes_ts ON episodes(ts DESC);
@@ -40,11 +50,11 @@ CREATE INDEX IF NOT EXISTS idx_episodes_session ON episodes(session_id);
 CREATE INDEX IF NOT EXISTS idx_episodes_reward ON episodes(reward DESC);
 CREATE INDEX IF NOT EXISTS idx_episodes_task ON episodes(task);
 
--- Vector embeddings for episodes (384-dim for all-MiniLM-L6-v2)
--- Will use sqlite-vec when available, fallback to JSON storage
+-- Vector embeddings for episodes (768-dim default for nomic-embed-text-v1.5)
+-- Phase C will replace the BYTEA blob with a pgvector `vector(N)` column.
 CREATE TABLE IF NOT EXISTS episode_embeddings (
-  episode_id INTEGER PRIMARY KEY,
-  embedding BLOB NOT NULL, -- Float32Array as BLOB
+  episode_id BIGINT PRIMARY KEY,
+  embedding BYTEA NOT NULL, -- Float32Array as BYTEA (Phase A bootstrap; Phase C → vector)
   embedding_model TEXT DEFAULT 'all-MiniLM-L6-v2',
   FOREIGN KEY(episode_id) REFERENCES episodes(id) ON DELETE CASCADE
 );
@@ -55,20 +65,20 @@ CREATE TABLE IF NOT EXISTS episode_embeddings (
 -- Promote high-reward traces into reusable "skills" with typed IO.
 
 CREATE TABLE IF NOT EXISTS skills (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  id BIGSERIAL PRIMARY KEY,
   name TEXT UNIQUE NOT NULL,
   description TEXT,
-  signature JSON NOT NULL, -- {inputs: {...}, outputs: {...}}
+  signature JSONB NOT NULL, -- {inputs: {...}, outputs: {...}}
   code TEXT, -- Tool call manifest or code template
   success_rate REAL DEFAULT 0.0,
-  uses INTEGER DEFAULT 0,
+  uses BIGINT DEFAULT 0,
   avg_reward REAL DEFAULT 0.0,
-  avg_latency_ms INTEGER DEFAULT 0,
-  created_from_episode INTEGER, -- Source episode ID
-  created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
-  updated_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
-  last_used_at INTEGER,
-  metadata JSON,
+  avg_latency_ms BIGINT DEFAULT 0,
+  created_from_episode BIGINT, -- Source episode ID
+  created_at BIGINT NOT NULL DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT,
+  updated_at BIGINT NOT NULL DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT,
+  last_used_at BIGINT,
+  metadata JSONB,
   FOREIGN KEY(created_from_episode) REFERENCES episodes(id)
 );
 
@@ -78,12 +88,12 @@ CREATE INDEX IF NOT EXISTS idx_skills_name ON skills(name);
 
 -- Skill relationships and composition
 CREATE TABLE IF NOT EXISTS skill_links (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  parent_skill_id INTEGER NOT NULL,
-  child_skill_id INTEGER NOT NULL,
+  id BIGSERIAL PRIMARY KEY,
+  parent_skill_id BIGINT NOT NULL,
+  child_skill_id BIGINT NOT NULL,
   relationship TEXT NOT NULL, -- 'prerequisite', 'alternative', 'refinement', 'composition'
   weight REAL DEFAULT 1.0,
-  metadata JSON,
+  metadata JSONB,
   FOREIGN KEY(parent_skill_id) REFERENCES skills(id) ON DELETE CASCADE,
   FOREIGN KEY(child_skill_id) REFERENCES skills(id) ON DELETE CASCADE,
   UNIQUE(parent_skill_id, child_skill_id, relationship)
@@ -92,10 +102,10 @@ CREATE TABLE IF NOT EXISTS skill_links (
 CREATE INDEX IF NOT EXISTS idx_skill_links_parent ON skill_links(parent_skill_id);
 CREATE INDEX IF NOT EXISTS idx_skill_links_child ON skill_links(child_skill_id);
 
--- Skill embeddings for semantic search
+-- Skill embeddings for semantic search (Phase A bootstrap; Phase C → vector)
 CREATE TABLE IF NOT EXISTS skill_embeddings (
-  skill_id INTEGER PRIMARY KEY,
-  embedding BLOB NOT NULL,
+  skill_id BIGINT PRIMARY KEY,
+  embedding BYTEA NOT NULL,
   embedding_model TEXT DEFAULT 'all-MiniLM-L6-v2',
   FOREIGN KEY(skill_id) REFERENCES skills(id) ON DELETE CASCADE
 );
@@ -107,16 +117,16 @@ CREATE TABLE IF NOT EXISTS skill_embeddings (
 
 -- Atomic facts as triples (subject-predicate-object)
 CREATE TABLE IF NOT EXISTS facts (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  id BIGSERIAL PRIMARY KEY,
   subject TEXT NOT NULL,
   predicate TEXT NOT NULL,
   object TEXT NOT NULL,
   source_type TEXT, -- 'episode', 'skill', 'external', 'inferred'
-  source_id INTEGER,
+  source_id BIGINT,
   confidence REAL DEFAULT 1.0,
-  created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
-  expires_at INTEGER, -- TTL for temporal facts
-  metadata JSON
+  created_at BIGINT NOT NULL DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT,
+  expires_at BIGINT, -- TTL for temporal facts
+  metadata JSONB
 );
 
 CREATE INDEX IF NOT EXISTS idx_facts_subject ON facts(subject);
@@ -127,27 +137,35 @@ CREATE INDEX IF NOT EXISTS idx_facts_expires ON facts(expires_at) WHERE expires_
 
 -- Notes and summaries with semantic embeddings
 CREATE TABLE IF NOT EXISTS notes (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  id BIGSERIAL PRIMARY KEY,
   title TEXT,
   text TEXT NOT NULL,
   summary TEXT, -- Condensed version for context
   note_type TEXT DEFAULT 'general', -- 'insight', 'constraint', 'goal', 'observation'
   importance REAL DEFAULT 0.5,
-  access_count INTEGER DEFAULT 0,
-  last_accessed_at INTEGER,
-  created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
-  updated_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
-  metadata JSON
+  access_count BIGINT DEFAULT 0,
+  last_accessed_at BIGINT,
+  created_at BIGINT NOT NULL DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT,
+  updated_at BIGINT NOT NULL DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT,
+  metadata JSONB
 );
 
 CREATE INDEX IF NOT EXISTS idx_notes_type ON notes(note_type);
 CREATE INDEX IF NOT EXISTS idx_notes_importance ON notes(importance DESC);
 CREATE INDEX IF NOT EXISTS idx_notes_accessed ON notes(last_accessed_at DESC);
+-- tsvector FTS index over notes.title + notes.text + notes.summary
+-- (replaces SQLite FTS5 virtual table). Lucene-grade ranking, multilingual
+-- stemming. The text-search expression is recomputed on read; controllers
+-- that need ts_rank() include the full to_tsvector(...) expression in their
+-- WHERE/ORDER BY (Phase B per-controller port owns the query rewrite).
+CREATE INDEX IF NOT EXISTS idx_notes_fts
+  ON notes
+  USING GIN (to_tsvector('english', COALESCE(title, '') || ' ' || COALESCE(text, '') || ' ' || COALESCE(summary, '')));
 
--- Note embeddings (only for summaries to reduce storage)
+-- Note embeddings (only for summaries to reduce storage) — Phase A bootstrap
 CREATE TABLE IF NOT EXISTS note_embeddings (
-  note_id INTEGER PRIMARY KEY,
-  embedding BLOB NOT NULL,
+  note_id BIGINT PRIMARY KEY,
+  embedding BYTEA NOT NULL,
   embedding_model TEXT DEFAULT 'all-MiniLM-L6-v2',
   FOREIGN KEY(note_id) REFERENCES notes(id) ON DELETE CASCADE
 );
@@ -158,16 +176,16 @@ CREATE TABLE IF NOT EXISTS note_embeddings (
 -- Segment long tasks into events and consolidate into compact memories.
 
 CREATE TABLE IF NOT EXISTS events (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  id BIGSERIAL PRIMARY KEY,
   session_id TEXT NOT NULL,
-  episode_id INTEGER, -- Link to parent episode
-  step INTEGER NOT NULL,
+  episode_id BIGINT, -- Link to parent episode
+  step BIGINT NOT NULL,
   phase TEXT, -- 'planning', 'execution', 'reflection', 'learning'
   role TEXT, -- 'user', 'assistant', 'system', 'tool'
   content TEXT NOT NULL,
-  features JSON, -- Extracted features for learning
-  tool_calls JSON, -- Tool invocations in this event
-  created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
+  features JSONB, -- Extracted features for learning
+  tool_calls JSONB, -- Tool invocations in this event
+  created_at BIGINT NOT NULL DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT,
   FOREIGN KEY(episode_id) REFERENCES episodes(id) ON DELETE CASCADE
 );
 
@@ -177,17 +195,17 @@ CREATE INDEX IF NOT EXISTS idx_events_episode ON events(episode_id);
 
 -- Consolidated memories from event windows
 CREATE TABLE IF NOT EXISTS consolidated_memories (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  id BIGSERIAL PRIMARY KEY,
   session_id TEXT NOT NULL,
-  start_event_id INTEGER NOT NULL,
-  end_event_id INTEGER NOT NULL,
+  start_event_id BIGINT NOT NULL,
+  end_event_id BIGINT NOT NULL,
   phase TEXT,
   summary TEXT NOT NULL,
-  key_insights JSON, -- Extracted learnings
-  success_patterns JSON, -- What worked
-  failure_patterns JSON, -- What didn't work
+  key_insights JSONB, -- Extracted learnings
+  success_patterns JSONB, -- What worked
+  failure_patterns JSONB, -- What didn't work
   quality_score REAL DEFAULT 0.5,
-  created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
+  created_at BIGINT NOT NULL DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT,
   FOREIGN KEY(start_event_id) REFERENCES events(id),
   FOREIGN KEY(end_event_id) REFERENCES events(id)
 );
@@ -201,13 +219,13 @@ CREATE INDEX IF NOT EXISTS idx_consolidated_quality ON consolidated_memories(qua
 -- Build a lightweight GraphRAG overlay for experiences.
 
 CREATE TABLE IF NOT EXISTS exp_nodes (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  id BIGSERIAL PRIMARY KEY,
   kind TEXT NOT NULL, -- 'task', 'skill', 'concept', 'tool', 'outcome'
   label TEXT NOT NULL,
-  payload JSON,
+  payload JSONB,
   centrality REAL DEFAULT 0.0, -- Graph importance metric
-  created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
-  updated_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
+  created_at BIGINT NOT NULL DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT,
+  updated_at BIGINT NOT NULL DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT
 );
 
 CREATE INDEX IF NOT EXISTS idx_exp_nodes_kind ON exp_nodes(kind);
@@ -215,13 +233,13 @@ CREATE INDEX IF NOT EXISTS idx_exp_nodes_label ON exp_nodes(label);
 CREATE INDEX IF NOT EXISTS idx_exp_nodes_centrality ON exp_nodes(centrality DESC);
 
 CREATE TABLE IF NOT EXISTS exp_edges (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  src_node_id INTEGER NOT NULL,
-  dst_node_id INTEGER NOT NULL,
+  id BIGSERIAL PRIMARY KEY,
+  src_node_id BIGINT NOT NULL,
+  dst_node_id BIGINT NOT NULL,
   relationship TEXT NOT NULL, -- 'requires', 'produces', 'similar_to', 'refines', 'part_of'
   weight REAL DEFAULT 1.0,
-  metadata JSON,
-  created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
+  metadata JSONB,
+  created_at BIGINT NOT NULL DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT,
   FOREIGN KEY(src_node_id) REFERENCES exp_nodes(id) ON DELETE CASCADE,
   FOREIGN KEY(dst_node_id) REFERENCES exp_nodes(id) ON DELETE CASCADE,
   UNIQUE(src_node_id, dst_node_id, relationship)
@@ -231,10 +249,10 @@ CREATE INDEX IF NOT EXISTS idx_exp_edges_src ON exp_edges(src_node_id);
 CREATE INDEX IF NOT EXISTS idx_exp_edges_dst ON exp_edges(dst_node_id);
 CREATE INDEX IF NOT EXISTS idx_exp_edges_rel ON exp_edges(relationship);
 
--- Node embeddings for graph-augmented retrieval
+-- Node embeddings for graph-augmented retrieval (Phase A bootstrap)
 CREATE TABLE IF NOT EXISTS exp_node_embeddings (
-  node_id INTEGER PRIMARY KEY,
-  embedding BLOB NOT NULL,
+  node_id BIGINT PRIMARY KEY,
+  embedding BYTEA NOT NULL,
   embedding_model TEXT DEFAULT 'all-MiniLM-L6-v2',
   FOREIGN KEY(node_id) REFERENCES exp_nodes(id) ON DELETE CASCADE
 );
@@ -245,15 +263,15 @@ CREATE TABLE IF NOT EXISTS exp_node_embeddings (
 
 -- Track memory quality scores and usage statistics
 CREATE TABLE IF NOT EXISTS memory_scores (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  id BIGSERIAL PRIMARY KEY,
   memory_type TEXT NOT NULL, -- 'episode', 'skill', 'note', 'consolidated'
-  memory_id INTEGER NOT NULL,
+  memory_id BIGINT NOT NULL,
   quality_score REAL NOT NULL,
   novelty_score REAL,
   relevance_score REAL,
   utility_score REAL,
-  computed_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
-  metadata JSON
+  computed_at BIGINT NOT NULL DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT,
+  metadata JSONB
 );
 
 CREATE INDEX IF NOT EXISTS idx_memory_scores_type ON memory_scores(memory_type, memory_id);
@@ -261,14 +279,14 @@ CREATE INDEX IF NOT EXISTS idx_memory_scores_quality ON memory_scores(quality_sc
 
 -- Memory access patterns for adaptive retrieval
 CREATE TABLE IF NOT EXISTS memory_access_log (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  id BIGSERIAL PRIMARY KEY,
   memory_type TEXT NOT NULL,
-  memory_id INTEGER NOT NULL,
+  memory_id BIGINT NOT NULL,
   query TEXT,
   relevance_score REAL,
   was_useful BOOLEAN,
-  feedback JSON,
-  accessed_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
+  feedback JSONB,
+  accessed_at BIGINT NOT NULL DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT
 );
 
 CREATE INDEX IF NOT EXISTS idx_access_log_type ON memory_access_log(memory_type, memory_id);
@@ -280,17 +298,17 @@ CREATE INDEX IF NOT EXISTS idx_access_log_time ON memory_access_log(accessed_at 
 
 -- Track consolidation jobs and their results
 CREATE TABLE IF NOT EXISTS consolidation_runs (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  id BIGSERIAL PRIMARY KEY,
   job_type TEXT NOT NULL, -- 'episode_to_skill', 'event_to_memory', 'deduplication', 'pruning'
-  records_processed INTEGER DEFAULT 0,
-  records_created INTEGER DEFAULT 0,
-  records_deleted INTEGER DEFAULT 0,
-  duration_ms INTEGER,
+  records_processed BIGINT DEFAULT 0,
+  records_created BIGINT DEFAULT 0,
+  records_deleted BIGINT DEFAULT 0,
+  duration_ms BIGINT,
   status TEXT DEFAULT 'pending', -- 'pending', 'running', 'completed', 'failed'
   error TEXT,
-  started_at INTEGER,
-  completed_at INTEGER,
-  metadata JSON
+  started_at BIGINT,
+  completed_at BIGINT,
+  metadata JSONB
 );
 
 CREATE INDEX IF NOT EXISTS idx_consolidation_status ON consolidation_runs(status);
@@ -301,21 +319,24 @@ CREATE INDEX IF NOT EXISTS idx_consolidation_type ON consolidation_runs(job_type
 -- ============================================================================
 
 -- High-value episodes for skill creation
-CREATE VIEW IF NOT EXISTS skill_candidates AS
+-- NOTE: SQLite's strftime('%s','now')-86400*7 maps to postgres
+--       EXTRACT(EPOCH FROM NOW())::BIGINT - 86400*7
+--       GROUP_CONCAT becomes string_agg(... , ',')
+CREATE OR REPLACE VIEW skill_candidates AS
 SELECT
   task,
   COUNT(*) as attempt_count,
   AVG(reward) as avg_reward,
-  AVG(success) as success_rate,
+  AVG(CASE WHEN success THEN 1 ELSE 0 END) as success_rate,
   MAX(id) as latest_episode_id,
-  GROUP_CONCAT(id) as episode_ids
+  string_agg(id::TEXT, ',') as episode_ids
 FROM episodes
-WHERE ts > strftime('%s', 'now') - 86400 * 7 -- Last 7 days
+WHERE ts > EXTRACT(EPOCH FROM NOW())::BIGINT - 86400 * 7 -- Last 7 days
 GROUP BY task
-HAVING attempt_count >= 3 AND avg_reward >= 0.7;
+HAVING COUNT(*) >= 3 AND AVG(reward) >= 0.7;
 
 -- Top performing skills
-CREATE VIEW IF NOT EXISTS top_skills AS
+CREATE OR REPLACE VIEW top_skills AS
 SELECT
   s.*,
   COALESCE(s.success_rate, 0) * 0.4 +
@@ -325,65 +346,93 @@ FROM skills s
 ORDER BY composite_score DESC;
 
 -- Recent high-quality memories
-CREATE VIEW IF NOT EXISTS recent_quality_memories AS
+CREATE OR REPLACE VIEW recent_quality_memories AS
 SELECT
   'episode' as type, id, task as title, critique as content, reward as score, created_at
 FROM episodes
-WHERE reward >= 0.7 AND ts > strftime('%s', 'now') - 86400 * 3
+WHERE reward >= 0.7 AND ts > EXTRACT(EPOCH FROM NOW())::BIGINT - 86400 * 3
 UNION ALL
 SELECT
   'note' as type, id, title, summary as content, importance as score, created_at
 FROM notes
-WHERE importance >= 0.7 AND created_at > strftime('%s', 'now') - 86400 * 3
+WHERE importance >= 0.7 AND created_at > EXTRACT(EPOCH FROM NOW())::BIGINT - 86400 * 3
 UNION ALL
 SELECT
   'consolidated' as type, id, session_id as title, summary as content, quality_score as score, created_at
 FROM consolidated_memories
-WHERE quality_score >= 0.7 AND created_at > strftime('%s', 'now') - 86400 * 3
+WHERE quality_score >= 0.7 AND created_at > EXTRACT(EPOCH FROM NOW())::BIGINT - 86400 * 3
 ORDER BY created_at DESC;
 
 -- ============================================================================
--- Triggers for Auto-Maintenance
+-- Triggers for Auto-Maintenance (PostgreSQL syntax — replaces SQLite triggers)
 -- ============================================================================
+-- PostgreSQL triggers require a function + CREATE TRIGGER pair. Each
+-- function emits a trigger-fragment that updates the relevant row.
 
 -- Update skill usage statistics
-CREATE TRIGGER IF NOT EXISTS update_skill_last_used
-AFTER UPDATE OF uses ON skills
+CREATE OR REPLACE FUNCTION trg_skill_last_used()
+RETURNS TRIGGER AS $$
 BEGIN
-  UPDATE skills SET last_used_at = strftime('%s', 'now') WHERE id = NEW.id;
+  NEW.last_used_at := EXTRACT(EPOCH FROM NOW())::BIGINT;
+  RETURN NEW;
 END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS update_skill_last_used ON skills;
+CREATE TRIGGER update_skill_last_used
+BEFORE UPDATE OF uses ON skills
+FOR EACH ROW EXECUTE FUNCTION trg_skill_last_used();
 
 -- Update note access tracking
-CREATE TRIGGER IF NOT EXISTS update_note_access
-AFTER UPDATE OF access_count ON notes
+CREATE OR REPLACE FUNCTION trg_note_access()
+RETURNS TRIGGER AS $$
 BEGIN
-  UPDATE notes SET last_accessed_at = strftime('%s', 'now') WHERE id = NEW.id;
+  NEW.last_accessed_at := EXTRACT(EPOCH FROM NOW())::BIGINT;
+  RETURN NEW;
 END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS update_note_access ON notes;
+CREATE TRIGGER update_note_access
+BEFORE UPDATE OF access_count ON notes
+FOR EACH ROW EXECUTE FUNCTION trg_note_access();
 
 -- Auto-update timestamps
-CREATE TRIGGER IF NOT EXISTS update_skill_timestamp
-AFTER UPDATE ON skills
+CREATE OR REPLACE FUNCTION trg_skill_timestamp()
+RETURNS TRIGGER AS $$
 BEGIN
-  UPDATE skills SET updated_at = strftime('%s', 'now') WHERE id = NEW.id;
+  NEW.updated_at := EXTRACT(EPOCH FROM NOW())::BIGINT;
+  RETURN NEW;
 END;
+$$ LANGUAGE plpgsql;
 
-CREATE TRIGGER IF NOT EXISTS update_note_timestamp
-AFTER UPDATE ON notes
+DROP TRIGGER IF EXISTS update_skill_timestamp ON skills;
+CREATE TRIGGER update_skill_timestamp
+BEFORE UPDATE ON skills
+FOR EACH ROW EXECUTE FUNCTION trg_skill_timestamp();
+
+CREATE OR REPLACE FUNCTION trg_note_timestamp()
+RETURNS TRIGGER AS $$
 BEGIN
-  UPDATE notes SET updated_at = strftime('%s', 'now') WHERE id = NEW.id;
+  NEW.updated_at := EXTRACT(EPOCH FROM NOW())::BIGINT;
+  RETURN NEW;
 END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS update_note_timestamp ON notes;
+CREATE TRIGGER update_note_timestamp
+BEFORE UPDATE ON notes
+FOR EACH ROW EXECUTE FUNCTION trg_note_timestamp();
 
 -- ============================================================================
 -- Initialization Complete
 -- ============================================================================
--- Schema version: 1.0.0
--- Compatible with: SQLite 3.35+, sqlite-vec (optional), sqlite-vss (optional)
--- WASM compatible: Yes (via SQLite-WASM + OPFS)
+-- Schema version: 2.0.0 (ADR-0170 postgres dialect)
+-- Compatible with: PostgreSQL 15+ (pglite or server)
+-- pgvector integration: Phase C (replaces BYTEA embedding columns with vector(N))
 --
 -- Performance Optimization:
 -- For production deployments, apply composite index migration for 30-50% query speedup:
---   - Migration file: db/migrations/003_composite_indexes.sql
---   - Adds 40+ composite indexes for common query patterns
+--   - Migration file: db/migrations/003_composite_indexes.sql (port to postgres dialect — Phase B)
 --   - Trade-off: 2x slower writes, +15-20% storage (acceptable for read-heavy workloads)
---   - See: db/migrations/README.md for details
 -- ============================================================================

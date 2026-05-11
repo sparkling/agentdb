@@ -271,6 +271,39 @@ docker compose -f docker/docker-compose.yml up
 
 ---
 
+## Persistence architecture
+
+AgentDB operates on **two axes** of persistence (ADR-0166 Amendment 2026-05-11f):
+
+| Axis | Primary substrate | File | Vector path |
+|---|---|---|---|
+| `memory_*` (claude-flow memory tools) | **RuVector via RVF** | `.swarm/memory.rvf` | Native RVF HNSW |
+| `agentdb_*` (this SDK + MCP server) | **SQLite** (`better-sqlite3` or `sql.js` WASM) | `.swarm/memory.db` | Option F: `sqlite-vec` virtual tables embed RuVector HNSW in-place |
+
+The `agentdb_*` axis stays on SQLite **permanently**, not transitionally. Five
+controllers are architecturally relational and never migrate:
+
+| Controller | Why permanent SQLite |
+|---|---|
+| `CausalMemoryGraph` | `WITH RECURSIVE` 5-hop causal-chain traversal |
+| `CausalRecall` | SQL `JOIN` + `ORDER BY` rerank over `causal_edges` |
+| `NightlyLearner` | Cross-product self-`JOIN` + `GROUP BY` + `HAVING` |
+| `LearningSystem` aggregations | `GROUP BY state/session/date` for RL telemetry |
+| `ReasoningBank` `GROUP BY` queries | `GROUP BY task_type` aggregations |
+
+The remaining nine controllers receive a per-controller `CREATE VIRTUAL TABLE
+<controller>_vec USING vec0(embedding float[768])` augmentation under Option F.
+This honors `ruvnet/RuVector/docs/adr/ADR-029-rvf-canonical-format.md`'s "MUST
+use RVF for vector data" mandate via the `sqlite-vec` virtual table that
+embeds RuVector HNSW inside SQLite, in-place — zero migration, zero new file
+formats.
+
+See `~/.claude/projects/-Users-henrik-source-ruflo-patch/memory/project-rvf-primary.md`
+for the axis-separation rule and `docs/adr/ADR-0166-agentdb-unified-database-architectural-gap.md`
+for the full decision record and the 8-persona dialectic that produced it.
+
+---
+
 ## Documentation
 
 | Doc | When to read it |

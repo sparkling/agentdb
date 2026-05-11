@@ -22,7 +22,6 @@
  */
 
 import type { VectorBackend, SearchResult } from '../backends/VectorBackend.js';
-import type { GraphBackend } from '../backends/GraphBackend.js';
 import { EmbeddingService } from './EmbeddingService.js';
 import { cosineSimilarity } from '../utils/vector-math.js';
 
@@ -129,7 +128,6 @@ export class HierarchicalMemory {
   private db: Database;
   private embedder: EmbeddingService;
   private vectorBackend?: VectorBackend;
-  private graphBackend?: GraphBackend;
   private config: HierarchicalMemoryConfig;
 
   // In-memory caches for fast access
@@ -148,13 +146,11 @@ export class HierarchicalMemory {
     db: Database,
     embedder: EmbeddingService,
     vectorBackend?: VectorBackend,
-    graphBackend?: GraphBackend,
     config?: Partial<HierarchicalMemoryConfig>
   ) {
     this.db = db;
     this.embedder = embedder;
     this.vectorBackend = vectorBackend;
-    this.graphBackend = graphBackend;
 
     this.config = {
       workingMemoryLimit: 1024 * 1024, // 1MB

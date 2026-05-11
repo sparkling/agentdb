@@ -1,19 +1,42 @@
 /**
  * Unified Database Layer for AgentDB v2
  *
- * Architecture:
- * - PRIMARY: RuVector GraphDatabase (@ruvector/graph-node) for new databases
- * - FALLBACK: SQLite (sql.js) for legacy databases
+ * Persistence architecture (axis-separated per ADR-0166 Amendment 2026-05-11f):
  *
- * Detection Logic:
+ *   - memory_* axis  → RuVector primary via RVF (`@claude-flow/memory` RvfBackend, ADR-0073 Phases 1-3)
+ *   - agentdb_* axis → SQLite primary (better-sqlite3 / sql.js) with sqlite-vec virtual table
+ *                      augmentation per Option F (ADR-0166 Phase 3, when rolled out)
+ *
+ * This class implements the smart-detection container for the agentdb_* axis. It is
+ * actively exercised by:
+ *   - the standalone agentdb MCP server boot path (`mcp/agentdb-mcp-server.ts`),
+ *   - 17 simulation scenarios under `simulation/scenarios/`,
+ *   - the cli-mcp integration test.
+ *
+ * It is NOT consumed by the SDK boot path in `core/AgentDB.ts:initialize()` that
+ * ruflo invokes via `@sparkleideas/agentdb` — the SDK opens better-sqlite3 directly
+ * (with sql.js fallback) and gets its vector backend from `createGuardedBackend(...)`
+ * with type wired from `AgentDBConfig.vectorBackend` after ADR-0166 Phase 1.
+ *
+ * Five controllers are PERMANENT_SQLITE_CARVE_OUT (CausalMemoryGraph, CausalRecall,
+ * NightlyLearner, LearningSystem aggregations, ReasoningBank GROUP BY queries) and
+ * never migrate off SQL — their WITH RECURSIVE / GROUP BY / multi-table-JOIN
+ * semantics have no Cypher equivalent in `@ruvector/graph-node`'s alpha binding.
+ *
+ * Detection Logic (graph mode, separate from SDK path above):
  * 1. Check if database file exists
  * 2. If exists, check file signature to determine type
  * 3. If new database or .graph extension → use GraphDatabase
  * 4. If .db extension and SQLite signature → use SQLite (legacy mode)
  *
- * Migration:
- * - Provides migration tool to convert SQLite → GraphDatabase
+ * Migration (graph mode):
+ * - Provides migration tool to convert SQLite → GraphDatabase for the graph-mode users
  * - Maintains backward compatibility with existing databases
+ * - NOT invoked from the SDK boot path; the SDK stays on SQLite per Option F
+ *
+ * See `forks/agentdb/README.md#persistence-architecture` and
+ * `~/.claude/projects/-Users-henrik-source-ruflo-patch/memory/project-rvf-primary.md`
+ * for the full axis-separation rule.
  */
 
 import { GraphDatabaseAdapter, type GraphDatabaseConfig } from './backends/graph/GraphDatabaseAdapter.js';

@@ -170,9 +170,11 @@ export class AgentDB {
     console.log(`[AgentDB] GraphTransformer: ${this.graphTransformer.getEngineType()}`);
 
     // Initialize proof-gated vector backend (ADR-060)
+    // ADR-0166 Phase 1: honor the `vectorBackend` config field instead of hard-coding 'auto'.
+    // Setting `vectorBackend: 'ruvector' | 'hnswlib'` now reaches the factory; the field was dead before.
     let controllerVB: VectorBackend | null = null;
     try {
-      const { backend, guard, log } = await createGuardedBackend('auto', {
+      const { backend, guard, log } = await createGuardedBackend(this.config.vectorBackend ?? 'auto', {
         dimensions: dim,
         metric: 'cosine',
         maxElements: this.config.maxElements ?? getEmbeddingConfig().maxElements, // ADR-0069: config-chain capacity

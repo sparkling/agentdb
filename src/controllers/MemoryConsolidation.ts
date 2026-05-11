@@ -21,7 +21,6 @@
  */
 
 import type { VectorBackend } from '../backends/VectorBackend.js';
-import type { GraphBackend } from '../backends/GraphBackend.js';
 import { HierarchicalMemory, type MemoryItem, type MemoryTier } from './HierarchicalMemory.js';
 import { EmbeddingService } from './EmbeddingService.js';
 import { cosineSimilarity } from '../utils/vector-math.js';
@@ -86,7 +85,6 @@ export class MemoryConsolidation {
   private hierarchicalMemory: HierarchicalMemory;
   private embedder: EmbeddingService;
   private vectorBackend?: VectorBackend;
-  private graphBackend?: GraphBackend;
   private config: ConsolidationConfig;
 
   // Spaced repetition tracking
@@ -97,14 +95,12 @@ export class MemoryConsolidation {
     hierarchicalMemory: HierarchicalMemory,
     embedder: EmbeddingService,
     vectorBackend?: VectorBackend,
-    graphBackend?: GraphBackend,
     config?: Partial<ConsolidationConfig>
   ) {
     this.db = db;
     this.hierarchicalMemory = hierarchicalMemory;
     this.embedder = embedder;
     this.vectorBackend = vectorBackend;
-    this.graphBackend = graphBackend;
 
     this.config = {
       clusterThreshold: 0.75,

@@ -368,7 +368,9 @@ const skills = new SkillLibrary(db, embeddingService, vectorBackend);
 const causalRecall = new CausalRecall(db, embeddingService, vectorBackend);
 const reasoningBank = new ReasoningBank(db, embeddingService, vectorBackend);
 // These don't take vectorBackend:
-const causalGraph = new CausalMemoryGraph(db);
+// ADR-0170 Phase B.7: CausalMemoryGraph routes through the same
+// PostgresBackend B-2 constructed for ReflexionMemory above.
+const causalGraph = new CausalMemoryGraph(postgresBackend);
 const learner = new NightlyLearner(db, embeddingService);
 const learningSystem = new LearningSystem(db, embeddingService);
 const batchOps = new BatchOperations(db, embeddingService);
@@ -1340,7 +1342,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const confidence = (args?.confidence as number) || 0.95;
         const sampleSize = (args?.sample_size as number) || 0;
 
-        const edgeId = causalGraph.addCausalEdge({
+        const edgeId = await causalGraph.addCausalEdge({
           fromMemoryId: 0,
           fromMemoryType: cause as 'episode' | 'skill' | 'note' | 'fact',
           toMemoryId: 0,
@@ -1368,7 +1370,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const minUplift = (args?.min_uplift as number) || 0.0;
         const limit = (args?.limit as number) || 10;
 
-        const edges = causalGraph.queryCausalEffects({
+        const edges = await causalGraph.queryCausalEffects({
           interventionMemoryId: 0,
           interventionMemoryType: cause || '',
           outcomeMemoryId: effect ? 0 : undefined,

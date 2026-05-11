@@ -203,8 +203,16 @@ class AgentDBCLI {
     });
     await this.embedder.initialize();
 
+    // ADR-0170 Phase B.2 + B.7: PostgresBackend hosts the migrated
+    // controllers (ReflexionMemory, CausalMemoryGraph) alongside the
+    // legacy SQLite handle. Other controllers retain the SQLite `db`
+    // until their own Phase B commits land; the CLI boot path holds
+    // both substrates side-by-side during the Wave 1a rollout.
+    const { PostgresBackend } = await import('../backends/postgres/PostgresBackend.js');
+    const postgresBackend = new PostgresBackend({ metric: 'cosine' });
+
     // Initialize controllers
-    this.causalGraph = new CausalMemoryGraph(this.db);
+    this.causalGraph = new CausalMemoryGraph(postgresBackend);
     this.explainableRecall = new ExplainableRecall(this.db);
     this.causalRecall = new CausalRecall(this.db, this.embedder, undefined, {
       alpha: 0.7,
@@ -214,12 +222,6 @@ class AgentDBCLI {
     });
     this.nightlyLearner = new NightlyLearner(this.db, this.embedder);
 
-    // ADR-0170 Phase B.2: ReflexionMemory now runs on PostgresBackend
-    // (pglite embedded by default). The @ruvector/graph-node Cypher path
-    // retired in this Phase B commit — graphBackend is no longer a
-    // constructor parameter. Vector and learning backends remain optional.
-    const { PostgresBackend } = await import('../backends/postgres/PostgresBackend.js');
-    const postgresBackend = new PostgresBackend({ metric: 'cosine' });
     this.reflexion = new ReflexionMemory(
       postgresBackend,
       this.embedder,
@@ -247,7 +249,7 @@ class AgentDBCLI {
     log.info(`Effect: ${params.effect}`);
     log.info(`Uplift: ${params.uplift}`);
 
-    const edgeId = this.causalGraph.addCausalEdge({
+    const edgeId = await this.causalGraph.addCausalEdge({
       fromMemoryId: 1,
       fromMemoryType: 'episode',
       toMemoryId: 2,
@@ -282,7 +284,7 @@ class AgentDBCLI {
 
     const treatmentId = Number(dummyEpisode.lastInsertRowid);
 
-    const expId = this.causalGraph.createExperiment({
+    const expId = await this.causalGraph.createExperiment({
       name: params.name,
       hypothesis: `Does ${params.cause} causally affect ${params.effect}?`,
       treatmentId: treatmentId,
@@ -316,7 +318,7 @@ class AgentDBCLI {
     }
     const episodeId = Number(insertResult.lastInsertRowid);
 
-    this.causalGraph.recordObservation({
+    await this.causalGraph.recordObservation({
       experimentId: params.experimentId,
       episodeId: episodeId,
       isTreatment: params.isTreatment,
@@ -336,7 +338,7 @@ class AgentDBCLI {
 
     log.header('\n📈 Calculating Uplift');
 
-    const result = this.causalGraph.calculateUplift(experimentId);
+    const result = await this.causalGraph.calculateUplift(experimentId);
 
     // Fetch experiment details (now includes calculated means)
     const experiment = this.db!.prepare('SELECT * FROM causal_experiments WHERE id = ?').get(experimentId) as any;
@@ -380,7 +382,7 @@ class AgentDBCLI {
 
     log.header('\n🔍 Querying Causal Edges');
 
-    const edges = this.causalGraph.queryCausalEffects({
+    const edges = await this.causalGraph.queryCausalEffects({
       interventionMemoryId: 0,
       interventionMemoryType: params.cause || '',
       outcomeMemoryId: params.effect ? 0 : undefined,

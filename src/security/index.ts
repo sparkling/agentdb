@@ -17,7 +17,6 @@ export type {
 export { AttestationLog } from './AttestationLog.js';
 export type {
   AttestationQueryOptions,
-  DatabaseLike,
   DenialPattern,
   AttestationStats,
 } from './AttestationLog.js';

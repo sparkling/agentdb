@@ -328,14 +328,12 @@ export class AgentDB {
         ...(this.config.hnswM !== undefined && { M: this.config.hnswM }),
         ...(this.config.hnswEfConstruction !== undefined && { efConstruction: this.config.hnswEfConstruction }),
         ...(this.config.hnswEfSearch !== undefined && { efSearch: this.config.hnswEfSearch }),
-        // ADR-0170 Phase B (Wave 1a end): AttestationLog DDL is SQLite-dialect
-        // (INTEGER PRIMARY KEY AUTOINCREMENT, strftime('%s','now')). Passing
-        // this.db (now PostgresBackend) makes pglite reject the schema with
-        // "syntax error at or near AUTOINCREMENT". Wave 1b ports the
-        // AttestationLog DDL to postgres dialect; until then, omit the
-        // database param so the log construction returns null (AttestationLog
-        // is optional per factory.ts:430-433).
-        // database: this.db,
+        // ADR-0170 Phase B Wave 1a fix (2026-05-11): AttestationLog now
+        // accepts the shared PostgresBackend (was the SQLite handle). Its
+        // bootstrapSchema() is awaited by every read-side method and
+        // pre-runs on construction; mutation hot path is fire-and-forget.
+        // See forks/agentdb/src/security/AttestationLog.ts header.
+        database: this.postgresBackend,
       });
       this.guardedBackend = backend;
       this.mutationGuard = guard;

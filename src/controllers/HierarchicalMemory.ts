@@ -129,6 +129,13 @@ export class HierarchicalMemory {
   private embedder: EmbeddingService;
   private vectorBackend?: VectorBackend;
   private config: HierarchicalMemoryConfig;
+  /**
+   * ADR-0166 Phase 3 (Option F): set to true when the `hmem_vec` sqlite-vec
+   * virtual table is present on `this.db`. Detected once at init time by
+   * querying sqlite_master. When true, store/forget mirror writes into the
+   * virtual table and recall() can route k-NN through SQL.
+   */
+  private optionFEnabled: boolean = false;
 
   // In-memory caches for fast access
   private workingMemoryCache = new Map<string, MemoryItem>();
@@ -172,6 +179,26 @@ export class HierarchicalMemory {
     };
 
     this.initializeDatabase();
+    this.optionFEnabled = this.detectOptionF();
+  }
+
+  /**
+   * ADR-0166 Phase 3 (Option F): detect whether hmem_vec is available on
+   * `this.db`. Called once at construction; the result is cached on
+   * `this.optionFEnabled`. The virtual table is created by AgentDB SDK or
+   * the standalone MCP server at boot when sqlite-vec is loaded.
+   */
+  private detectOptionF(): boolean {
+    try {
+      const row = this.db
+        .prepare(
+          `SELECT name FROM sqlite_master WHERE type='table' AND name='hmem_vec'`,
+        )
+        .get();
+      return !!row;
+    } catch {
+      return false;
+    }
   }
 
   /**
@@ -263,6 +290,24 @@ export class HierarchicalMemory {
         createdAt: now,
         ...options?.metadata,
       });
+    }
+
+    // ADR-0166 Phase 3 (Option F): mirror embedding into the hmem_vec virtual
+    // table for SQL-side k-NN. Idempotent w.r.t. vectorBackend — both paths
+    // remain valid; recall() picks whichever is most appropriate per query.
+    if (this.optionFEnabled) {
+      try {
+        const vecStmt = this.db.prepare(
+          `INSERT INTO hmem_vec(id, embedding) VALUES (?, ?)`,
+        );
+        vecStmt.run(id, Buffer.from(new Float32Array(embedding).buffer));
+      } catch (err) {
+        // Loud trace per `feedback-no-fallbacks`: a write that succeeds on
+        // the relational table but fails on the vec mirror leaves them
+        // inconsistent. Surface the error rather than silently swallowing.
+        console.error(`[HierarchicalMemory] Option F vec mirror failed for id=${id}: ${(err as Error).message}`);
+        throw err;
+      }
     }
 
     // Cache in appropriate tier
@@ -586,6 +631,16 @@ export class HierarchicalMemory {
     // Remove from vector backend
     if (this.vectorBackend) {
       this.vectorBackend.remove(memoryId);
+    }
+
+    // ADR-0166 Phase 3 (Option F): also delete from hmem_vec to keep both
+    // axes in sync. No-op when the virtual table isn't present.
+    if (this.optionFEnabled) {
+      try {
+        this.db.prepare('DELETE FROM hmem_vec WHERE id = ?').run(memoryId);
+      } catch (err) {
+        console.error(`[HierarchicalMemory] Option F vec delete failed for id=${memoryId}: ${(err as Error).message}`);
+      }
     }
   }
 

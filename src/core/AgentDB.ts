@@ -594,16 +594,20 @@ export class AgentDB {
    */
   private createOptionFVirtualTables(dim: number): void {
     if (!this._sqliteVecLoaded) return;
+    // sqlite-vec `+col TEXT` declares an auxiliary metadata column on the vec0
+    // virtual table. Each augmented controller keys its base table by a TEXT
+    // id (UUID), so we mirror that id into the vec table for stable joins
+    // — independent of SQLite's implicit rowid (which can shift after VACUUM).
     const ddl = [
       // TRIVIAL bucket
-      `CREATE VIRTUAL TABLE IF NOT EXISTS hmem_vec USING vec0(embedding float[${dim}]);`,
-      `CREATE VIRTUAL TABLE IF NOT EXISTS consolidated_vec USING vec0(embedding float[${dim}]);`,
+      `CREATE VIRTUAL TABLE IF NOT EXISTS hmem_vec USING vec0(+id TEXT, embedding float[${dim}]);`,
+      `CREATE VIRTUAL TABLE IF NOT EXISTS consolidated_vec USING vec0(+id TEXT, embedding float[${dim}]);`,
       // MODERATE bucket
-      `CREATE VIRTUAL TABLE IF NOT EXISTS reflexion_episode_vec USING vec0(embedding float[${dim}]);`,
-      `CREATE VIRTUAL TABLE IF NOT EXISTS skill_vec USING vec0(embedding float[${dim}]);`,
-      `CREATE VIRTUAL TABLE IF NOT EXISTS reasoning_pattern_vec USING vec0(embedding float[${dim}]);`,
-      `CREATE VIRTUAL TABLE IF NOT EXISTS recall_vec USING vec0(embedding float[${dim}]);`,
-      `CREATE VIRTUAL TABLE IF NOT EXISTS learning_vec USING vec0(embedding float[${dim}]);`,
+      `CREATE VIRTUAL TABLE IF NOT EXISTS reflexion_episode_vec USING vec0(+id TEXT, embedding float[${dim}]);`,
+      `CREATE VIRTUAL TABLE IF NOT EXISTS skill_vec USING vec0(+id TEXT, embedding float[${dim}]);`,
+      `CREATE VIRTUAL TABLE IF NOT EXISTS reasoning_pattern_vec USING vec0(+id TEXT, embedding float[${dim}]);`,
+      `CREATE VIRTUAL TABLE IF NOT EXISTS recall_vec USING vec0(+id TEXT, embedding float[${dim}]);`,
+      `CREATE VIRTUAL TABLE IF NOT EXISTS learning_vec USING vec0(+id TEXT, embedding float[${dim}]);`,
     ].join('\n');
     try {
       this.db.exec(ddl);

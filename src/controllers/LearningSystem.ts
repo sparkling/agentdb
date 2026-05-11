@@ -88,6 +88,14 @@ export class LearningSystem {
   private gnnService: GNNService | null = null;
   private gnnEnabled: boolean = false;
   private sonaEnabled: boolean = false;
+  /**
+   * ADR-0166 Phase 3 (Option F): true when learning_vec sqlite-vec virtual
+   * table is present. Detected once at construction. Note: aggregation
+   * queries (GROUP BY state/session/date) stay on the relational
+   * learning_state_embeddings table per PERMANENT_SQLITE_CARVE_OUT; the
+   * mirror only adds an HNSW-indexed companion for k-NN lookups.
+   */
+  private optionFEnabled: boolean = false;
 
   static _resetSingleton(): void { _singleton = null; }
 
@@ -102,9 +110,25 @@ export class LearningSystem {
     this.db = db;
     this.embedder = embedder;
     this.initializeSchema();
+    // ADR-0166 Phase 3 (Option F): detect virtual table availability once.
+    this.optionFEnabled = this.detectOptionF();
     this.initializeRuVectorEnhancements().catch(err => {
       console.warn('[LearningSystem] RuVector enhancements unavailable:', err.message);
     });
+  }
+
+  /**
+   * ADR-0166 Phase 3 (Option F): detect whether learning_vec exists.
+   */
+  private detectOptionF(): boolean {
+    try {
+      const row: any = (this.db as any).prepare?.(
+        `SELECT name FROM sqlite_master WHERE type='table' AND name='learning_vec'`,
+      )?.get?.();
+      return !!row;
+    } catch {
+      return false;
+    }
   }
 
   /**
@@ -532,10 +556,25 @@ export class LearningSystem {
     const embedding = await this.embedder.embed(state);
 
     // Store embedding
-    this.db.prepare(`
+    const result = this.db.prepare(`
       INSERT INTO learning_state_embeddings (session_id, state, embedding)
       VALUES (?, ?, ?)
     `).run(sessionId, state, Buffer.from(embedding.buffer));
+
+    // ADR-0166 Phase 3 (Option F): mirror into learning_vec for k-NN
+    // lookups. GROUP BY aggregations stay on the relational table per
+    // PERMANENT_SQLITE_CARVE_OUT — this is augmentation, not replacement.
+    if (this.optionFEnabled) {
+      try {
+        const rowid = Number(result.lastInsertRowid);
+        this.db.prepare(
+          `INSERT INTO learning_vec(id, embedding) VALUES (?, ?)`,
+        ).run(rowid, Buffer.from(embedding.buffer));
+      } catch (err) {
+        console.error(`[LearningSystem] Option F vec mirror failed for session=${sessionId}: ${(err as Error).message}`);
+        throw err;
+      }
+    }
 
     return embedding;
   }

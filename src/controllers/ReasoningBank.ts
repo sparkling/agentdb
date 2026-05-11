@@ -225,14 +225,16 @@ export class ReasoningBank {
     // ADR-0166 Phase 3 (Option F): always mirror to reasoning_pattern_vec
     // when available, independent of which in-memory vectorBackend path is
     // taken below. Provides a persistent SQL-side k-NN index alongside the
-    // ephemeral in-memory HNSW.
+    // ephemeral in-memory HNSW. ID stringified — see AgentDB.ts uniform
+    // TEXT auxiliary column rationale.
     if (this.optionFEnabled) {
       try {
-        this.db.prepare(`DELETE FROM reasoning_pattern_vec WHERE id = ?`).run(patternId);
+        const idStr = String(patternId);
+        this.db.prepare(`DELETE FROM reasoning_pattern_vec WHERE id = ?`).run(idStr);
         const vecStmt = this.db.prepare(
           `INSERT INTO reasoning_pattern_vec(id, embedding) VALUES (?, ?)`,
         );
-        vecStmt.run(patternId, Buffer.from(embedding.buffer));
+        vecStmt.run(idStr, Buffer.from(embedding.buffer));
       } catch (err) {
         console.error(`[ReasoningBank] Option F vec mirror failed for pattern=${patternId}: ${(err as Error).message}`);
         throw err;
@@ -708,9 +710,10 @@ export class ReasoningBank {
     const result = stmt.run(patternId);
 
     // ADR-0166 Phase 3 (Option F): mirror delete into reasoning_pattern_vec.
+    // ID stringified to match TEXT auxiliary column type.
     if (this.optionFEnabled) {
       try {
-        this.db.prepare(`DELETE FROM reasoning_pattern_vec WHERE id = ?`).run(patternId);
+        this.db.prepare(`DELETE FROM reasoning_pattern_vec WHERE id = ?`).run(String(patternId));
       } catch (err) {
         console.warn(`[ReasoningBank] Option F vec delete failed for pattern=${patternId}: ${(err as Error).message}`);
       }

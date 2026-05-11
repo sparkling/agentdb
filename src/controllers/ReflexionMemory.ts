@@ -949,12 +949,14 @@ export class ReflexionMemory {
 
     // ADR-0166 Phase 3 (Option F): mirror into reflexion_episode_vec for
     // HNSW-indexed k-NN via SQL. Idempotent w.r.t. vectorBackend.
+    // ID stringified — sqlite-vec auxiliary column types are TEXT uniformly
+    // (see AgentDB.createOptionFVirtualTables for rationale).
     if (this.optionFEnabled) {
       try {
         const vecStmt = this.db.prepare(
           `INSERT INTO reflexion_episode_vec(id, embedding) VALUES (?, ?)`,
         );
-        vecStmt.run(episodeId, this.serializeEmbedding(embedding));
+        vecStmt.run(String(episodeId), this.serializeEmbedding(embedding));
       } catch (err) {
         console.error(`[ReflexionMemory] Option F vec mirror failed for episode=${episodeId}: ${(err as Error).message}`);
         throw err;
@@ -1311,9 +1313,10 @@ export class ReflexionMemory {
         );
         embStmt.run(numericId);
         // ADR-0166 Phase 3 (Option F): mirror delete into reflexion_episode_vec.
+        // ID stringified to match the TEXT auxiliary column type.
         if (this.optionFEnabled) {
           try {
-            this.db.prepare(`DELETE FROM reflexion_episode_vec WHERE id = ?`).run(numericId);
+            this.db.prepare(`DELETE FROM reflexion_episode_vec WHERE id = ?`).run(String(numericId));
           } catch (vecErr) {
             const vecMsg = vecErr instanceof Error ? vecErr.message : String(vecErr);
             // eslint-disable-next-line no-console

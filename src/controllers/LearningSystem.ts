@@ -564,9 +564,10 @@ export class LearningSystem {
     // ADR-0166 Phase 3 (Option F): mirror into learning_vec for k-NN
     // lookups. GROUP BY aggregations stay on the relational table per
     // PERMANENT_SQLITE_CARVE_OUT — this is augmentation, not replacement.
+    // ID stringified to match TEXT auxiliary column type.
     if (this.optionFEnabled) {
       try {
-        const rowid = Number(result.lastInsertRowid);
+        const rowid = String(result.lastInsertRowid);
         this.db.prepare(
           `INSERT INTO learning_vec(id, embedding) VALUES (?, ?)`,
         ).run(rowid, Buffer.from(embedding.buffer));

@@ -52,7 +52,7 @@ describe('ADR-0166 Phase 3 — per-controller Option F wiring', () => {
     const rawDb = (db as any).db;
     const rowCount = rawDb
       .prepare(`SELECT COUNT(*) AS c FROM reflexion_episode_vec WHERE id = ?`)
-      .get(episodeId) as { c: number };
+      .get(String(episodeId)) as { c: number };
     expect(rowCount.c).toBe(1);
   });
 
@@ -72,7 +72,7 @@ describe('ADR-0166 Phase 3 — per-controller Option F wiring', () => {
     const rawDb = (db as any).db;
     const rowCount = rawDb
       .prepare(`SELECT COUNT(*) AS c FROM skill_vec WHERE id = ?`)
-      .get(skillId) as { c: number };
+      .get(String(skillId)) as { c: number };
     expect(rowCount.c).toBe(1);
   });
 
@@ -92,7 +92,7 @@ describe('ADR-0166 Phase 3 — per-controller Option F wiring', () => {
     const rawDb = (db as any).db;
     const rowCount = rawDb
       .prepare(`SELECT COUNT(*) AS c FROM reasoning_pattern_vec WHERE id = ?`)
-      .get(patternId) as { c: number };
+      .get(String(patternId)) as { c: number };
     expect(rowCount.c).toBe(1);
   });
 });

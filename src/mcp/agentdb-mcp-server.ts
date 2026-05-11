@@ -311,11 +311,11 @@ try {
     db.exec([
       `CREATE VIRTUAL TABLE IF NOT EXISTS hmem_vec USING vec0(+id TEXT, embedding float[${dim}]);`,
       `CREATE VIRTUAL TABLE IF NOT EXISTS consolidated_vec USING vec0(+id TEXT, embedding float[${dim}]);`,
-      `CREATE VIRTUAL TABLE IF NOT EXISTS reflexion_episode_vec USING vec0(+id INTEGER, embedding float[${dim}]);`,
-      `CREATE VIRTUAL TABLE IF NOT EXISTS skill_vec USING vec0(+id INTEGER, embedding float[${dim}]);`,
-      `CREATE VIRTUAL TABLE IF NOT EXISTS reasoning_pattern_vec USING vec0(+id INTEGER, embedding float[${dim}]);`,
+      `CREATE VIRTUAL TABLE IF NOT EXISTS reflexion_episode_vec USING vec0(+id TEXT, embedding float[${dim}]);`,
+      `CREATE VIRTUAL TABLE IF NOT EXISTS skill_vec USING vec0(+id TEXT, embedding float[${dim}]);`,
+      `CREATE VIRTUAL TABLE IF NOT EXISTS reasoning_pattern_vec USING vec0(+id TEXT, embedding float[${dim}]);`,
       `CREATE VIRTUAL TABLE IF NOT EXISTS recall_vec USING vec0(+id TEXT, embedding float[${dim}]);`,
-      `CREATE VIRTUAL TABLE IF NOT EXISTS learning_vec USING vec0(+id INTEGER, embedding float[${dim}]);`,
+      `CREATE VIRTUAL TABLE IF NOT EXISTS learning_vec USING vec0(+id TEXT, embedding float[${dim}]);`,
     ].join('\n'));
     console.error('✅ Option F vec0 virtual tables created');
   }

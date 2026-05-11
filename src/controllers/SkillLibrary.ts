@@ -531,14 +531,16 @@ export class SkillLibrary {
     // ADR-0166 Phase 3 (Option F): mirror embedding into skill_vec for
     // SQL-side k-NN via the sqlite-vec virtual table. vec0 doesn't support
     // ON CONFLICT, so DELETE-then-INSERT for upsert semantics matching the
-    // skill_embeddings UPSERT above.
+    // skill_embeddings UPSERT above. ID stringified — see AgentDB.ts for the
+    // uniform-TEXT-aux-column rationale.
     if (this.optionFEnabled) {
       try {
-        this.db.prepare(`DELETE FROM skill_vec WHERE id = ?`).run(skillId);
+        const idStr = String(skillId);
+        this.db.prepare(`DELETE FROM skill_vec WHERE id = ?`).run(idStr);
         const vecStmt = this.db.prepare(
           `INSERT INTO skill_vec(id, embedding) VALUES (?, ?)`,
         );
-        vecStmt.run(skillId, Buffer.from(embedding.buffer));
+        vecStmt.run(idStr, Buffer.from(embedding.buffer));
       } catch (err) {
         console.error(`[SkillLibrary] Option F vec mirror failed for skill=${skillId}: ${(err as Error).message}`);
         throw err;

@@ -596,22 +596,24 @@ export class AgentDB {
    */
   private createOptionFVirtualTables(dim: number): void {
     if (!this._sqliteVecLoaded) return;
-    // sqlite-vec `+col <TYPE>` declares an auxiliary metadata column on the
-    // vec0 virtual table. Each augmented controller keys its base table by a
-    // stable id; the vec table mirrors that id so joins are independent of
-    // SQLite's implicit rowid (which can shift after VACUUM). Most base
-    // tables use TEXT UUIDs; ReflexionMemory uses INTEGER autoincrement on
-    // episodes, so its companion vec table types the id as INTEGER.
+    // sqlite-vec `+col TEXT` declares an auxiliary metadata column on the
+    // vec0 virtual table. We use TEXT uniformly for the join id even when
+    // the base table is INTEGER AUTOINCREMENT — sqlite-vec auxiliary INTEGER
+    // columns reject JS number bindings under better-sqlite3 with
+    // "auxiliary column id has type INTEGER, but FLOAT was provided"
+    // (regardless of Number.isInteger). TEXT bindings work universally and
+    // sqlite still indexes them efficiently for equality lookups. Controllers
+    // stringify their numeric ids when mirroring writes.
     const ddl = [
       // TRIVIAL bucket
       `CREATE VIRTUAL TABLE IF NOT EXISTS hmem_vec USING vec0(+id TEXT, embedding float[${dim}]);`,
       `CREATE VIRTUAL TABLE IF NOT EXISTS consolidated_vec USING vec0(+id TEXT, embedding float[${dim}]);`,
       // MODERATE bucket
-      `CREATE VIRTUAL TABLE IF NOT EXISTS reflexion_episode_vec USING vec0(+id INTEGER, embedding float[${dim}]);`,
-      `CREATE VIRTUAL TABLE IF NOT EXISTS skill_vec USING vec0(+id INTEGER, embedding float[${dim}]);`,
-      `CREATE VIRTUAL TABLE IF NOT EXISTS reasoning_pattern_vec USING vec0(+id INTEGER, embedding float[${dim}]);`,
+      `CREATE VIRTUAL TABLE IF NOT EXISTS reflexion_episode_vec USING vec0(+id TEXT, embedding float[${dim}]);`,
+      `CREATE VIRTUAL TABLE IF NOT EXISTS skill_vec USING vec0(+id TEXT, embedding float[${dim}]);`,
+      `CREATE VIRTUAL TABLE IF NOT EXISTS reasoning_pattern_vec USING vec0(+id TEXT, embedding float[${dim}]);`,
       `CREATE VIRTUAL TABLE IF NOT EXISTS recall_vec USING vec0(+id TEXT, embedding float[${dim}]);`,
-      `CREATE VIRTUAL TABLE IF NOT EXISTS learning_vec USING vec0(+id INTEGER, embedding float[${dim}]);`,
+      `CREATE VIRTUAL TABLE IF NOT EXISTS learning_vec USING vec0(+id TEXT, embedding float[${dim}]);`,
     ].join('\n');
     try {
       this.db.exec(ddl);

@@ -11,12 +11,17 @@
  * - Rate limiting per client
  * - Sync request processing (episodes, skills, edges)
  * - Comprehensive error handling and logging
+ *
+ * ADR-0170 Phase B.13 (2026-05-11): ported from better-sqlite3 (sync) to
+ * PostgresBackend (async). Read-only controller — owns no schema. SQL
+ * placeholders use `$N` instead of `?`; `success` filter binds BOOLEAN (was
+ * 0/1); the dynamic WHERE-clause builders track a parameter index. The
+ * per-call `db.prepare(...).all(...)` cycle is replaced with
+ * `await db.query(sql, params)` returning `{ rows }`.
  */
 
 import chalk from 'chalk';
-
-// Database type from db-fallback
-type Database = any;
+import type { PostgresBackend } from '../backends/postgres/PostgresBackend.js';
 
 export interface QUICServerConfig {
   host?: string;
@@ -66,7 +71,7 @@ interface RateLimitState {
 }
 
 export class QUICServer {
-  private db: Database;
+  private db: PostgresBackend;
   private config: Required<QUICServerConfig>;
   private isRunning: boolean = false;
   private connections: Map<string, ClientConnection> = new Map();
@@ -74,7 +79,7 @@ export class QUICServer {
   private server: any = null;
   private cleanupInterval: NodeJS.Timeout | null = null;
 
-  constructor(db: Database, config: QUICServerConfig = {}) {
+  constructor(db: PostgresBackend, config: QUICServerConfig = {}) {
     this.db = db;
     this.config = {
       host: config.host || '0.0.0.0',
@@ -332,28 +337,32 @@ export class QUICServer {
 
     let query = 'SELECT * FROM episodes WHERE 1=1';
     const params: any[] = [];
+    let paramIndex = 0;
 
     if (since) {
-      query += ' AND ts > ?';
       params.push(since);
+      query += ` AND ts > $${++paramIndex}`;
     }
 
     // Apply filters
     if (filters) {
       if (filters.sessionId) {
-        query += ' AND session_id = ?';
         params.push(filters.sessionId);
+        query += ` AND session_id = $${++paramIndex}`;
       }
       if (filters.success !== undefined) {
-        query += ' AND success = ?';
-        params.push(filters.success ? 1 : 0);
+        // Postgres schema: `success BOOLEAN` (was SQLite INTEGER 0/1).
+        params.push(!!filters.success);
+        query += ` AND success = $${++paramIndex}`;
       }
     }
 
-    query += ` ORDER BY ts DESC LIMIT ${batchSize}`;
+    // batchSize is a TS-typed number coming from the request; safe to
+    // interpolate. Coerce defensively for runtime-tampered payloads.
+    query += ` ORDER BY ts DESC LIMIT ${Number(batchSize)}`;
 
-    const stmt = this.db.prepare(query);
-    const rows = stmt.all(...params);
+    const result = await this.db.query(query, params);
+    const rows = result.rows as any[];
 
     return rows.map((row: any) => ({
       id: row.id,
@@ -364,11 +373,18 @@ export class QUICServer {
       output: row.output,
       critique: row.critique,
       reward: row.reward,
-      success: row.success === 1,
+      // Postgres BOOLEAN returns true/false (was SQLite 0/1).
+      success: row.success === true,
       latencyMs: row.latency_ms,
       tokensUsed: row.tokens_used,
+      // `tags` is a TEXT column carrying a JSON-encoded array (per schema).
       tags: row.tags ? JSON.parse(row.tags) : [],
-      metadata: row.metadata ? JSON.parse(row.metadata) : {},
+      // `metadata` is JSONB — pglite/pg may pre-parse it. Guard for both.
+      metadata: row.metadata
+        ? typeof row.metadata === 'string'
+          ? JSON.parse(row.metadata)
+          : row.metadata
+        : {},
     }));
   }
 
@@ -380,16 +396,17 @@ export class QUICServer {
 
     let query = 'SELECT * FROM skills WHERE 1=1';
     const params: any[] = [];
+    let paramIndex = 0;
 
     if (since) {
-      query += ' AND ts > ?';
       params.push(since);
+      query += ` AND ts > $${++paramIndex}`;
     }
 
-    query += ` ORDER BY ts DESC LIMIT ${batchSize}`;
+    query += ` ORDER BY ts DESC LIMIT ${Number(batchSize)}`;
 
-    const stmt = this.db.prepare(query);
-    const rows = stmt.all(...params);
+    const result = await this.db.query(query, params);
+    const rows = result.rows as any[];
 
     return rows.map((row: any) => ({
       id: row.id,
@@ -401,7 +418,11 @@ export class QUICServer {
       usageCount: row.usage_count,
       avgReward: row.avg_reward,
       tags: row.tags ? JSON.parse(row.tags) : [],
-      metadata: row.metadata ? JSON.parse(row.metadata) : {},
+      metadata: row.metadata
+        ? typeof row.metadata === 'string'
+          ? JSON.parse(row.metadata)
+          : row.metadata
+        : {},
     }));
   }
 
@@ -413,16 +434,17 @@ export class QUICServer {
 
     let query = 'SELECT * FROM skill_edges WHERE 1=1';
     const params: any[] = [];
+    let paramIndex = 0;
 
     if (since) {
-      query += ' AND ts > ?';
       params.push(since);
+      query += ` AND ts > $${++paramIndex}`;
     }
 
-    query += ` ORDER BY ts DESC LIMIT ${batchSize}`;
+    query += ` ORDER BY ts DESC LIMIT ${Number(batchSize)}`;
 
-    const stmt = this.db.prepare(query);
-    const rows = stmt.all(...params);
+    const result = await this.db.query(query, params);
+    const rows = result.rows as any[];
 
     return rows.map((row: any) => ({
       id: row.id,

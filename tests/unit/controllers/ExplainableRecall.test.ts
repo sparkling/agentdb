@@ -1,107 +1,47 @@
 /**
  * Unit Tests for ExplainableRecall Controller
  *
- * Tests certificate issuance, verification, provenance tracking, and justification
+ * Tests certificate issuance, verification, provenance tracking, and justification.
+ *
+ * ADR-0170 Phase B.5: ported from better-sqlite3 (sync) to PostgresBackend
+ * (pglite-embedded, async). Each test gets a fresh ephemeral pglite cluster
+ * under `os.tmpdir()`.
  */
 
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import Database from 'better-sqlite3';
-import { ExplainableRecall, RecallCertificate, JustificationPath, ProvenanceSource } from '../../../src/controllers/ExplainableRecall.js';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { ExplainableRecall } from '../../../src/controllers/ExplainableRecall.js';
 import { EmbeddingService } from '../../../src/controllers/EmbeddingService.js';
+import { PostgresBackend } from '../../../src/backends/postgres/PostgresBackend.js';
 import * as fs from 'fs';
-
-const TEST_DB_PATH = './tests/fixtures/test-explainable-recall.db';
+import * as os from 'os';
+import * as path from 'path';
 
 describe('ExplainableRecall', () => {
-  let db: Database.Database;
+  let backend: PostgresBackend;
+  let dataDir: string;
   let embedder: EmbeddingService;
   let explainableRecall: ExplainableRecall;
 
   beforeEach(async () => {
-    // Clean up previous test artifacts
-    [TEST_DB_PATH, `${TEST_DB_PATH}-wal`, `${TEST_DB_PATH}-shm`].forEach(file => {
-      if (fs.existsSync(file)) fs.unlinkSync(file);
-    });
+    // ADR-0076 A4: reset the dual-instance guard so each test gets a fresh
+    // controller singleton tied to this test's pglite cluster.
+    ExplainableRecall._resetSingleton();
 
-    // Initialize database
-    db = new Database(TEST_DB_PATH);
-    db.pragma('journal_mode = WAL');
+    dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agentdb-explainable-test-'));
+    backend = new PostgresBackend({ metric: 'cosine', dataDir });
+    await backend.initialize();
 
-    // Create required tables
-    db.exec(`
-      CREATE TABLE IF NOT EXISTS episodes (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        session_id TEXT NOT NULL,
-        task TEXT NOT NULL,
-        output TEXT,
-        reward REAL DEFAULT 0,
-        ts INTEGER DEFAULT (strftime('%s', 'now')),
-        latency_ms INTEGER DEFAULT 0
-      );
+    // Load schemas (postgres dialect) for episodes/skills/notes/facts/recall_certificates/etc.
+    const schemaPath = path.join(__dirname, '../../../src/schemas/schema.sql');
+    if (fs.existsSync(schemaPath)) {
+      await backend.exec(fs.readFileSync(schemaPath, 'utf-8'));
+    }
 
-      CREATE TABLE IF NOT EXISTS skills (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        name TEXT NOT NULL,
-        code TEXT NOT NULL,
-        description TEXT
-      );
+    const frontierSchemaPath = path.join(__dirname, '../../../src/schemas/frontier-schema.sql');
+    if (fs.existsSync(frontierSchemaPath)) {
+      await backend.exec(fs.readFileSync(frontierSchemaPath, 'utf-8'));
+    }
 
-      CREATE TABLE IF NOT EXISTS notes (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        text TEXT NOT NULL,
-        ts INTEGER DEFAULT (strftime('%s', 'now'))
-      );
-
-      CREATE TABLE IF NOT EXISTS facts (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        subject TEXT NOT NULL,
-        predicate TEXT NOT NULL,
-        object TEXT NOT NULL
-      );
-
-      CREATE TABLE IF NOT EXISTS recall_certificates (
-        id TEXT PRIMARY KEY,
-        query_id TEXT NOT NULL,
-        query_text TEXT NOT NULL,
-        chunk_ids TEXT NOT NULL,
-        chunk_types TEXT NOT NULL,
-        minimal_why TEXT NOT NULL,
-        redundancy_ratio REAL NOT NULL,
-        completeness_score REAL NOT NULL,
-        merkle_root TEXT NOT NULL,
-        source_hashes TEXT NOT NULL,
-        proof_chain TEXT NOT NULL,
-        policy_proof TEXT,
-        policy_version TEXT,
-        access_level TEXT DEFAULT 'internal',
-        latency_ms INTEGER,
-        created_at INTEGER DEFAULT (strftime('%s', 'now'))
-      );
-
-      CREATE TABLE IF NOT EXISTS justification_paths (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        certificate_id TEXT NOT NULL,
-        chunk_id TEXT NOT NULL,
-        chunk_type TEXT NOT NULL,
-        reason TEXT NOT NULL,
-        necessity_score REAL NOT NULL,
-        path_elements TEXT NOT NULL
-      );
-
-      CREATE TABLE IF NOT EXISTS provenance_sources (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        source_type TEXT NOT NULL,
-        source_id INTEGER NOT NULL,
-        content_hash TEXT NOT NULL,
-        parent_hash TEXT,
-        derived_from TEXT,
-        creator TEXT,
-        metadata TEXT,
-        created_at INTEGER DEFAULT (strftime('%s', 'now'))
-      );
-    `);
-
-    // Initialize embedding service
     embedder = new EmbeddingService({
       model: 'mock-model',
       dimension: 384,
@@ -109,47 +49,59 @@ describe('ExplainableRecall', () => {
     });
     await embedder.initialize();
 
-    // Initialize ExplainableRecall
-    explainableRecall = new ExplainableRecall(db);
+    explainableRecall = new ExplainableRecall(backend);
+    await explainableRecall.initialize();
   });
 
-  afterEach(() => {
-    db.close();
-    [TEST_DB_PATH, `${TEST_DB_PATH}-wal`, `${TEST_DB_PATH}-shm`].forEach(file => {
-      if (fs.existsSync(file)) fs.unlinkSync(file);
-    });
+  afterEach(async () => {
+    try {
+      backend.close();
+    } catch {
+      /* best-effort */
+    }
+    try {
+      fs.rmSync(dataDir, { recursive: true, force: true });
+    } catch {
+      /* best-effort */
+    }
   });
 
   describe('Constructor', () => {
-    it('should initialize in v1 mode (database only)', () => {
-      const recall = new ExplainableRecall(db);
+    it('should initialize in v1 mode (database only)', async () => {
+      ExplainableRecall._resetSingleton();
+      const recall = new ExplainableRecall(backend);
+      await recall.initialize();
       expect(recall).toBeDefined();
     });
 
-    it('should initialize in v2 mode (with embedder)', () => {
-      const recall = new ExplainableRecall(db, embedder);
+    it('should initialize in v2 mode (with embedder)', async () => {
+      ExplainableRecall._resetSingleton();
+      const recall = new ExplainableRecall(backend, embedder);
+      await recall.initialize();
       expect(recall).toBeDefined();
     });
 
-    it('should enable GraphRoPE when configured', () => {
-      const recall = new ExplainableRecall(db, embedder, {
+    it('should enable GraphRoPE when configured', async () => {
+      ExplainableRecall._resetSingleton();
+      const recall = new ExplainableRecall(backend, embedder, {
         ENABLE_GRAPH_ROPE: true,
         graphRoPEConfig: {
           maxHops: 3,
         },
       });
+      await recall.initialize();
       expect(recall).toBeDefined();
     });
   });
 
   describe('createCertificate', () => {
-    beforeEach(() => {
+    beforeEach(async () => {
       // Insert test episodes
       for (let i = 1; i <= 5; i++) {
-        db.prepare(`
+        await backend.query(`
           INSERT INTO episodes (id, session_id, task, output, reward)
-          VALUES (?, ?, ?, ?, ?)
-        `).run(i, 'test-session', `Task ${i}`, `Output containing keyword${i} and result`, 0.8);
+          VALUES ($1, $2, $3, $4, $5)
+        `, [i, 'test-session', `Task ${i}`, `Output containing keyword${i} and result`, 0.8]);
       }
     });
 
@@ -256,11 +208,12 @@ describe('ExplainableRecall', () => {
         requirements: [],
       });
 
-      const stored = db.prepare(
-        'SELECT * FROM recall_certificates WHERE id = ?'
-      ).get(certificate.id);
+      const result = await backend.query(
+        'SELECT * FROM recall_certificates WHERE id = $1',
+        [certificate.id],
+      );
 
-      expect(stored).toBeDefined();
+      expect(result.rows[0]).toBeDefined();
     });
 
     it('should record latency', async () => {
@@ -285,10 +238,10 @@ describe('ExplainableRecall', () => {
     beforeEach(async () => {
       // Insert test episodes
       for (let i = 1; i <= 3; i++) {
-        db.prepare(`
+        await backend.query(`
           INSERT INTO episodes (id, session_id, task, output, reward)
-          VALUES (?, ?, ?, ?, ?)
-        `).run(i, 'test-session', `Task ${i}`, `Output ${i}`, 0.8);
+          VALUES ($1, $2, $3, $4, $5)
+        `, [i, 'test-session', `Task ${i}`, `Output ${i}`, 0.8]);
       }
 
       // Create a certificate
@@ -307,15 +260,15 @@ describe('ExplainableRecall', () => {
       certificateId = certificate.id;
     });
 
-    it('should verify valid certificate', () => {
-      const result = explainableRecall.verifyCertificate(certificateId);
+    it('should verify valid certificate', async () => {
+      const result = await explainableRecall.verifyCertificate(certificateId);
 
       expect(result.valid).toBe(true);
       expect(result.issues).toHaveLength(0);
     });
 
-    it('should detect non-existent certificate', () => {
-      const result = explainableRecall.verifyCertificate('non-existent-id');
+    it('should detect non-existent certificate', async () => {
+      const result = await explainableRecall.verifyCertificate('non-existent-id');
 
       expect(result.valid).toBe(false);
       expect(result.issues).toContain('Certificate not found');
@@ -323,11 +276,12 @@ describe('ExplainableRecall', () => {
 
     it('should detect changed content', async () => {
       // Modify the episode content after certificate creation
-      db.prepare(`
-        UPDATE episodes SET output = 'Modified output' WHERE id = 1
-      `).run();
+      await backend.query(
+        `UPDATE episodes SET output = $1 WHERE id = $2`,
+        ['Modified output', 1],
+      );
 
-      const result = explainableRecall.verifyCertificate(certificateId);
+      const result = await explainableRecall.verifyCertificate(certificateId);
 
       expect(result.valid).toBe(false);
       expect(result.issues.some(issue => issue.includes('hash changed'))).toBe(true);
@@ -339,10 +293,10 @@ describe('ExplainableRecall', () => {
 
     beforeEach(async () => {
       // Insert test episode
-      db.prepare(`
+      await backend.query(`
         INSERT INTO episodes (id, session_id, task, output, reward)
-        VALUES (?, ?, ?, ?, ?)
-      `).run(1, 'test-session', 'Task 1', 'Output 1', 0.8);
+        VALUES ($1, $2, $3, $4, $5)
+      `, [1, 'test-session', 'Task 1', 'Output 1', 0.8]);
 
       // Create certificate
       const chunks = [
@@ -359,8 +313,8 @@ describe('ExplainableRecall', () => {
       certificateId = certificate.id;
     });
 
-    it('should return justification for chunk', () => {
-      const justification = explainableRecall.getJustification(certificateId, '1');
+    it('should return justification for chunk', async () => {
+      const justification = await explainableRecall.getJustification(certificateId, '1');
 
       expect(justification).toBeDefined();
       expect(justification!.chunkId).toBe('1');
@@ -371,14 +325,14 @@ describe('ExplainableRecall', () => {
       expect(Array.isArray(justification!.pathElements)).toBe(true);
     });
 
-    it('should return null for non-existent chunk', () => {
-      const justification = explainableRecall.getJustification(certificateId, '999');
+    it('should return null for non-existent chunk', async () => {
+      const justification = await explainableRecall.getJustification(certificateId, '999');
 
       expect(justification).toBeNull();
     });
 
-    it('should return null for non-existent certificate', () => {
-      const justification = explainableRecall.getJustification('non-existent', '1');
+    it('should return null for non-existent certificate', async () => {
+      const justification = await explainableRecall.getJustification('non-existent', '1');
 
       expect(justification).toBeNull();
     });
@@ -387,10 +341,10 @@ describe('ExplainableRecall', () => {
   describe('getProvenanceLineage', () => {
     beforeEach(async () => {
       // Insert test episode
-      db.prepare(`
+      await backend.query(`
         INSERT INTO episodes (id, session_id, task, output, reward)
-        VALUES (?, ?, ?, ?, ?)
-      `).run(1, 'test-session', 'Task 1', 'Output 1', 0.8);
+        VALUES ($1, $2, $3, $4, $5)
+      `, [1, 'test-session', 'Task 1', 'Output 1', 0.8]);
 
       // Create certificate to trigger provenance creation
       const chunks = [
@@ -405,24 +359,29 @@ describe('ExplainableRecall', () => {
       });
     });
 
-    it('should return provenance lineage', () => {
+    it('should return provenance lineage', async () => {
       // Get the content hash from provenance_sources
-      const source = db.prepare(
-        'SELECT content_hash FROM provenance_sources WHERE source_type = ? AND source_id = ?'
-      ).get('episode', 1) as any;
+      const sourceResult = await backend.query(
+        'SELECT content_hash FROM provenance_sources WHERE source_type = $1 AND source_id = $2',
+        ['episode', 1],
+      );
+      const source = sourceResult.rows[0] as any;
 
       if (source) {
-        const lineage = explainableRecall.getProvenanceLineage(source.content_hash);
+        const lineage = await explainableRecall.getProvenanceLineage(source.content_hash);
 
         expect(Array.isArray(lineage)).toBe(true);
         expect(lineage.length).toBeGreaterThan(0);
         expect(lineage[0].sourceType).toBe('episode');
-        expect(lineage[0].sourceId).toBe(1);
+        // BIGINT may surface as either number or string depending on driver
+        // normalization (pglite normalizes small values to number, pg may
+        // return string). Compare via Number() for portability.
+        expect(Number(lineage[0].sourceId)).toBe(1);
       }
     });
 
-    it('should return empty array for unknown hash', () => {
-      const lineage = explainableRecall.getProvenanceLineage('unknown-hash');
+    it('should return empty array for unknown hash', async () => {
+      const lineage = await explainableRecall.getProvenanceLineage('unknown-hash');
 
       expect(lineage).toHaveLength(0);
     });
@@ -434,10 +393,10 @@ describe('ExplainableRecall', () => {
     beforeEach(async () => {
       // Insert test episodes
       for (let i = 1; i <= 3; i++) {
-        db.prepare(`
+        await backend.query(`
           INSERT INTO episodes (id, session_id, task, output, reward)
-          VALUES (?, ?, ?, ?, ?)
-        `).run(i, 'test-session', `Task ${i}`, `Output ${i}`, 0.8);
+          VALUES ($1, $2, $3, $4, $5)
+        `, [i, 'test-session', `Task ${i}`, `Output ${i}`, 0.8]);
       }
 
       // Create certificate
@@ -456,8 +415,8 @@ describe('ExplainableRecall', () => {
       certificateId = certificate.id;
     });
 
-    it('should return full provenance trace', () => {
-      const trace = explainableRecall.traceProvenance(certificateId);
+    it('should return full provenance trace', async () => {
+      const trace = await explainableRecall.traceProvenance(certificateId);
 
       expect(trace.certificate).toBeDefined();
       expect(trace.sources).toBeDefined();
@@ -466,16 +425,16 @@ describe('ExplainableRecall', () => {
       expect(trace.graph.edges).toBeDefined();
     });
 
-    it('should include certificate in graph nodes', () => {
-      const trace = explainableRecall.traceProvenance(certificateId);
+    it('should include certificate in graph nodes', async () => {
+      const trace = await explainableRecall.traceProvenance(certificateId);
 
       const certNode = trace.graph.nodes.find(n => n.id === certificateId);
       expect(certNode).toBeDefined();
       expect(certNode!.type).toBe('certificate');
     });
 
-    it('should throw error for non-existent certificate', () => {
-      expect(() => explainableRecall.traceProvenance('non-existent')).toThrow();
+    it('should throw error for non-existent certificate', async () => {
+      await expect(explainableRecall.traceProvenance('non-existent')).rejects.toThrow();
     });
   });
 
@@ -485,10 +444,10 @@ describe('ExplainableRecall', () => {
     beforeEach(async () => {
       // Insert test episodes
       for (let i = 1; i <= 3; i++) {
-        db.prepare(`
+        await backend.query(`
           INSERT INTO episodes (id, session_id, task, output, reward)
-          VALUES (?, ?, ?, ?, ?)
-        `).run(i, 'test-session', `Task ${i}`, `Output ${i}`, 0.8);
+          VALUES ($1, $2, $3, $4, $5)
+        `, [i, 'test-session', `Task ${i}`, `Output ${i}`, 0.8]);
       }
 
       // Create certificate
@@ -508,8 +467,8 @@ describe('ExplainableRecall', () => {
       certificateId = certificate.id;
     });
 
-    it('should return audit information', () => {
-      const audit = explainableRecall.auditCertificate(certificateId);
+    it('should return audit information', async () => {
+      const audit = await explainableRecall.auditCertificate(certificateId);
 
       expect(audit.certificate).toBeDefined();
       expect(audit.justifications).toBeDefined();
@@ -517,8 +476,8 @@ describe('ExplainableRecall', () => {
       expect(audit.quality).toBeDefined();
     });
 
-    it('should include quality metrics', () => {
-      const audit = explainableRecall.auditCertificate(certificateId);
+    it('should include quality metrics', async () => {
+      const audit = await explainableRecall.auditCertificate(certificateId);
 
       expect(audit.quality.completeness).toBeGreaterThanOrEqual(0);
       expect(audit.quality.completeness).toBeLessThanOrEqual(1);
@@ -526,34 +485,34 @@ describe('ExplainableRecall', () => {
       expect(typeof audit.quality.avgNecessity).toBe('number');
     });
 
-    it('should include all justifications', () => {
-      const audit = explainableRecall.auditCertificate(certificateId);
+    it('should include all justifications', async () => {
+      const audit = await explainableRecall.auditCertificate(certificateId);
 
       expect(audit.justifications.length).toBe(3);
     });
 
-    it('should throw error for non-existent certificate', () => {
-      expect(() => explainableRecall.auditCertificate('non-existent')).toThrow();
+    it('should throw error for non-existent certificate', async () => {
+      await expect(explainableRecall.auditCertificate('non-existent')).rejects.toThrow();
     });
   });
 
   describe('Minimal Hitting Set', () => {
-    beforeEach(() => {
+    beforeEach(async () => {
       // Insert test episodes with specific content
-      db.prepare(`
+      await backend.query(`
         INSERT INTO episodes (id, session_id, task, output, reward)
-        VALUES (?, ?, ?, ?, ?)
-      `).run(1, 'session', 'task', 'This contains apple and banana', 0.8);
+        VALUES ($1, $2, $3, $4, $5)
+      `, [1, 'session', 'task', 'This contains apple and banana', 0.8]);
 
-      db.prepare(`
+      await backend.query(`
         INSERT INTO episodes (id, session_id, task, output, reward)
-        VALUES (?, ?, ?, ?, ?)
-      `).run(2, 'session', 'task', 'This contains cherry', 0.8);
+        VALUES ($1, $2, $3, $4, $5)
+      `, [2, 'session', 'task', 'This contains cherry', 0.8]);
 
-      db.prepare(`
+      await backend.query(`
         INSERT INTO episodes (id, session_id, task, output, reward)
-        VALUES (?, ?, ?, ?, ?)
-      `).run(3, 'session', 'task', 'This contains apple', 0.8);
+        VALUES ($1, $2, $3, $4, $5)
+      `, [3, 'session', 'task', 'This contains apple', 0.8]);
     });
 
     it('should compute minimal hitting set', async () => {
@@ -591,27 +550,27 @@ describe('ExplainableRecall', () => {
   });
 
   describe('Different Memory Types', () => {
-    beforeEach(() => {
+    beforeEach(async () => {
       // Insert different memory types
-      db.prepare(`
+      await backend.query(`
         INSERT INTO episodes (id, session_id, task, output, reward)
-        VALUES (?, ?, ?, ?, ?)
-      `).run(1, 'session', 'task', 'Episode output', 0.8);
+        VALUES ($1, $2, $3, $4, $5)
+      `, [1, 'session', 'task', 'Episode output', 0.8]);
 
-      db.prepare(`
+      await backend.query(`
         INSERT INTO skills (id, name, code, description)
-        VALUES (?, ?, ?, ?)
-      `).run(1, 'test_skill', 'function test() {}', 'A test skill');
+        VALUES ($1, $2, $3, $4)
+      `, [1, 'test_skill', 'function test() {}', 'A test skill']);
 
-      db.prepare(`
+      await backend.query(`
         INSERT INTO notes (id, text)
-        VALUES (?, ?)
-      `).run(1, 'A test note');
+        VALUES ($1, $2)
+      `, [1, 'A test note']);
 
-      db.prepare(`
+      await backend.query(`
         INSERT INTO facts (id, subject, predicate, object)
-        VALUES (?, ?, ?, ?)
-      `).run(1, 'Test', 'is', 'fact');
+        VALUES ($1, $2, $3, $4)
+      `, [1, 'Test', 'is', 'fact']);
     });
 
     it('should handle episode type', async () => {
@@ -697,16 +656,17 @@ describe('ExplainableRecall', () => {
   });
 
   describe('Edge Cases', () => {
-    beforeEach(() => {
-      db.prepare(`
+    beforeEach(async () => {
+      await backend.query(`
         INSERT INTO episodes (id, session_id, task, output, reward)
-        VALUES (?, ?, ?, ?, ?)
-      `).run(1, 'session', 'task', 'Output', 0.8);
+        VALUES ($1, $2, $3, $4, $5)
+      `, [1, 'session', 'task', 'Output', 0.8]);
     });
 
     it('should handle empty chunks array by throwing error', async () => {
-      // Empty chunks causes redundancy ratio to be NaN (0/0 = NaN)
-      // which violates NOT NULL constraint
+      // Empty chunks causes redundancy ratio to be NaN (0/0 = NaN);
+      // postgres rejects NaN for REAL columns just as sqlite did, so the
+      // assertion contract is preserved.
       await expect(explainableRecall.createCertificate({
         queryId: 'query-empty',
         queryText: 'test',
@@ -762,13 +722,13 @@ describe('ExplainableRecall', () => {
   });
 
   describe('Performance', () => {
-    beforeEach(() => {
+    beforeEach(async () => {
       // Insert many episodes
       for (let i = 1; i <= 100; i++) {
-        db.prepare(`
+        await backend.query(`
           INSERT INTO episodes (id, session_id, task, output, reward)
-          VALUES (?, ?, ?, ?, ?)
-        `).run(i, 'session', `Task ${i}`, `Output ${i}`, 0.8);
+          VALUES ($1, $2, $3, $4, $5)
+        `, [i, 'session', `Task ${i}`, `Output ${i}`, 0.8]);
       }
     });
 
@@ -790,8 +750,9 @@ describe('ExplainableRecall', () => {
       const duration = Date.now() - startTime;
 
       expect(certificate).toBeDefined();
-      expect(duration).toBeLessThan(5000); // Should complete in under 5 seconds
-    }, 10000);
+      // pglite is slower than better-sqlite3 per-query; raise from 5s → 15s
+      expect(duration).toBeLessThan(15000);
+    }, 30000);
 
     it('should handle concurrent certificate creation', async () => {
       const createCert = (idx: number) =>
@@ -805,7 +766,7 @@ describe('ExplainableRecall', () => {
         });
 
       const results = await Promise.all(
-        Array.from({ length: 10 }, (_, i) => createCert(i))
+        Array.from({ length: 10 }, (_, i) => createCert(i)),
       );
 
       expect(results).toHaveLength(10);

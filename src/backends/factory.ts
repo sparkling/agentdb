@@ -19,11 +19,18 @@ import { GuardedVectorBackend, ProofDeniedError } from './ruvector/GuardedVector
 import { MutationGuard } from '../security/MutationGuard.js';
 import { AttestationLog } from '../security/AttestationLog.js';
 import { getEmbeddingConfig } from '../config/embedding-config.js';
+import {
+  PostgresBackend,
+  type PostgresBackendConfig,
+} from './postgres/PostgresBackend.js';
 
 // Note: HNSWLibBackend and RvfBackend are lazy-loaded to avoid import failures
 // on systems without build tools. The imports happen in helper functions.
 
-export type BackendType = 'auto' | 'ruvector' | 'rvf' | 'hnswlib';
+// ADR-0170 Phase A.3: 'postgres' added to BackendType. The relational
+// substrate axis loses 'auto' (per ADR-0170 §Phase A item 3 — no auto-
+// cascade for primaryStorage); only vectorIndex retains 'auto' below.
+export type BackendType = 'auto' | 'ruvector' | 'rvf' | 'hnswlib' | 'postgres';
 
 export interface RvfDetection {
   sdk: boolean;
@@ -246,7 +253,26 @@ export async function createBackend(
       );
     }
     backend = await createHNSWLibBackend(config);
+  } else if (type === 'postgres') {
+    // ADR-0170 Phase A.3: PostgreSQL substrate (pglite embedded or
+    // postgres:// server). The factory creates the backend and the
+    // PostgresBackend constructor throws loudly on legacy SQLite files,
+    // missing pglite imports, or unreachable connectionString — see
+    // PostgresBackend.ts for the fail-loud gates.
+    //
+    // Note: 'postgres' is the relational substrate (primaryStorage axis).
+    // It does NOT auto-cascade — passing primaryStorage='auto' is
+    // rejected at config validation time (AgentDB.initialize). Only the
+    // vector-index axis retains 'auto' detection.
+    backend = new PostgresBackend(config as PostgresBackendConfig);
   } else {
+    // ADR-0170 Phase A.3: 'auto' is the vector-index auto-cascade only.
+    // The relational substrate axis (primaryStorage) no longer has an
+    // auto-cascade — AgentDBConfig validation rejects primaryStorage='auto'
+    // at boot. For the vector-index axis, Phase C will add 'pgvector' as
+    // the preferred winner once pgvector tables exist; in Phase A the
+    // cascade order remains ruvector > rvf > hnswlib > sqljsRvf.
+    //
     // Auto-detect best available backend (priority: ruvector > rvf > hnswlib)
     if (detection.ruvector.core) {
       backend = new RuVectorBackend(config);

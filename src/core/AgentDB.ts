@@ -45,8 +45,32 @@ export interface AgentDBConfig {
   attentionConfig?: Record<string, any>;
   /** Force use of sql.js WASM even if better-sqlite3 is available */
   forceWasm?: boolean;
-  /** Vector backend type: 'auto' | 'ruvector' | 'hnswlib' */
+  /**
+   * Vector backend type.
+   *
+   * @deprecated ADR-0166 Phase 2: use `vectorIndex` for the search-index axis
+   * and `primaryStorage` for the persistence axis. `vectorBackend` is mirrored
+   * to `vectorIndex` when only the legacy field is set; a deprecation warning
+   * is emitted on initialize().
+   */
   vectorBackend?: 'auto' | 'ruvector' | 'hnswlib';
+  /**
+   * Vector-search index engine (ADR-0166 Phase 2, Option E split).
+   *
+   * `'auto'` resolves at runtime via factory detection. `'sqlite-vec'` is
+   * reserved for ADR-0166 Phase 3 (Option F) and currently throws a loud
+   * `not-yet-implemented` error per `feedback-no-fallbacks` if requested.
+   */
+  vectorIndex?: 'auto' | 'ruvector' | 'hnswlib' | 'sqlite-vec';
+  /**
+   * Primary persistence substrate (ADR-0166 Phase 2, Option E split).
+   *
+   * Only `'sqlite'` is valid under Amendment 2026-05-11f (Option F retired the
+   * substrate-flip path). The type is restricted to `'sqlite'`; passing any
+   * other value via the TS escape hatch (`as any`) triggers a loud-error boot
+   * per `feedback-no-fallbacks`.
+   */
+  primaryStorage?: 'sqlite';
   /** Vector dimension (default: 768 for nomic-embed-text-v1.5) */
   vectorDimension?: number;
   /** Embedding model ID (default: 'nomic-ai/nomic-embed-text-v1.5') */
@@ -169,12 +193,50 @@ export class AgentDB {
     await this.graphTransformer.initialize();
     console.log(`[AgentDB] GraphTransformer: ${this.graphTransformer.getEngineType()}`);
 
+    // ADR-0166 Phase 2 (Option E): resolve the vector-index axis from the
+    // orthogonal `vectorIndex` field, falling back to the deprecated
+    // `vectorBackend` alias for backward compat with ~9 ruflo call sites.
+    const legacyVB = this.config.vectorBackend;
+    const explicitVI = this.config.vectorIndex;
+    if (legacyVB !== undefined && explicitVI === undefined) {
+      // Emit deprecation warning to stderr — non-fatal; the alias still works.
+      console.warn(
+        `[AgentDB] AgentDBConfig.vectorBackend='${legacyVB}' is deprecated (ADR-0166 Phase 2). ` +
+        `Use vectorIndex='${legacyVB}' instead. The alias will be removed in a future major.`
+      );
+    }
+    const resolvedVI: 'auto' | 'ruvector' | 'hnswlib' | 'sqlite-vec' =
+      explicitVI ?? legacyVB ?? 'auto';
+
+    // ADR-0166 Phase 2: `primaryStorage` is `'sqlite'`-only under Option F.
+    // Per `feedback-no-fallbacks`, reject any other value loudly at boot
+    // rather than silently downgrading.
+    const ps = (this.config as any).primaryStorage;
+    if (ps !== undefined && ps !== 'sqlite') {
+      throw new Error(
+        `[AgentDB] AgentDBConfig.primaryStorage='${ps}' is not supported. ` +
+        `ADR-0166 Amendment 2026-05-11f retired the substrate-flip; only 'sqlite' ` +
+        `is valid under Option F. See docs/adr/ADR-0166 §"Phase plan — final".`
+      );
+    }
+
+    // ADR-0166 Phase 2/3 split: 'sqlite-vec' is reserved for Phase 3 (Option F).
+    // Until per-controller CREATE VIRTUAL TABLE statements land in schema.sql,
+    // refuse the value rather than silently falling back to 'auto' (which would
+    // violate `feedback-no-fallbacks` by masking incomplete delivery).
+    if (resolvedVI === 'sqlite-vec') {
+      throw new Error(
+        `[AgentDB] vectorIndex='sqlite-vec' is not yet implemented. ` +
+        `ADR-0166 Phase 3 (Option F) per-controller virtual-table augmentation has ` +
+        `not yet landed. Use 'auto', 'ruvector', or 'hnswlib' until Phase 3 ships.`
+      );
+    }
+
     // Initialize proof-gated vector backend (ADR-060)
-    // ADR-0166 Phase 1: honor the `vectorBackend` config field instead of hard-coding 'auto'.
-    // Setting `vectorBackend: 'ruvector' | 'hnswlib'` now reaches the factory; the field was dead before.
+    // ADR-0166 Phase 1: honor the resolved vectorIndex (was hard-coded 'auto').
     let controllerVB: VectorBackend | null = null;
     try {
-      const { backend, guard, log } = await createGuardedBackend(this.config.vectorBackend ?? 'auto', {
+      const { backend, guard, log } = await createGuardedBackend(resolvedVI as 'auto' | 'ruvector' | 'hnswlib', {
         dimensions: dim,
         metric: 'cosine',
         maxElements: this.config.maxElements ?? getEmbeddingConfig().maxElements, // ADR-0069: config-chain capacity

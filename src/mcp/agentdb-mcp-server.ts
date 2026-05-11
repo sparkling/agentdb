@@ -372,7 +372,11 @@ const reasoningBank = new ReasoningBank(db, embeddingService, vectorBackend);
 // PostgresBackend B-2 constructed for ReflexionMemory above.
 const causalGraph = new CausalMemoryGraph(postgresBackend);
 const learner = new NightlyLearner(db, embeddingService);
-const learningSystem = new LearningSystem(db, embeddingService);
+// ADR-0170 Phase B.6: LearningSystem routes through the same PostgresBackend
+// constructed for ReflexionMemory / CausalMemoryGraph above. GROUP BY queries
+// hardened to postgres strictness; the SQLite path and learning_vec mirror
+// writes are dead-stripped from the controller.
+const learningSystem = new LearningSystem(postgresBackend, embeddingService);
 const batchOps = new BatchOperations(db, embeddingService);
 const caches = new MCPToolCaches();
 
@@ -2373,7 +2377,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const includeCausal = (args?.include_causal as boolean) !== false;
         const rewardFunction = (args?.reward_function as any) || 'standard';
 
-        const reward = learningSystem.calculateReward({
+        // ADR-0170 Phase B.6: calculateReward is async because the optional
+        // causal-impact adjustment reads from causal_edges (CausalMemoryGraph).
+        const reward = await learningSystem.calculateReward({
           episodeId,
           success,
           targetAchieved,

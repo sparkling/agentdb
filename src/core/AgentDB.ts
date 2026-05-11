@@ -369,7 +369,12 @@ export class AgentDB {
       this.db, this.embedder, undefined,
       this.attentionService,
     );
-    this.learningSystem = new LearningSystem(this.db, this.embedder);
+    // ADR-0170 Phase B.6: LearningSystem now runs on PostgresBackend.
+    // GROUP BY queries hardened to postgres strictness — every non-aggregate
+    // SELECT column appears in GROUP BY; date-bucketed aggregates use the
+    // computed expression verbatim, not a SELECT alias. Sibling controllers
+    // retain their SQLite `this.db` handle until their own Phase B commit lands.
+    this.learningSystem = new LearningSystem(this.getPostgresBackend(), this.embedder);
     this.causalRecall = new CausalRecall(
       this.db, this.embedder, controllerVB ?? undefined,
       undefined, // config — use default

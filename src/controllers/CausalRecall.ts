@@ -11,13 +11,29 @@
  * - Causal-aware ranking
  * - Explainable provenance
  * - Policy compliance
+ *
+ * ADR-0170 Phase B.11 port (2026-05-11):
+ *   - PostgreSQL substrate via PostgresBackend (pglite embedded or postgres://server)
+ *   - All DB-touching methods (vectorSearch / loadCausalEdges / getStats /
+ *     recall / search / batchRecall) are async; SQL placeholders are `$N`
+ *     not `?`.
+ *   - JOIN against `causal_edges` (CausalMemoryGraph's table — Wave 1a port)
+ *     reads BIGINT ids back as string|number from pg; the loadCausalEdges
+ *     row-mapping normalizes via `Number(...)`.
+ *   - `episode_embeddings.embedding` stays BYTEA in Phase B; pg returns it
+ *     as a Buffer just like better-sqlite3, so deserializeEmbedding is
+ *     unchanged.
+ *   - The constructor's optional `causalGraph` / `explainableRecall`
+ *     injection now expects postgres-backed singletons; the lazy
+ *     `new CausalMemoryGraph(db)` / `new ExplainableRecall(db)` fallbacks
+ *     forward the PostgresBackend handle directly (both controllers were
+ *     ported earlier in Wave 1a/1b).
  */
 
-// Database type from db-fallback
-type Database = any;
 import { CausalMemoryGraph, CausalEdge } from './CausalMemoryGraph.js';
 import { ExplainableRecall, RecallCertificate } from './ExplainableRecall.js';
 import { EmbeddingService } from './EmbeddingService.js';
+import type { PostgresBackend } from '../backends/postgres/PostgresBackend.js';
 import type { VectorBackend } from '../backends/VectorBackend.js';
 import { cosineSimilarity } from '../utils/vector-math.js';
 
@@ -54,14 +70,14 @@ export interface CausalRecallResult {
 }
 
 export class CausalRecall {
-  private db: Database;
+  private db: PostgresBackend;
   private causalGraph: CausalMemoryGraph;
   private explainableRecall: ExplainableRecall;
   private embedder: EmbeddingService;
   private vectorBackend?: VectorBackend;
 
   constructor(
-    db: Database,
+    db: PostgresBackend,
     embedder: EmbeddingService,
     vectorBackend?: VectorBackend,
     private config: RerankConfig = {
@@ -146,7 +162,13 @@ export class CausalRecall {
   }
 
   /**
-   * Vector similarity search using cosine similarity
+   * Vector similarity search using cosine similarity.
+   *
+   * Postgres-substrate note: when no VectorBackend is plugged in, we read
+   * BYTEA embeddings out of `episode_embeddings` and compute cosine in
+   * application code. Phase C lights up pgvector and pushes this into the
+   * planner. BIGINT ids round-trip through `Number()` because pg can
+   * return them as strings depending on parser config.
    */
   private async vectorSearch(
     queryEmbedding: Float32Array,
@@ -158,61 +180,73 @@ export class CausalRecall {
         threshold: 0.0
       });
 
-      // Fetch episode content from DB
       if (searchResults.length === 0) {
         return [];
       }
 
       const episodeIds = searchResults.map(r => r.id);
-      const placeholders = episodeIds.map(() => '?').join(',');
-      const episodes = this.db.prepare(`
-        SELECT
-          id,
-          task || ' ' || COALESCE(output, '') as content,
-          latency_ms
-        FROM episodes
-        WHERE id IN (${placeholders})
-      `).all(...episodeIds) as any[];
+      const placeholders = episodeIds.map((_, i) => `$${i + 1}`).join(',');
+      const episodesResult = await this.db.query(
+        `SELECT
+           id,
+           task || ' ' || COALESCE(output, '') AS content,
+           latency_ms
+         FROM episodes
+         WHERE id IN (${placeholders})`,
+        episodeIds,
+      );
+      const episodes = episodesResult.rows as Array<{
+        id: number | string;
+        content: string;
+        latency_ms: number | string | null;
+      }>;
 
-      const episodeMap = new Map(episodes.map((e: any) => [e.id, e]));
+      const episodeMap = new Map(episodes.map(e => [String(e.id), e]));
 
       return searchResults.map(result => {
-        const ep = episodeMap.get(result.id);
+        const ep = episodeMap.get(String(result.id));
         return {
-          id: result.id.toString(),
+          id: String(result.id),
           type: 'episode',
           content: ep?.content || '',
           similarity: result.similarity,
-          latencyMs: ep?.latency_ms || 0
+          latencyMs: ep?.latency_ms == null ? 0 : Number(ep.latency_ms),
         };
       });
     }
 
-    // Fallback to SQL-based similarity search
-    const results: any[] = [];
-    const episodes = this.db.prepare(`
-      SELECT
-        e.id,
-        'episode' as type,
-        e.task || ' ' || COALESCE(e.output, '') as content,
-        ee.embedding,
-        e.latency_ms
-      FROM episodes e
-      JOIN episode_embeddings ee ON e.id = ee.episode_id
-      ORDER BY e.ts DESC
-      LIMIT ?
-    `).all(k * 2);
+    // Fallback path: SQL-based similarity search reading BYTEA embeddings.
+    const episodesResult = await this.db.query(
+      `SELECT
+         e.id,
+         'episode' AS type,
+         e.task || ' ' || COALESCE(e.output, '') AS content,
+         ee.embedding,
+         e.latency_ms
+       FROM episodes e
+       JOIN episode_embeddings ee ON e.id = ee.episode_id
+       ORDER BY e.ts DESC
+       LIMIT $1`,
+      [k * 2],
+    );
+    const episodes = episodesResult.rows as Array<{
+      id: number | string;
+      type: string;
+      content: string;
+      embedding: Buffer;
+      latency_ms: number | string | null;
+    }>;
 
+    const results: Array<{ id: string; type: string; content: string; similarity: number; latencyMs: number }> = [];
     for (const ep of episodes) {
-      const episodeRow = ep as any;
-      const embedding = this.deserializeEmbedding(episodeRow.embedding);
+      const embedding = this.deserializeEmbedding(ep.embedding);
       const similarity = cosineSimilarity(queryEmbedding, embedding);
       results.push({
-        id: episodeRow.id.toString(),
-        type: episodeRow.type,
-        content: episodeRow.content,
+        id: String(ep.id),
+        type: ep.type,
+        content: ep.content,
         similarity,
-        latencyMs: episodeRow.latency_ms || 0
+        latencyMs: ep.latency_ms == null ? 0 : Number(ep.latency_ms),
       });
     }
 
@@ -222,7 +256,13 @@ export class CausalRecall {
   }
 
   /**
-   * Load causal edges for candidates
+   * Load causal edges for candidates.
+   *
+   * Postgres-substrate note: `causal_edges` is the table CausalMemoryGraph
+   * (Wave 1a) owns. BIGINT id columns come back as string|number from pg
+   * depending on the parser; normalize via `Number(...)` so the
+   * `Map<string, CausalEdge[]>` keys stay consistent with the candidate
+   * id shape (`String(...)`).
    */
   private async loadCausalEdges(candidateIds: string[]): Promise<Map<string, CausalEdge[]>> {
     const edgeMap = new Map<string, CausalEdge[]>();
@@ -231,30 +271,61 @@ export class CausalRecall {
       return edgeMap;
     }
 
-    const placeholders = candidateIds.map(() => '?').join(',');
-    const edges = this.db.prepare(`
-      SELECT * FROM causal_edges
-      WHERE from_memory_id IN (${placeholders})
-        AND confidence >= ?
-    `).all(...candidateIds.map(id => parseInt(id)), this.config.minConfidence || 0.6) as any[];
+    // $1..$N for the IN-list, then $N+1 for the confidence threshold.
+    const placeholders = candidateIds.map((_, i) => `$${i + 1}`).join(',');
+    const minConfidenceParam = `$${candidateIds.length + 1}`;
+    const params = [
+      ...candidateIds.map(id => parseInt(id, 10)),
+      this.config.minConfidence || 0.6,
+    ];
+
+    const edgesResult = await this.db.query(
+      `SELECT * FROM causal_edges
+        WHERE from_memory_id IN (${placeholders})
+          AND confidence >= ${minConfidenceParam}`,
+      params,
+    );
+    const edges = edgesResult.rows as Array<{
+      id: number | string;
+      from_memory_id: number | string;
+      from_memory_type: string;
+      to_memory_id: number | string;
+      to_memory_type: string;
+      similarity: number;
+      uplift: number | null;
+      confidence: number;
+      sample_size: number | string | null;
+      evidence_ids: string | string[] | null;
+      mechanism: string | null;
+    }>;
 
     for (const edge of edges) {
-      const fromId = edge.from_memory_id.toString();
+      const fromId = String(edge.from_memory_id);
       if (!edgeMap.has(fromId)) {
         edgeMap.set(fromId, []);
       }
+      // pglite returns JSONB columns as parsed values; TEXT-typed JSON
+      // arrives as a string. Tolerate both for evidence_ids.
+      let evidenceIds: string[] | undefined;
+      if (edge.evidence_ids == null) {
+        evidenceIds = undefined;
+      } else if (Array.isArray(edge.evidence_ids)) {
+        evidenceIds = edge.evidence_ids;
+      } else if (typeof edge.evidence_ids === 'string') {
+        try { evidenceIds = JSON.parse(edge.evidence_ids); } catch { evidenceIds = undefined; }
+      }
       edgeMap.get(fromId)!.push({
-        id: edge.id,
-        fromMemoryId: edge.from_memory_id,
-        fromMemoryType: edge.from_memory_type,
-        toMemoryId: edge.to_memory_id,
-        toMemoryType: edge.to_memory_type,
+        id: Number(edge.id),
+        fromMemoryId: Number(edge.from_memory_id),
+        fromMemoryType: edge.from_memory_type as CausalEdge['fromMemoryType'],
+        toMemoryId: Number(edge.to_memory_id),
+        toMemoryType: edge.to_memory_type as CausalEdge['toMemoryType'],
         similarity: edge.similarity,
-        uplift: edge.uplift,
+        uplift: edge.uplift ?? undefined,
         confidence: edge.confidence,
-        sampleSize: edge.sample_size,
-        evidenceIds: edge.evidence_ids ? JSON.parse(edge.evidence_ids) : undefined,
-        mechanism: edge.mechanism
+        sampleSize: edge.sample_size == null ? undefined : Number(edge.sample_size),
+        evidenceIds,
+        mechanism: edge.mechanism ?? undefined,
       });
     }
 
@@ -388,29 +459,44 @@ export class CausalRecall {
   }
 
   /**
-   * Get recall statistics
+   * Get recall statistics.
+   *
+   * Postgres-substrate note: AVG() returns NUMERIC under postgres (was
+   * REAL under SQLite). pg returns NUMERIC as string by default, so the
+   * avg_redundancy / avg_completeness columns are normalized through
+   * `Number(...)` to keep the public return type stable.
    */
-  getStats(): {
+  async getStats(): Promise<{
     totalCausalEdges: number;
     totalCertificates: number;
     avgRedundancyRatio: number;
     avgCompletenessScore: number;
-  } {
-    const causalEdges = this.db.prepare('SELECT COUNT(*) as count FROM causal_edges').get() as any;
-    const certificates = this.db.prepare('SELECT COUNT(*) as count FROM recall_certificates').get() as any;
+  }> {
+    const causalEdgesResult = await this.db.query(
+      'SELECT COUNT(*) AS count FROM causal_edges',
+    );
+    const certificatesResult = await this.db.query(
+      'SELECT COUNT(*) AS count FROM recall_certificates',
+    );
+    const avgStatsResult = await this.db.query(
+      `SELECT
+         AVG(redundancy_ratio)   AS avg_redundancy,
+         AVG(completeness_score) AS avg_completeness
+       FROM recall_certificates`,
+    );
 
-    const avgStats = this.db.prepare(`
-      SELECT
-        AVG(redundancy_ratio) as avg_redundancy,
-        AVG(completeness_score) as avg_completeness
-      FROM recall_certificates
-    `).get() as any;
+    const causalEdges = causalEdgesResult.rows[0] as { count: number | string } | undefined;
+    const certificates = certificatesResult.rows[0] as { count: number | string } | undefined;
+    const avgStats = avgStatsResult.rows[0] as {
+      avg_redundancy: number | string | null;
+      avg_completeness: number | string | null;
+    } | undefined;
 
     return {
-      totalCausalEdges: causalEdges.count,
-      totalCertificates: certificates.count,
-      avgRedundancyRatio: avgStats?.avg_redundancy || 0,
-      avgCompletenessScore: avgStats?.avg_completeness || 0
+      totalCausalEdges: causalEdges ? Number(causalEdges.count) : 0,
+      totalCertificates: certificates ? Number(certificates.count) : 0,
+      avgRedundancyRatio: avgStats?.avg_redundancy == null ? 0 : Number(avgStats.avg_redundancy),
+      avgCompletenessScore: avgStats?.avg_completeness == null ? 0 : Number(avgStats.avg_completeness),
     };
   }
 
@@ -445,7 +531,6 @@ export class CausalRecall {
     const {
       query,
       k = 12,
-      includeEvidence = false,
       alpha = this.config.alpha,
       beta = this.config.beta,
       gamma = this.config.gamma
@@ -470,7 +555,7 @@ export class CausalRecall {
 
       // Step 5: Format results for search interface
       const results = reranked.slice(0, k).map(candidate => ({
-        id: parseInt(candidate.id),
+        id: parseInt(candidate.id, 10),
         type: candidate.type,
         content: candidate.content,
         similarity: candidate.similarity,

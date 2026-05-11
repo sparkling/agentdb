@@ -1,108 +1,54 @@
 /**
  * Unit Tests for CausalRecall Controller
  *
- * Tests utility-based reranking, certificate issuance, and causal-aware retrieval
+ * ADR-0170 Phase B.11: ported from better-sqlite3 (sync) to PostgresBackend
+ * (pglite embedded, async). Each test gets a fresh ephemeral pglite cluster
+ * under `os.tmpdir()`. The CausalMemoryGraph + ExplainableRecall singletons
+ * are reset in beforeEach/afterEach so each test gets fresh dependents tied
+ * to the same backend.
+ *
+ * Tests utility-based reranking, certificate issuance, and causal-aware
+ * retrieval against the postgres substrate.
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import Database from 'better-sqlite3';
-import { CausalRecall, RerankConfig, CausalRecallResult } from '../../../src/controllers/CausalRecall.js';
+import { CausalRecall, RerankConfig } from '../../../src/controllers/CausalRecall.js';
+import { CausalMemoryGraph } from '../../../src/controllers/CausalMemoryGraph.js';
+import { ExplainableRecall } from '../../../src/controllers/ExplainableRecall.js';
 import { EmbeddingService } from '../../../src/controllers/EmbeddingService.js';
+import { PostgresBackend } from '../../../src/backends/postgres/PostgresBackend.js';
 import * as fs from 'fs';
-
-const TEST_DB_PATH = './tests/fixtures/test-causal-recall.db';
+import * as os from 'os';
+import * as path from 'path';
 
 describe('CausalRecall', () => {
-  let db: Database.Database;
+  let backend: PostgresBackend;
+  let dataDir: string;
   let embedder: EmbeddingService;
   let causalRecall: CausalRecall;
 
   beforeEach(async () => {
-    // Clean up previous test artifacts
-    [TEST_DB_PATH, `${TEST_DB_PATH}-wal`, `${TEST_DB_PATH}-shm`].forEach(file => {
-      if (fs.existsSync(file)) fs.unlinkSync(file);
-    });
+    // Reset dependent singletons so each test gets fresh controllers tied
+    // to this test's pglite cluster.
+    CausalMemoryGraph._resetSingleton();
+    ExplainableRecall._resetSingleton();
 
-    // Initialize database
-    db = new Database(TEST_DB_PATH);
-    db.pragma('journal_mode = WAL');
+    dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agentdb-causal-recall-test-'));
+    backend = new PostgresBackend({ metric: 'cosine', dataDir });
+    await backend.initialize();
 
-    // Create required tables
-    db.exec(`
-      CREATE TABLE IF NOT EXISTS episodes (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        session_id TEXT NOT NULL,
-        task TEXT NOT NULL,
-        output TEXT,
-        reward REAL DEFAULT 0,
-        ts INTEGER DEFAULT (strftime('%s', 'now')),
-        latency_ms INTEGER DEFAULT 0
-      );
+    // Load canonical postgres-dialect schemas (Phase A.5) for
+    // episodes / episode_embeddings / causal_edges / recall_certificates /
+    // provenance_sources / justification_paths.
+    const schemaPath = path.join(__dirname, '../../../src/schemas/schema.sql');
+    if (fs.existsSync(schemaPath)) {
+      await backend.exec(fs.readFileSync(schemaPath, 'utf-8'));
+    }
+    const frontierSchemaPath = path.join(__dirname, '../../../src/schemas/frontier-schema.sql');
+    if (fs.existsSync(frontierSchemaPath)) {
+      await backend.exec(fs.readFileSync(frontierSchemaPath, 'utf-8'));
+    }
 
-      CREATE TABLE IF NOT EXISTS episode_embeddings (
-        episode_id INTEGER PRIMARY KEY,
-        embedding BLOB NOT NULL
-      );
-
-      CREATE TABLE IF NOT EXISTS causal_edges (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        from_memory_id INTEGER NOT NULL,
-        from_memory_type TEXT NOT NULL,
-        to_memory_id INTEGER NOT NULL,
-        to_memory_type TEXT NOT NULL,
-        similarity REAL NOT NULL,
-        uplift REAL,
-        confidence REAL NOT NULL,
-        sample_size INTEGER DEFAULT 1,
-        mechanism TEXT,
-        evidence_ids TEXT,
-        metadata TEXT,
-        created_at INTEGER DEFAULT (strftime('%s', 'now'))
-      );
-
-      CREATE TABLE IF NOT EXISTS recall_certificates (
-        id TEXT PRIMARY KEY,
-        query_id TEXT NOT NULL,
-        query_text TEXT NOT NULL,
-        chunk_ids TEXT NOT NULL,
-        chunk_types TEXT NOT NULL,
-        minimal_why TEXT NOT NULL,
-        redundancy_ratio REAL NOT NULL,
-        completeness_score REAL NOT NULL,
-        merkle_root TEXT NOT NULL,
-        source_hashes TEXT NOT NULL,
-        proof_chain TEXT NOT NULL,
-        policy_proof TEXT,
-        policy_version TEXT,
-        access_level TEXT DEFAULT 'internal',
-        latency_ms INTEGER,
-        created_at INTEGER DEFAULT (strftime('%s', 'now'))
-      );
-
-      CREATE TABLE IF NOT EXISTS justification_paths (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        certificate_id TEXT NOT NULL,
-        chunk_id TEXT NOT NULL,
-        chunk_type TEXT NOT NULL,
-        reason TEXT NOT NULL,
-        necessity_score REAL NOT NULL,
-        path_elements TEXT NOT NULL
-      );
-
-      CREATE TABLE IF NOT EXISTS provenance_sources (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        source_type TEXT NOT NULL,
-        source_id INTEGER NOT NULL,
-        content_hash TEXT NOT NULL,
-        parent_hash TEXT,
-        derived_from TEXT,
-        creator TEXT,
-        metadata TEXT,
-        created_at INTEGER DEFAULT (strftime('%s', 'now'))
-      );
-    `);
-
-    // Initialize embedding service
     embedder = new EmbeddingService({
       model: 'mock-model',
       dimension: 384,
@@ -110,16 +56,57 @@ describe('CausalRecall', () => {
     });
     await embedder.initialize();
 
-    // Initialize CausalRecall with default config
-    causalRecall = new CausalRecall(db, embedder);
+    // The ExplainableRecall companion needs its initialize() to ensure
+    // the recall_certificates DDL is in place (matches Wave 1a pattern).
+    const explainable = new ExplainableRecall(backend);
+    await explainable.initialize();
+
+    causalRecall = new CausalRecall(backend, embedder, undefined, undefined, undefined, explainable);
   });
 
-  afterEach(() => {
-    db.close();
-    [TEST_DB_PATH, `${TEST_DB_PATH}-wal`, `${TEST_DB_PATH}-shm`].forEach(file => {
-      if (fs.existsSync(file)) fs.unlinkSync(file);
-    });
+  afterEach(async () => {
+    CausalMemoryGraph._resetSingleton();
+    ExplainableRecall._resetSingleton();
+    try {
+      backend.close();
+    } catch {
+      /* best-effort */
+    }
+    try {
+      fs.rmSync(dataDir, { recursive: true, force: true });
+    } catch {
+      /* best-effort */
+    }
   });
+
+  /**
+   * Helper: insert an episode with an embedding, return its BIGINT id as number.
+   */
+  async function insertEpisode(
+    sessionId: string,
+    task: string,
+    output: string,
+    reward: number,
+    ts: number,
+    latencyMs: number,
+  ): Promise<number> {
+    const res = await backend.query(
+      `INSERT INTO episodes (session_id, task, output, reward, ts, latency_ms)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       RETURNING id`,
+      [sessionId, task, output, reward, ts, latencyMs],
+    );
+    const id = Number((res.rows[0] as { id: number | string }).id);
+
+    const embedding = await embedder.embed(`${task} ${output}`);
+    await backend.query(
+      `INSERT INTO episode_embeddings (episode_id, embedding)
+       VALUES ($1, $2)`,
+      [id, Buffer.from(embedding.buffer, embedding.byteOffset, embedding.byteLength)],
+    );
+
+    return id;
+  }
 
   describe('Constructor', () => {
     it('should initialize with default config', () => {
@@ -134,7 +121,7 @@ describe('CausalRecall', () => {
         minConfidence: 0.7,
       };
 
-      const customRecall = new CausalRecall(db, embedder, undefined, customConfig);
+      const customRecall = new CausalRecall(backend, embedder, undefined, customConfig);
       expect(customRecall).toBeDefined();
     });
 
@@ -143,33 +130,22 @@ describe('CausalRecall', () => {
         search: vi.fn().mockReturnValue([]),
       };
 
-      const recallWithBackend = new CausalRecall(db, embedder, mockBackend as any);
+      const recallWithBackend = new CausalRecall(backend, embedder, mockBackend as any);
       expect(recallWithBackend).toBeDefined();
     });
   });
 
   describe('recall', () => {
     beforeEach(async () => {
-      // Insert test episodes with embeddings
       for (let i = 0; i < 10; i++) {
-        const episodeId = db.prepare(`
-          INSERT INTO episodes (session_id, task, output, reward, ts, latency_ms)
-          VALUES (?, ?, ?, ?, ?, ?)
-        `).run(
+        await insertEpisode(
           'test-session',
           `Task ${i}`,
           `Output for task ${i}`,
           0.5 + i * 0.05,
-          Date.now() / 1000 + i,
-          100 + i * 10
-        ).lastInsertRowid;
-
-        // Generate and store embedding
-        const embedding = await embedder.embed(`Task ${i} Output for task ${i}`);
-        db.prepare(`
-          INSERT INTO episode_embeddings (episode_id, embedding)
-          VALUES (?, ?)
-        `).run(episodeId, Buffer.from(embedding.buffer));
+          Math.floor(Date.now() / 1000) + i,
+          100 + i * 10,
+        );
       }
     });
 
@@ -177,7 +153,7 @@ describe('CausalRecall', () => {
       const result = await causalRecall.recall(
         'query-1',
         'test query for retrieval',
-        5
+        5,
       );
 
       expect(result).toBeDefined();
@@ -193,7 +169,7 @@ describe('CausalRecall', () => {
       const result = await causalRecall.recall(
         'query-2',
         'test query',
-        k
+        k,
       );
 
       expect(result.candidates.length).toBeLessThanOrEqual(k);
@@ -203,7 +179,7 @@ describe('CausalRecall', () => {
       const result = await causalRecall.recall(
         'query-3',
         'test query',
-        5
+        5,
       );
 
       expect(result.metrics.vectorSearchMs).toBeGreaterThanOrEqual(0);
@@ -216,7 +192,7 @@ describe('CausalRecall', () => {
       const result = await causalRecall.recall(
         'query-4',
         'test query',
-        5
+        5,
       );
 
       if (result.candidates.length > 0) {
@@ -230,7 +206,7 @@ describe('CausalRecall', () => {
       const result = await causalRecall.recall(
         'query-5',
         'test query',
-        5
+        5,
       );
 
       if (result.candidates.length > 0) {
@@ -247,7 +223,7 @@ describe('CausalRecall', () => {
         'test query',
         5,
         undefined,
-        'confidential'
+        'confidential',
       );
 
       expect(result.certificate.accessLevel).toBe('confidential');
@@ -259,7 +235,7 @@ describe('CausalRecall', () => {
         'query-7',
         'test query',
         5,
-        requirements
+        requirements,
       );
 
       expect(result.certificate).toBeDefined();
@@ -268,26 +244,15 @@ describe('CausalRecall', () => {
 
   describe('search', () => {
     beforeEach(async () => {
-      // Insert test episodes with embeddings
       for (let i = 0; i < 10; i++) {
-        const episodeId = db.prepare(`
-          INSERT INTO episodes (session_id, task, output, reward, ts, latency_ms)
-          VALUES (?, ?, ?, ?, ?, ?)
-        `).run(
+        await insertEpisode(
           'test-session',
           `Task ${i}`,
           `Output for task ${i}`,
           0.5 + i * 0.05,
-          Date.now() / 1000 + i,
-          100 + i * 10
-        ).lastInsertRowid;
-
-        // Generate and store embedding
-        const embedding = await embedder.embed(`Task ${i} Output for task ${i}`);
-        db.prepare(`
-          INSERT INTO episode_embeddings (episode_id, embedding)
-          VALUES (?, ?)
-        `).run(episodeId, Buffer.from(embedding.buffer));
+          Math.floor(Date.now() / 1000) + i,
+          100 + i * 10,
+        );
       }
     });
 
@@ -339,25 +304,15 @@ describe('CausalRecall', () => {
 
   describe('batchRecall', () => {
     beforeEach(async () => {
-      // Insert test episodes with embeddings
       for (let i = 0; i < 5; i++) {
-        const episodeId = db.prepare(`
-          INSERT INTO episodes (session_id, task, output, reward, ts, latency_ms)
-          VALUES (?, ?, ?, ?, ?, ?)
-        `).run(
+        await insertEpisode(
           'test-session',
           `Task ${i}`,
           `Output ${i}`,
           0.8,
-          Date.now() / 1000 + i,
-          100
-        ).lastInsertRowid;
-
-        const embedding = await embedder.embed(`Task ${i} Output ${i}`);
-        db.prepare(`
-          INSERT INTO episode_embeddings (episode_id, embedding)
-          VALUES (?, ?)
-        `).run(episodeId, Buffer.from(embedding.buffer));
+          Math.floor(Date.now() / 1000) + i,
+          100,
+        );
       }
     });
 
@@ -396,8 +351,8 @@ describe('CausalRecall', () => {
   });
 
   describe('getStats', () => {
-    it('should return statistics', () => {
-      const stats = causalRecall.getStats();
+    it('should return statistics', async () => {
+      const stats = await causalRecall.getStats();
 
       expect(stats).toBeDefined();
       expect(typeof stats.totalCausalEdges).toBe('number');
@@ -406,8 +361,8 @@ describe('CausalRecall', () => {
       expect(typeof stats.avgCompletenessScore).toBe('number');
     });
 
-    it('should return zero stats for empty database', () => {
-      const stats = causalRecall.getStats();
+    it('should return zero stats for empty database', async () => {
+      const stats = await causalRecall.getStats();
 
       expect(stats.totalCausalEdges).toBe(0);
       expect(stats.totalCertificates).toBe(0);
@@ -435,32 +390,27 @@ describe('CausalRecall', () => {
 
   describe('Utility Reranking', () => {
     beforeEach(async () => {
-      // Insert test episodes with embeddings and causal edges
+      // Insert episodes with embeddings, then add causal edges of varying uplift.
+      const episodeIds: number[] = [];
       for (let i = 0; i < 10; i++) {
-        const episodeId = db.prepare(`
-          INSERT INTO episodes (session_id, task, output, reward, ts, latency_ms)
-          VALUES (?, ?, ?, ?, ?, ?)
-        `).run(
+        const id = await insertEpisode(
           'test-session',
           `Task ${i}`,
           `Output ${i}`,
           0.8,
-          Date.now() / 1000 + i,
-          100 + i * 50
-        ).lastInsertRowid;
+          Math.floor(Date.now() / 1000) + i,
+          100 + i * 50,
+        );
+        episodeIds.push(id);
 
-        const embedding = await embedder.embed(`Task ${i} Output ${i}`);
-        db.prepare(`
-          INSERT INTO episode_embeddings (episode_id, embedding)
-          VALUES (?, ?)
-        `).run(episodeId, Buffer.from(embedding.buffer));
-
-        // Add causal edges with varying uplift
         if (i > 0) {
-          db.prepare(`
-            INSERT INTO causal_edges (from_memory_id, from_memory_type, to_memory_id, to_memory_type, similarity, uplift, confidence, sample_size)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-          `).run(episodeId, 'episode', episodeId - 1, 'episode', 0.8, 0.1 * i, 0.7, 10);
+          await backend.query(
+            `INSERT INTO causal_edges (
+               from_memory_id, from_memory_type, to_memory_id, to_memory_type,
+               similarity, uplift, confidence, sample_size
+             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+            [id, 'episode', episodeIds[i - 1], 'episode', 0.8, 0.1 * i, 0.7, 10],
+          );
         }
       }
     });
@@ -469,19 +419,18 @@ describe('CausalRecall', () => {
       const result = await causalRecall.recall(
         'query-rerank',
         'test query',
-        10
+        10,
       );
 
       // Candidates should have uplift values
       if (result.candidates.length > 0) {
-        const hasUplift = result.candidates.some(c => c.uplift !== undefined && c.uplift !== 0);
         // Not all candidates will have uplift, but if edges exist some should
         expect(result.candidates).toBeDefined();
       }
     });
 
     it('should respect alpha weight for similarity', async () => {
-      const highAlphaRecall = new CausalRecall(db, embedder, undefined, {
+      const highAlphaRecall = new CausalRecall(backend, embedder, undefined, {
         alpha: 0.99,
         beta: 0.005,
         gamma: 0.005,
@@ -491,12 +440,11 @@ describe('CausalRecall', () => {
       const result = await highAlphaRecall.recall(
         'query-alpha',
         'test query',
-        5
+        5,
       );
 
-      // With high alpha, similarity should dominate
       if (result.candidates.length > 1) {
-        // Results should be sorted primarily by similarity
+        // Results should be sorted by utility score descending
         for (let i = 1; i < result.candidates.length; i++) {
           expect(result.candidates[i - 1].utilityScore).toBeGreaterThanOrEqual(result.candidates[i].utilityScore);
         }
@@ -506,162 +454,114 @@ describe('CausalRecall', () => {
 
   describe('Edge Cases', () => {
     it('should handle empty database gracefully', async () => {
-      // When database is empty, the certificate creation fails with constraint error
-      // because redundancy ratio can't be calculated with 0 chunks
-      await expect(causalRecall.recall(
+      // Postgres-substrate behavior change (ADR-0170 Phase B.5):
+      // `recall_certificates.redundancy_ratio` is `REAL` (nullable, no
+      // CHECK) under the new schema — was `REAL NOT NULL` in the SQLite
+      // era. With no episodes inserted, redundancy_ratio = 0/0 = NaN
+      // inserts cleanly rather than tripping a NOT NULL constraint. The
+      // recall therefore resolves to an empty candidates list + a
+      // (degenerate) certificate; it no longer rejects. This is the
+      // intentional Wave 1a contract.
+      const result = await causalRecall.recall(
         'query-empty',
         'test query',
-        5
-      )).rejects.toThrow();
+        5,
+      );
+      expect(result.candidates).toHaveLength(0);
+      expect(result.certificate).toBeDefined();
     });
 
     it('should handle very long query', async () => {
-      // Insert at least one episode for the query
-      const episodeId = db.prepare(`
-        INSERT INTO episodes (session_id, task, output, reward, ts, latency_ms)
-        VALUES (?, ?, ?, ?, ?, ?)
-      `).run('test-session', 'Task', 'Output', 0.8, Date.now() / 1000, 100).lastInsertRowid;
-
-      const embedding = await embedder.embed('Task Output');
-      db.prepare(`
-        INSERT INTO episode_embeddings (episode_id, embedding)
-        VALUES (?, ?)
-      `).run(episodeId, Buffer.from(embedding.buffer));
+      await insertEpisode('test-session', 'Task', 'Output', 0.8, Math.floor(Date.now() / 1000), 100);
 
       const longQuery = 'test '.repeat(1000);
       const result = await causalRecall.recall(
         'query-long',
         longQuery,
-        5
+        5,
       );
 
       expect(result).toBeDefined();
     });
 
     it('should handle special characters in query', async () => {
-      // Insert at least one episode for the query
-      const episodeId = db.prepare(`
-        INSERT INTO episodes (session_id, task, output, reward, ts, latency_ms)
-        VALUES (?, ?, ?, ?, ?, ?)
-      `).run('test-session', 'Task', 'Output', 0.8, Date.now() / 1000, 100).lastInsertRowid;
-
-      const embedding = await embedder.embed('Task Output');
-      db.prepare(`
-        INSERT INTO episode_embeddings (episode_id, embedding)
-        VALUES (?, ?)
-      `).run(episodeId, Buffer.from(embedding.buffer));
+      await insertEpisode('test-session', 'Task', 'Output', 0.8, Math.floor(Date.now() / 1000), 100);
 
       const result = await causalRecall.recall(
         'query-special',
         '!@#$%^&*()_+-={}[]|\\:";\'<>?,./test',
-        5
+        5,
       );
 
       expect(result).toBeDefined();
     });
 
     it('should handle unicode in query', async () => {
-      // Insert at least one episode for the query
-      const episodeId = db.prepare(`
-        INSERT INTO episodes (session_id, task, output, reward, ts, latency_ms)
-        VALUES (?, ?, ?, ?, ?, ?)
-      `).run('test-session', 'Task', 'Output', 0.8, Date.now() / 1000, 100).lastInsertRowid;
-
-      const embedding = await embedder.embed('Task Output');
-      db.prepare(`
-        INSERT INTO episode_embeddings (episode_id, embedding)
-        VALUES (?, ?)
-      `).run(episodeId, Buffer.from(embedding.buffer));
+      await insertEpisode('test-session', 'Task', 'Output', 0.8, Math.floor(Date.now() / 1000), 100);
 
       const result = await causalRecall.recall(
         'query-unicode',
         'Hello World',
-        5
+        5,
       );
 
       expect(result).toBeDefined();
     });
 
     it('should handle k=0 gracefully', async () => {
-      // k=0 with empty results triggers constraint error
-      await expect(causalRecall.recall(
+      // Same postgres-substrate behavioral note as 'empty database
+      // gracefully': k=0 produces an empty candidates list and a
+      // degenerate certificate (redundancy_ratio = NaN, which is no
+      // longer NOT NULL). No rejection under the new substrate.
+      const result = await causalRecall.recall(
         'query-zero',
         'test query',
-        0
-      )).rejects.toThrow();
+        0,
+      );
+      expect(result.candidates).toHaveLength(0);
+      expect(result.certificate).toBeDefined();
     });
 
     it('should handle very large k', async () => {
-      // Insert some episodes first
       for (let i = 0; i < 5; i++) {
-        const episodeId = db.prepare(`
-          INSERT INTO episodes (session_id, task, output, reward, ts, latency_ms)
-          VALUES (?, ?, ?, ?, ?, ?)
-        `).run('test-session', `Task ${i}`, `Output ${i}`, 0.8, Date.now() / 1000 + i, 100).lastInsertRowid;
-
-        const embedding = await embedder.embed(`Task ${i} Output ${i}`);
-        db.prepare(`
-          INSERT INTO episode_embeddings (episode_id, embedding)
-          VALUES (?, ?)
-        `).run(episodeId, Buffer.from(embedding.buffer));
+        await insertEpisode('test-session', `Task ${i}`, `Output ${i}`, 0.8, Math.floor(Date.now() / 1000) + i, 100);
       }
 
       const result = await causalRecall.recall(
         'query-large-k',
         'test query',
-        1000
+        1000,
       );
 
-      // Should return at most the available episodes
       expect(result.candidates.length).toBeLessThanOrEqual(5);
     });
   });
 
   describe('Performance', () => {
     it('should handle 100 episodes efficiently', async () => {
-      // Insert 100 episodes
       for (let i = 0; i < 100; i++) {
-        const episodeId = db.prepare(`
-          INSERT INTO episodes (session_id, task, output, reward, ts, latency_ms)
-          VALUES (?, ?, ?, ?, ?, ?)
-        `).run('test-session', `Task ${i}`, `Output ${i}`, 0.8, Date.now() / 1000 + i, 100).lastInsertRowid;
-
-        const embedding = await embedder.embed(`Task ${i} Output ${i}`);
-        db.prepare(`
-          INSERT INTO episode_embeddings (episode_id, embedding)
-          VALUES (?, ?)
-        `).run(episodeId, Buffer.from(embedding.buffer));
+        await insertEpisode('test-session', `Task ${i}`, `Output ${i}`, 0.8, Math.floor(Date.now() / 1000) + i, 100);
       }
 
       const startTime = Date.now();
       const result = await causalRecall.recall(
         'query-perf',
         'test query',
-        10
+        10,
       );
       const duration = Date.now() - startTime;
 
       expect(result).toBeDefined();
-      expect(duration).toBeLessThan(5000); // Should complete in under 5 seconds
+      expect(duration).toBeLessThan(5000);
     }, 10000);
 
     it('should handle concurrent queries', async () => {
-      // Insert some episodes
       for (let i = 0; i < 10; i++) {
-        const episodeId = db.prepare(`
-          INSERT INTO episodes (session_id, task, output, reward, ts, latency_ms)
-          VALUES (?, ?, ?, ?, ?, ?)
-        `).run('test-session', `Task ${i}`, `Output ${i}`, 0.8, Date.now() / 1000 + i, 100).lastInsertRowid;
-
-        const embedding = await embedder.embed(`Task ${i} Output ${i}`);
-        db.prepare(`
-          INSERT INTO episode_embeddings (episode_id, embedding)
-          VALUES (?, ?)
-        `).run(episodeId, Buffer.from(embedding.buffer));
+        await insertEpisode('test-session', `Task ${i}`, `Output ${i}`, 0.8, Math.floor(Date.now() / 1000) + i, 100);
       }
 
       const queries = Array(10).fill(null).map((_, idx) =>
-        causalRecall.recall(`query-concurrent-${idx}`, 'test query', 5)
+        causalRecall.recall(`query-concurrent-${idx}`, 'test query', 5),
       );
 
       const results = await Promise.all(queries);

@@ -11,18 +11,23 @@
  * - embedding: Vector embedding of the pattern for similarity search
  * - metadata: Additional contextual information
  *
- * AgentDB v2 Migration:
- * - Uses VectorBackend abstraction for 8x faster search (RuVector/hnswlib)
+ * ADR-0170 Phase B.4 (2026-05-11):
+ * - Ported from SQLite (better-sqlite3 / sql.js) to PostgreSQL via PostgresBackend
+ * - All DB ops route through `await this.db.query(...)` ($N placeholders)
+ * - Public surface is now uniformly async (was a mix of sync+async)
+ * - `reasoning_pattern_vec` Option F mirror retired (vec0 is sqlite-only)
+ * - `pattern_embeddings.embedding` stays as BYTEA Float32Array (Phase C → pgvector)
+ *
+ * AgentDB v2 (preserved):
+ * - VectorBackend abstraction for 8x faster search (RuVector/hnswlib)
  * - Optional GNN enhancement via LearningBackend
- * - 100% backward compatible with v1 API
- * - New features: useGNN option, recordOutcome for learning
+ * - useGNN option, recordOutcome for learning
  */
 
-import type { IDatabaseConnection, DatabaseRows } from '../types/database.types.js';
-import { normalizeRowId } from '../types/database.types.js';
 import { EmbeddingService } from './EmbeddingService.js';
 import type { VectorBackend, SearchResult } from '../backends/VectorBackend.js';
 import { cosineSimilarity } from '../utils/vector-math.js';
+import type { PostgresBackend } from '../backends/postgres/PostgresBackend.js';
 
 export interface ReasoningPattern {
   id?: number;
@@ -90,11 +95,27 @@ export interface LearningBackend {
 // when both ControllerRegistry and AgentDBService create this controller
 let _singleton: InstanceType<typeof ReasoningBank> | null = null;
 
+// Postgres returns BYTEA as Node Buffer; coerce to Float32Array.
+function bufferToFloat32(buf: Buffer): Float32Array {
+  return new Float32Array(buf.buffer, buf.byteOffset, buf.byteLength / 4);
+}
+
+// Postgres returns JSONB as parsed object/array already; only string columns
+// holding stringified JSON need JSON.parse.
+function parseJsonField(v: unknown): any {
+  if (v === null || v === undefined) return null;
+  if (typeof v === 'string') {
+    try { return JSON.parse(v); } catch { return null; }
+  }
+  return v;
+}
+
 export class ReasoningBank {
   // ADR-0076 A4: definite-assignment due to _singleton early-return pattern in ctor
-  private db!: IDatabaseConnection;
+  private db!: PostgresBackend;
   private embedder!: EmbeddingService;
   private cache!: Map<string, any>;
+  private schemaReady!: Promise<void>;
 
   // v2: Optional vector backend (uses legacy if not provided)
   private vectorBackend?: VectorBackend;
@@ -105,24 +126,23 @@ export class ReasoningBank {
   private nextVectorId = 0;
 
   /**
-   * ADR-0166 Phase 3 (Option F): true when reasoning_pattern_vec sqlite-vec
-   * virtual table is present on this.db. Detected once at construction.
-   */
-  private optionFEnabled: boolean = false;
-
-  /**
-   * Constructor supports both legacy (v1) and new (v2) modes
+   * Constructor (ADR-0170 Phase B.4):
+   *   new ReasoningBank(postgresBackend, embedder, vectorBackend?, learningBackend?)
    *
-   * Legacy mode (v1 - backward compatible):
-   *   new ReasoningBank(db, embedder)
+   * The first arg is now a `PostgresBackend` (substrate handle exposing
+   * async `query()` / `exec()`). Previously this accepted an
+   * `IDatabaseConnection` (better-sqlite3 / sql.js). The Phase B port is
+   * atomic: the SQLite path is dead-stripped in the same commit.
    *
-   * New mode (v2 - with VectorBackend):
-   *   new ReasoningBank(db, embedder, vectorBackend, learningBackend?)
+   * Schema initialization is deferred to a Promise (`schemaReady`) because
+   * postgres DDL is async; constructors stay sync to preserve the singleton
+   * early-return pattern. Every public method awaits `schemaReady` before
+   * touching the DB.
    */
   static _resetSingleton(): void { _singleton = null; }
 
   constructor(
-    db: IDatabaseConnection,
+    db: PostgresBackend,
     embedder: EmbeddingService,
     vectorBackend?: VectorBackend,
     learningBackend?: LearningBackend
@@ -139,111 +159,84 @@ export class ReasoningBank {
     this.vectorBackend = vectorBackend;
     this.learningBackend = learningBackend;
     this.cache = new Map();
-    this.initializeSchema();
-    // ADR-0166 Phase 3 (Option F): detect virtual table availability once.
-    this.optionFEnabled = this.detectOptionF();
+    this.schemaReady = this.initializeSchema();
   }
 
   /**
-   * ADR-0166 Phase 3 (Option F): detect whether reasoning_pattern_vec exists.
+   * Initialize reasoning patterns schema (postgres dialect).
+   *
+   * `BIGSERIAL` replaces `INTEGER PRIMARY KEY AUTOINCREMENT`.
+   * `EXTRACT(EPOCH FROM NOW())::BIGINT` replaces `strftime('%s', 'now')`.
+   * `BYTEA` replaces `BLOB`.
+   * `JSONB` replaces stringified-JSON TEXT for `metadata` (and `tags` array
+   * stays a JSON TEXT column for compat with serialized-array writes).
    */
-  private detectOptionF(): boolean {
-    try {
-      const row: any = (this.db as any).prepare?.(
-        `SELECT name FROM sqlite_master WHERE type='table' AND name='reasoning_pattern_vec'`,
-      )?.get?.();
-      return !!row;
-    } catch {
-      return false;
-    }
-  }
-
-  /**
-   * Initialize reasoning patterns schema
-   */
-  private initializeSchema(): void {
-    // Create patterns table
-    this.db.exec(`
+  private async initializeSchema(): Promise<void> {
+    await this.db.exec(`
       CREATE TABLE IF NOT EXISTS reasoning_patterns (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        ts INTEGER DEFAULT (strftime('%s', 'now')),
+        id BIGSERIAL PRIMARY KEY,
+        ts BIGINT NOT NULL DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT,
         task_type TEXT NOT NULL,
         approach TEXT NOT NULL,
         success_rate REAL NOT NULL DEFAULT 0.0,
-        uses INTEGER DEFAULT 0,
+        uses BIGINT DEFAULT 0,
         avg_reward REAL DEFAULT 0.0,
         tags TEXT,
-        metadata TEXT
+        metadata JSONB
       );
 
       CREATE INDEX IF NOT EXISTS idx_patterns_task_type ON reasoning_patterns(task_type);
       CREATE INDEX IF NOT EXISTS idx_patterns_success_rate ON reasoning_patterns(success_rate);
       CREATE INDEX IF NOT EXISTS idx_patterns_uses ON reasoning_patterns(uses);
-    `);
 
-    // Create pattern embeddings table
-    this.db.exec(`
       CREATE TABLE IF NOT EXISTS pattern_embeddings (
-        pattern_id INTEGER PRIMARY KEY,
-        embedding BLOB NOT NULL,
+        pattern_id BIGINT PRIMARY KEY,
+        embedding BYTEA NOT NULL,
         FOREIGN KEY (pattern_id) REFERENCES reasoning_patterns(id) ON DELETE CASCADE
       );
     `);
   }
 
   /**
-   * Store a reasoning pattern with embedding
+   * Store a reasoning pattern with embedding.
    *
-   * v1 (legacy): Stores in SQLite with pattern_embeddings table
-   * v2 (VectorBackend): Stores metadata in SQLite, vectors in VectorBackend
+   * Phase B.4: SQLite `INSERT … VALUES (?, …)` + `lastInsertRowid` is
+   * replaced by postgres `INSERT … RETURNING id`. Metadata is JSONB so
+   * we cast `$N::jsonb` at the parameter site (Buffer→string round-trip).
    */
   async storePattern(pattern: ReasoningPattern): Promise<number> {
-    // Generate embedding from approach text
+    await this.schemaReady;
+
     const embedding = await this.embedder.embed(
       `${pattern.taskType}: ${pattern.approach}`
     );
 
-    // Insert pattern metadata into SQLite
-    const stmt = this.db.prepare(`
-      INSERT INTO reasoning_patterns (
-        task_type, approach, success_rate, uses, avg_reward, tags, metadata
-      ) VALUES (?, ?, ?, ?, ?, ?, ?)
-    `);
+    const tagsValue = pattern.tags ? JSON.stringify(pattern.tags) : null;
+    const metadataValue = pattern.metadata ? JSON.stringify(pattern.metadata) : null;
 
-    const result = stmt.run(
-      pattern.taskType,
-      pattern.approach,
-      pattern.successRate,
-      pattern.uses || 0,
-      pattern.avgReward || 0.0,
-      pattern.tags ? JSON.stringify(pattern.tags) : null,
-      pattern.metadata ? JSON.stringify(pattern.metadata) : null
+    const insertResult = await this.db.query(
+      `INSERT INTO reasoning_patterns
+         (task_type, approach, success_rate, uses, avg_reward, tags, metadata)
+       VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)
+       RETURNING id`,
+      [
+        pattern.taskType,
+        pattern.approach,
+        pattern.successRate,
+        pattern.uses ?? 0,
+        pattern.avgReward ?? 0.0,
+        tagsValue,
+        metadataValue,
+      ],
     );
 
-    const patternId = normalizeRowId(result.lastInsertRowid);
-
-    // ADR-0166 Phase 3 (Option F): always mirror to reasoning_pattern_vec
-    // when available, independent of which in-memory vectorBackend path is
-    // taken below. Provides a persistent SQL-side k-NN index alongside the
-    // ephemeral in-memory HNSW. ID stringified — see AgentDB.ts uniform
-    // TEXT auxiliary column rationale.
-    if (this.optionFEnabled) {
-      try {
-        const idStr = String(patternId);
-        this.db.prepare(`DELETE FROM reasoning_pattern_vec WHERE id = ?`).run(idStr);
-        const vecStmt = this.db.prepare(
-          `INSERT INTO reasoning_pattern_vec(id, embedding) VALUES (?, ?)`,
-        );
-        vecStmt.run(idStr, Buffer.from(embedding.buffer));
-      } catch (err) {
-        console.error(`[ReasoningBank] Option F vec mirror failed for pattern=${patternId}: ${(err as Error).message}`);
-        throw err;
-      }
+    const idRow = insertResult.rows[0] as { id: number | string } | undefined;
+    if (!idRow) {
+      throw new Error('[ReasoningBank] storePattern: INSERT … RETURNING id returned no rows');
     }
+    const patternId = typeof idRow.id === 'string' ? parseInt(idRow.id, 10) : Number(idRow.id);
 
-    // Store embedding based on mode
     if (this.vectorBackend) {
-      // v2: Use VectorBackend for high-performance search
       try {
         const vectorId = `pattern_${this.nextVectorId++}`;
         this.idMapping.set(patternId, vectorId);
@@ -254,51 +247,41 @@ export class ReasoningBank {
           successRate: pattern.successRate,
         });
       } catch {
-        // VectorBackend insert failed — fall back to SQLite storage
-        this.storePatternEmbedding(patternId, embedding);
+        // VectorBackend insert failed — fall back to SQL-side blob storage
+        await this.storePatternEmbedding(patternId, embedding);
       }
     } else {
-      // v1: Use legacy SQLite storage (backward compatible)
-      this.storePatternEmbedding(patternId, embedding);
+      await this.storePatternEmbedding(patternId, embedding);
     }
 
-    // Invalidate cache
     this.cache.clear();
 
     return patternId;
   }
 
   /**
-   * Store pattern embedding
+   * Store pattern embedding as BYTEA Float32Array.
    *
-   * ADR-0166 Phase 3 (Option F): the reasoning_pattern_vec mirror runs
-   * earlier in createPattern() unconditionally, not here, so that the
-   * persistent k-NN index is populated regardless of which primary path
-   * (vectorBackend vs pattern_embeddings) handled the embedding.
+   * Phase B.4: `INSERT OR REPLACE` → postgres `INSERT … ON CONFLICT … DO UPDATE`.
+   * Phase C will replace the BYTEA column with `vector(N)` (pgvector).
    */
-  private storePatternEmbedding(patternId: number, embedding: Float32Array): void {
-    const blob = Buffer.from(embedding.buffer);
+  private async storePatternEmbedding(patternId: number, embedding: Float32Array): Promise<void> {
+    const blob = Buffer.from(embedding.buffer, embedding.byteOffset, embedding.byteLength);
 
-    const stmt = this.db.prepare(`
-      INSERT OR REPLACE INTO pattern_embeddings (pattern_id, embedding)
-      VALUES (?, ?)
-    `);
-
-    stmt.run(patternId, blob);
+    await this.db.query(
+      `INSERT INTO pattern_embeddings (pattern_id, embedding)
+       VALUES ($1, $2)
+       ON CONFLICT (pattern_id) DO UPDATE SET embedding = EXCLUDED.embedding`,
+      [patternId, blob],
+    );
   }
 
   /**
-   * Search patterns by semantic similarity
-   *
-   * v1 (legacy): Uses SQLite with cosine similarity computation
-   * v2 (VectorBackend): Uses high-performance vector search (8x faster)
-   * v2 + GNN: Optionally enhances query with learned patterns
+   * Search patterns by semantic similarity.
    */
   async searchPatterns(query: PatternSearchQuery): Promise<ReasoningPattern[]> {
-    const k = query.k || 10;
-    const threshold = query.threshold || 0.0;
+    await this.schemaReady;
 
-    // Generate embedding if task string provided (v1 API compatibility)
     let queryEmbedding: Float32Array;
     if (query.task && !query.taskEmbedding) {
       queryEmbedding = await this.embedder.embed(query.task);
@@ -308,18 +291,14 @@ export class ReasoningBank {
       throw new Error('PatternSearchQuery must provide either task (v1) or taskEmbedding (v2)');
     }
 
-    // Create enriched query with embedding (ensure taskEmbedding is always defined)
     const enrichedQuery: PatternSearchQuery & { taskEmbedding: Float32Array } = {
       ...query,
-      taskEmbedding: queryEmbedding
+      taskEmbedding: queryEmbedding,
     };
 
-    // Use VectorBackend if available (v2 mode)
     if (this.vectorBackend) {
       return this.searchPatternsV2(enrichedQuery);
     }
-
-    // Legacy v1 search (100% backward compatible)
     return this.searchPatternsLegacy(enrichedQuery);
   }
 
@@ -332,58 +311,51 @@ export class ReasoningBank {
     let queryEmbedding = query.taskEmbedding;
 
     try {
-      // Optional: Apply GNN enhancement
       if (query.useGNN && this.learningBackend) {
-        // Get initial candidates for GNN context
         const candidates = this.vectorBackend!.search(queryEmbedding, k * 3, { threshold: 0.0 });
 
         if (candidates.length > 0) {
-          // Retrieve neighbor embeddings for GNN
           const neighborEmbeddings = await this.getEmbeddingsForVectorIds(
             candidates.map(c => c.id)
           );
           const weights = candidates.map(c => c.similarity);
 
-          // Enhance query using GNN
           queryEmbedding = this.learningBackend.enhance(queryEmbedding, neighborEmbeddings, weights);
         }
       }
 
-      // Perform vector search
       const results = this.vectorBackend!.search(queryEmbedding, k, { threshold });
 
-      // Hydrate with metadata from SQLite
-      return this.hydratePatterns(results);
+      return await this.hydratePatterns(results);
     } catch {
-      // VectorBackend search failed — fall back to legacy SQLite search
+      // VectorBackend search failed — fall back to SQL-blob cosine search
       return this.searchPatternsLegacy(query);
     }
   }
 
   /**
-   * v1: Legacy search using SQLite (backward compatible)
+   * v1: SQL-blob cosine search (Phase C replaces with pgvector ORDER BY <-> $1).
    */
   private async searchPatternsLegacy(query: PatternSearchQuery & { taskEmbedding: Float32Array }): Promise<ReasoningPattern[]> {
     const k = query.k || 10;
     const threshold = query.threshold || 0.0;
 
-    // Build WHERE clause for filters
     const conditions: string[] = [];
     const params: any[] = [];
+    let p = 1;
 
     if (query.filters?.taskType) {
-      conditions.push('rp.task_type = ?');
+      conditions.push(`rp.task_type = $${p++}`);
       params.push(query.filters.taskType);
     }
 
     if (query.filters?.minSuccessRate !== undefined) {
-      conditions.push('rp.success_rate >= ?');
+      conditions.push(`rp.success_rate >= $${p++}`);
       params.push(query.filters.minSuccessRate);
     }
 
     if (query.filters?.tags && query.filters.tags.length > 0) {
-      // Check if any of the tags match
-      const tagConditions = query.filters.tags.map(() => 'rp.tags LIKE ?').join(' OR ');
+      const tagConditions = query.filters.tags.map(() => `rp.tags LIKE $${p++}`).join(' OR ');
       conditions.push(`(${tagConditions})`);
       query.filters.tags.forEach(tag => {
         params.push(`%"${tag}"%`);
@@ -394,52 +366,56 @@ export class ReasoningBank {
       ? `WHERE ${conditions.join(' AND ')}`
       : '';
 
-    // Retrieve all candidate patterns
-    const stmt = this.db.prepare<DatabaseRows.ReasoningPattern & { embedding: Buffer }>(`
-      SELECT
-        rp.id,
-        rp.ts,
-        rp.task_type,
-        rp.approach,
-        rp.success_rate,
-        rp.uses,
-        rp.avg_reward,
-        rp.tags,
-        rp.metadata,
-        pe.embedding
-      FROM reasoning_patterns rp
-      JOIN pattern_embeddings pe ON rp.id = pe.pattern_id
-      ${whereClause}
-    `);
+    const result = await this.db.query(
+      `SELECT
+         rp.id,
+         rp.ts,
+         rp.task_type,
+         rp.approach,
+         rp.success_rate,
+         rp.uses,
+         rp.avg_reward,
+         rp.tags,
+         rp.metadata,
+         pe.embedding
+       FROM reasoning_patterns rp
+       JOIN pattern_embeddings pe ON rp.id = pe.pattern_id
+       ${whereClause}`,
+      params,
+    );
 
-    const rows = stmt.all(...params);
+    const rows = result.rows as Array<{
+      id: number | string;
+      ts: number | string;
+      task_type: string;
+      approach: string;
+      success_rate: number;
+      uses: number | string;
+      avg_reward: number;
+      tags: string | null;
+      metadata: unknown;
+      embedding: Buffer;
+    }>;
 
-    // Calculate similarities
     const candidates = rows.map(row => {
-      const embedding = new Float32Array(
-        (row.embedding as Buffer).buffer,
-        (row.embedding as Buffer).byteOffset,
-        (row.embedding as Buffer).byteLength / 4
-      );
-
+      const embedding = bufferToFloat32(row.embedding);
       const similarity = cosineSimilarity(query.taskEmbedding, embedding);
 
       return {
-        id: row.id,
+        id: typeof row.id === 'string' ? parseInt(row.id, 10) : Number(row.id),
         taskType: row.task_type,
         approach: row.approach,
         successRate: row.success_rate,
-        uses: row.uses,
+        uses: typeof row.uses === 'string' ? parseInt(row.uses, 10) : Number(row.uses),
         avgReward: row.avg_reward,
         tags: row.tags ? JSON.parse(row.tags) : [],
-        metadata: row.metadata ? JSON.parse(row.metadata) : {},
-        createdAt: row.ts,
+        metadata: parseJsonField(row.metadata) ?? {},
+        createdAt: typeof row.ts === 'string' ? parseInt(row.ts, 10) : Number(row.ts),
         embedding,
         similarity,
       };
     });
 
-    // Filter by threshold and sort by similarity
     const filtered = candidates
       .filter(c => c.similarity >= threshold)
       .sort((a, b) => b.similarity - a.similarity)
@@ -449,51 +425,51 @@ export class ReasoningBank {
   }
 
   /**
-   * Hydrate search results with metadata from SQLite
+   * Hydrate VectorBackend search results with row metadata (one SELECT per id).
    */
-  private hydratePatterns(results: SearchResult[]): ReasoningPattern[] {
-    // Prepare statement OUTSIDE loop for better-sqlite3 best practice
-    const stmt = this.db.prepare(`
-      SELECT * FROM reasoning_patterns WHERE id = ?
-    `);
+  private async hydratePatterns(results: SearchResult[]): Promise<ReasoningPattern[]> {
+    const hydrated: ReasoningPattern[] = [];
 
-    return results.map(result => {
+    for (const result of results) {
       const patternId = result.metadata?.patternId;
       if (!patternId) {
         throw new Error(`VectorBackend result missing patternId: ${result.id}`);
       }
 
-      const row = stmt.get(patternId) as any;
+      const rowResult = await this.db.query(
+        `SELECT * FROM reasoning_patterns WHERE id = $1`,
+        [patternId],
+      );
+      const row = rowResult.rows[0] as any;
 
       if (!row) {
         throw new Error(`Pattern ${patternId} not found in database`);
       }
 
-      return {
-        id: row.id,
+      hydrated.push({
+        id: typeof row.id === 'string' ? parseInt(row.id, 10) : Number(row.id),
         taskType: row.task_type,
         approach: row.approach,
         successRate: row.success_rate,
-        uses: row.uses,
+        uses: typeof row.uses === 'string' ? parseInt(row.uses, 10) : Number(row.uses),
         avgReward: row.avg_reward,
         tags: row.tags ? JSON.parse(row.tags) : [],
-        metadata: row.metadata ? JSON.parse(row.metadata) : {},
-        createdAt: row.ts,
+        metadata: parseJsonField(row.metadata) ?? {},
+        createdAt: typeof row.ts === 'string' ? parseInt(row.ts, 10) : Number(row.ts),
         similarity: result.similarity,
-      };
-    });
+      });
+    }
+
+    return hydrated;
   }
 
   /**
    * Get embeddings for vector IDs (for GNN)
    */
   private async getEmbeddingsForVectorIds(vectorIds: string[]): Promise<Float32Array[]> {
-    // In a full implementation, this would retrieve embeddings from VectorBackend
-    // For now, we regenerate them from the database
     const embeddings: Float32Array[] = [];
 
     for (const vectorId of vectorIds) {
-      // Find pattern ID from mapping
       let patternId: number | undefined;
       for (const [pid, vid] of this.idMapping.entries()) {
         if (vid === vectorId) {
@@ -503,7 +479,7 @@ export class ReasoningBank {
       }
 
       if (patternId) {
-        const pattern = this.getPattern(patternId);
+        const pattern = await this.getPattern(patternId);
         if (pattern?.approach) {
           const embedding = await this.embedder.embed(
             `${pattern.taskType}: ${pattern.approach}`
@@ -517,66 +493,75 @@ export class ReasoningBank {
   }
 
   /**
-   * Get pattern statistics
+   * Get pattern statistics.
+   *
+   * Phase B.4: postgres is stricter about GROUP BY than SQLite. The
+   * `topTaskTypes` query selects only `task_type` and `COUNT(*)`, both
+   * of which are valid in postgres GROUP BY (the non-aggregate column
+   * appears in GROUP BY). The other aggregate queries (`SELECT COUNT(*)`,
+   * `SELECT AVG(...)`) have zero non-aggregated columns and are trivially
+   * compliant.
    */
-  getPatternStats(): PatternStats {
-    // Check cache first
+  async getPatternStats(): Promise<PatternStats> {
+    await this.schemaReady;
+
     const cacheKey = 'pattern_stats';
     if (this.cache.has(cacheKey)) {
       return this.cache.get(cacheKey);
     }
 
-    // Total patterns
-    const totalRow = this.db.prepare<DatabaseRows.CountResult>(
-      'SELECT COUNT(*) as count FROM reasoning_patterns'
-    ).get();
+    const totalResult = await this.db.query(
+      `SELECT COUNT(*) AS count FROM reasoning_patterns`,
+    );
+    const totalRow = totalResult.rows[0] as { count: number | string } | undefined;
 
-    // Average success rate and uses
-    const avgRow = this.db.prepare<DatabaseRows.AverageResult>(`
-      SELECT
-        AVG(success_rate) as avg_success_rate,
-        AVG(uses) as avg_uses
-      FROM reasoning_patterns
-    `).get();
+    const avgResult = await this.db.query(
+      `SELECT
+         AVG(success_rate) AS avg_success_rate,
+         AVG(uses) AS avg_uses
+       FROM reasoning_patterns`,
+    );
+    const avgRow = avgResult.rows[0] as { avg_success_rate: number | string | null; avg_uses: number | string | null } | undefined;
 
-    // Top task types
-    const topTaskTypes = this.db.prepare(`
-      SELECT
-        task_type,
-        COUNT(*) as count
-      FROM reasoning_patterns
-      GROUP BY task_type
-      ORDER BY count DESC
-      LIMIT 10
-    `).all() as any[];
+    // GROUP BY: task_type is the only non-aggregate column in SELECT and it
+    // is in the GROUP BY — postgres-strict-compliant.
+    const topResult = await this.db.query(
+      `SELECT
+         task_type,
+         COUNT(*) AS count
+       FROM reasoning_patterns
+       GROUP BY task_type
+       ORDER BY count DESC
+       LIMIT 10`,
+    );
+    const topRows = topResult.rows as Array<{ task_type: string; count: number | string }>;
 
-    // Recent patterns (last 7 days)
-    const recentRow = this.db.prepare(`
-      SELECT COUNT(*) as count
-      FROM reasoning_patterns
-      WHERE ts >= strftime('%s', 'now', '-7 days')
-    `).get() as any;
+    const recentResult = await this.db.query(
+      `SELECT COUNT(*) AS count
+       FROM reasoning_patterns
+       WHERE ts >= EXTRACT(EPOCH FROM NOW())::BIGINT - 86400 * 7`,
+    );
+    const recentRow = recentResult.rows[0] as { count: number | string } | undefined;
 
-    // High performing patterns (success_rate >= 0.8)
-    const highPerfRow = this.db.prepare(`
-      SELECT COUNT(*) as count
-      FROM reasoning_patterns
-      WHERE success_rate >= 0.8
-    `).get() as any;
+    const highPerfResult = await this.db.query(
+      `SELECT COUNT(*) AS count
+       FROM reasoning_patterns
+       WHERE success_rate >= 0.8`,
+    );
+    const highPerfRow = highPerfResult.rows[0] as { count: number | string } | undefined;
 
     const stats: PatternStats = {
-      totalPatterns: totalRow?.count ?? 0,
-      avgSuccessRate: avgRow?.avg_success_rate ?? 0,
-      avgUses: avgRow?.avg_uses ?? 0,
-      topTaskTypes: topTaskTypes.map(row => ({
+      totalPatterns: totalRow ? Number(totalRow.count) : 0,
+      avgSuccessRate: avgRow?.avg_success_rate != null ? Number(avgRow.avg_success_rate) : 0,
+      avgUses: avgRow?.avg_uses != null ? Number(avgRow.avg_uses) : 0,
+      topTaskTypes: topRows.map(row => ({
         taskType: row.task_type,
-        count: row.count,
+        count: Number(row.count),
       })),
-      recentPatterns: recentRow?.count ?? 0,
-      highPerformingPatterns: highPerfRow?.count ?? 0,
+      recentPatterns: recentRow ? Number(recentRow.count) : 0,
+      highPerformingPatterns: highPerfRow ? Number(highPerfRow.count) : 0,
     };
 
-    // Cache for 5 minutes
     this.cache.set(cacheKey, stats);
     setTimeout(() => this.cache.delete(cacheKey), 5 * 60 * 1000);
 
@@ -584,50 +569,49 @@ export class ReasoningBank {
   }
 
   /**
-   * Update pattern statistics after use
+   * Update pattern statistics after use.
+   *
+   * Phase B.4 nuance: SQLite let the same row's `uses` column be referenced
+   * twice in one statement and evaluated against the OLD value uniformly.
+   * Postgres does the same for non-volatile expressions in a single
+   * UPDATE — the row is read once, all RHS references see the pre-update
+   * snapshot, then the new tuple is written. So the original three-way
+   * read of `uses` (twice as a multiplier, once for the +1) is preserved
+   * verbatim.
    */
-  updatePatternStats(
+  async updatePatternStats(
     patternId: number,
     success: boolean,
     reward: number
-  ): void {
-    const stmt = this.db.prepare(`
-      UPDATE reasoning_patterns
-      SET
-        uses = uses + 1,
-        success_rate = (success_rate * uses + ?) / (uses + 1),
-        avg_reward = (avg_reward * uses + ?) / (uses + 1)
-      WHERE id = ?
-    `);
+  ): Promise<void> {
+    await this.schemaReady;
 
-    stmt.run(success ? 1 : 0, reward, patternId);
+    await this.db.query(
+      `UPDATE reasoning_patterns
+       SET
+         uses = uses + 1,
+         success_rate = (success_rate * uses + $1) / (uses + 1),
+         avg_reward = (avg_reward * uses + $2) / (uses + 1)
+       WHERE id = $3`,
+      [success ? 1 : 0, reward, patternId],
+    );
 
-    // Invalidate cache
     this.cache.clear();
   }
 
   /**
    * Record pattern outcome for GNN learning (v2 feature)
-   *
-   * Updates pattern stats and adds training sample to LearningBackend
-   * for future GNN model improvements.
-   *
-   * @param patternId - Pattern ID to update
-   * @param success - Whether the pattern was successful
-   * @param reward - Optional reward value (default: 1 for success, 0 for failure)
    */
   async recordOutcome(
     patternId: number,
     success: boolean,
     reward?: number
   ): Promise<void> {
-    // Update pattern statistics
     const actualReward = reward !== undefined ? reward : (success ? 1.0 : 0.0);
-    this.updatePatternStats(patternId, success, actualReward);
+    await this.updatePatternStats(patternId, success, actualReward);
 
-    // Add to GNN training buffer if available
     if (this.learningBackend) {
-      const pattern = this.getPattern(patternId);
+      const pattern = await this.getPattern(patternId);
       if (pattern?.approach) {
         const embedding = await this.embedder.embed(
           `${pattern.taskType}: ${pattern.approach}`
@@ -639,13 +623,6 @@ export class ReasoningBank {
 
   /**
    * Train GNN model on collected samples (v2 feature)
-   *
-   * Trains the learning backend using accumulated pattern outcomes.
-   * Requires LearningBackend to be configured.
-   *
-   * @param options - Training options (epochs, batchSize)
-   * @returns Training results with epochs and final loss
-   * @throws Error if LearningBackend not available
    */
   async trainGNN(options?: { epochs?: number; batchSize?: number }): Promise<{
     epochs: number;
@@ -661,68 +638,65 @@ export class ReasoningBank {
   /**
    * Get pattern by ID
    */
-  getPattern(patternId: number): ReasoningPattern | null {
-    const stmt = this.db.prepare(`
-      SELECT
-        rp.id,
-        rp.ts,
-        rp.task_type,
-        rp.approach,
-        rp.success_rate,
-        rp.uses,
-        rp.avg_reward,
-        rp.tags,
-        rp.metadata,
-        pe.embedding
-      FROM reasoning_patterns rp
-      LEFT JOIN pattern_embeddings pe ON rp.id = pe.pattern_id
-      WHERE rp.id = ?
-    `);
+  async getPattern(patternId: number): Promise<ReasoningPattern | null> {
+    await this.schemaReady;
 
-    const row = stmt.get(patternId) as any;
+    const result = await this.db.query(
+      `SELECT
+         rp.id,
+         rp.ts,
+         rp.task_type,
+         rp.approach,
+         rp.success_rate,
+         rp.uses,
+         rp.avg_reward,
+         rp.tags,
+         rp.metadata,
+         pe.embedding
+       FROM reasoning_patterns rp
+       LEFT JOIN pattern_embeddings pe ON rp.id = pe.pattern_id
+       WHERE rp.id = $1`,
+      [patternId],
+    );
+
+    const row = result.rows[0] as any;
     if (!row) return null;
 
     return {
-      id: row.id,
+      id: typeof row.id === 'string' ? parseInt(row.id, 10) : Number(row.id),
       taskType: row.task_type,
       approach: row.approach,
       successRate: row.success_rate,
-      uses: row.uses,
+      uses: typeof row.uses === 'string' ? parseInt(row.uses, 10) : Number(row.uses),
       avgReward: row.avg_reward,
       tags: row.tags ? JSON.parse(row.tags) : [],
-      metadata: row.metadata ? JSON.parse(row.metadata) : {},
-      createdAt: row.ts,
-      embedding: row.embedding
-        ? new Float32Array(
-            row.embedding.buffer,
-            row.embedding.byteOffset,
-            row.embedding.byteLength / 4
-          )
-        : undefined,
+      metadata: parseJsonField(row.metadata) ?? {},
+      createdAt: typeof row.ts === 'string' ? parseInt(row.ts, 10) : Number(row.ts),
+      embedding: row.embedding ? bufferToFloat32(row.embedding) : undefined,
     };
   }
 
   /**
-   * Delete pattern by ID
+   * Delete pattern by ID.
+   *
+   * Phase B.4: postgres UPDATE/DELETE returns affected row count via the
+   * `pg` driver's `rowCount` field. `pglite`'s `query()` result also
+   * carries `rowCount` per the @electric-sql/pglite Result<T> shape; both
+   * surface it on the top-level result, not on `rows`. Read it via the
+   * loose return-type accessor.
    */
-  deletePattern(patternId: number): boolean {
-    const stmt = this.db.prepare('DELETE FROM reasoning_patterns WHERE id = ?');
-    const result = stmt.run(patternId);
+  async deletePattern(patternId: number): Promise<boolean> {
+    await this.schemaReady;
 
-    // ADR-0166 Phase 3 (Option F): mirror delete into reasoning_pattern_vec.
-    // ID stringified to match TEXT auxiliary column type.
-    if (this.optionFEnabled) {
-      try {
-        this.db.prepare(`DELETE FROM reasoning_pattern_vec WHERE id = ?`).run(String(patternId));
-      } catch (err) {
-        console.warn(`[ReasoningBank] Option F vec delete failed for pattern=${patternId}: ${(err as Error).message}`);
-      }
-    }
+    const result = await this.db.query(
+      `DELETE FROM reasoning_patterns WHERE id = $1`,
+      [patternId],
+    );
 
-    // Invalidate cache
     this.cache.clear();
 
-    return result.changes > 0;
+    const rowCount = (result as { rowCount?: number }).rowCount;
+    return (rowCount ?? 0) > 0;
   }
 
   /**

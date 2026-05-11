@@ -15,11 +15,22 @@
  * Note: hnswlib-node is lazy-loaded to avoid import failures on systems
  * without C++ build tools. Use forceWasm: true in AgentDB config to skip
  * hnswlib entirely and use pure WASM backends.
+ *
+ * ADR-0170 Phase B.14 (2026-05-11):
+ * - Ported from SQLite (better-sqlite3 / sql.js) to PostgreSQL via PostgresBackend
+ * - Constructor accepts PostgresBackend (was a sync prepare()/all()/get() handle)
+ * - buildIndex() and applyFilters() route through `await this.db.query(...)`
+ *   with $N placeholders; both methods stay async (already were).
+ * - addVector() / removeVector() / search() touch no SQL — unchanged surface
+ *   beyond the constructor type. The 1 read in applyFilters() is an existence
+ *   guard against the `pattern_embeddings` table owned by ReasoningBank
+ *   (ported Wave 1a, B.4 — postgres BIGINT pattern_id + BYTEA embedding).
  */
 
 import * as fs from 'fs';
 import * as path from 'path';
 import { deriveHNSWParams, getEmbeddingConfig } from '../config/embedding-config.js';
+import type { PostgresBackend } from '../backends/postgres/PostgresBackend.js';
 
 // Lazy-loaded hnswlib-node to avoid import failures on systems without build tools
 let HierarchicalNSW: any = null;
@@ -68,8 +79,10 @@ export async function isHnswlibAvailable(): Promise<boolean> {
   }
 }
 
-// Database type from db-fallback
-type Database = any;
+// Postgres returns BYTEA as Node Buffer; coerce to Float32Array.
+function bufferToFloat32(buf: Buffer): Float32Array {
+  return new Float32Array(buf.buffer, buf.byteOffset, buf.byteLength / 4);
+}
 
 export interface HNSWConfig {
   /** Maximum number of connections per layer (default: 16) */
@@ -123,7 +136,7 @@ export interface HNSWStats {
 }
 
 export class HNSWIndex {
-  private db: Database;
+  private db: PostgresBackend;
   private config: HNSWConfig;
   private index: any | null = null;
   private vectorCache: Map<number, Float32Array> = new Map();
@@ -141,7 +154,7 @@ export class HNSWIndex {
   private pendingPersistentLoad: boolean = false;
   private initializePromise: Promise<void> | null = null;
 
-  constructor(db: Database, config?: Partial<HNSWConfig>) {
+  constructor(db: PostgresBackend, config?: Partial<HNSWConfig>) {
     this.db = db;
     const derived = deriveHNSWParams(config?.dimension);
     this.config = {
@@ -198,13 +211,14 @@ export class HNSWIndex {
     await loadHnswlib();
 
     try {
-      // Fetch all vectors from database
-      const stmt = this.db.prepare(`
-        SELECT pattern_id as id, embedding
-        FROM ${tableName}
-      `);
-
-      const rows = stmt.all() as any[];
+      // Fetch all vectors from database.
+      // Postgres BIGINT (pattern_id) surfaces as number|bigint|string depending
+      // on driver; normalise to number at row-read time. BYTEA embedding comes
+      // back as Node Buffer in both pglite and pg.
+      const result = await this.db.query(
+        `SELECT pattern_id, embedding FROM ${tableName}`
+      );
+      const rows = result.rows as Array<{ pattern_id: number | bigint | string; embedding: Buffer }>;
 
       if (rows.length === 0) {
         console.warn('[HNSWIndex] No vectors found in database');
@@ -230,12 +244,9 @@ export class HNSWIndex {
       console.log(`[HNSWIndex] Adding ${rows.length} vectors to index...`);
 
       for (const row of rows) {
-        const id = row.id;
-        const embedding = new Float32Array(
-          (row.embedding as Buffer).buffer,
-          (row.embedding as Buffer).byteOffset,
-          (row.embedding as Buffer).byteLength / 4
-        );
+        const rawId = row.pattern_id;
+        const id = typeof rawId === 'number' ? rawId : Number(rawId);
+        const embedding = bufferToFloat32(row.embedding);
 
         // Add to index with label (convert Float32Array to number[])
         const label = this.nextLabel++;
@@ -328,7 +339,7 @@ export class HNSWIndex {
 
       // Apply filters if specified (post-filtering)
       if (options?.filters) {
-        return this.applyFilters(results, options.filters);
+        return await this.applyFilters(results, options.filters);
       }
 
       return results;
@@ -494,34 +505,36 @@ export class HNSWIndex {
   }
 
   /**
-   * Apply post-filtering to search results
+   * Apply post-filtering to search results.
+   *
+   * ADR-0170 Phase B.14: existence-guard `SELECT 1 FROM pattern_embeddings`
+   * ported to postgres dialect. Placeholders are $1 (pattern_id) followed by
+   * $2..$N for each filter value, matching `pattern_embeddings`'s schema
+   * owned by ReasoningBank (Phase B.4 ported the table).
    */
-  private applyFilters(
+  private async applyFilters(
     results: HNSWSearchResult[],
     filters: Record<string, any>
-  ): HNSWSearchResult[] {
-    // Build WHERE clause for filters
+  ): Promise<HNSWSearchResult[]> {
+    const filterEntries = Object.entries(filters);
+    if (filterEntries.length === 0) return results;
+
+    // Build WHERE clause with $2..$N placeholders ($1 is pattern_id).
     const conditions: string[] = [];
-    const params: any[] = [];
-
-    Object.entries(filters).forEach(([key, value]) => {
-      conditions.push(`${key} = ?`);
-      params.push(value);
+    const filterValues: any[] = [];
+    filterEntries.forEach(([key, value], idx) => {
+      conditions.push(`${key} = $${idx + 2}`);
+      filterValues.push(value);
     });
-
     const whereClause = conditions.join(' AND ');
 
     // Filter results by querying database
     const filtered: HNSWSearchResult[] = [];
+    const sql = `SELECT 1 FROM pattern_embeddings WHERE pattern_id = $1 AND ${whereClause}`;
 
     for (const result of results) {
-      const stmt = this.db.prepare(`
-        SELECT 1 FROM pattern_embeddings
-        WHERE pattern_id = ? AND ${whereClause}
-      `);
-
-      const matches = stmt.get(result.id, ...params);
-      if (matches) {
+      const queryResult = await this.db.query(sql, [result.id, ...filterValues]);
+      if (queryResult.rows.length > 0) {
         filtered.push(result);
       }
     }

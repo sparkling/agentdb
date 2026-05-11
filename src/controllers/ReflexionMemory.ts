@@ -6,16 +6,26 @@
  *
  * Based on: "Reflexion: Language Agents with Verbal Reinforcement Learning"
  * https://arxiv.org/abs/2303.11366
+ *
+ * ADR-0170 Phase B.2:
+ *   - SQL ported to PostgreSQL dialect (BIGSERIAL, BYTEA, $N placeholders,
+ *     EXTRACT EPOCH, ON CONFLICT, BOOLEAN).
+ *   - Constructor accepts a `PostgresBackend` handle directly (no more
+ *     `IDatabaseConnection` / better-sqlite3 abstraction).
+ *   - SQLite-specific paths removed: the `reflexion_episode_vec` Option F
+ *     mirror writes, the `detectOptionF` probe, and the sql.js/better-sqlite3
+ *     prepare/run/get/all surface are gone.
+ *   - The `@ruvector/graph-node` Cypher branch is removed (see resolution J):
+ *     `graphBackend` param dropped, `createEpisodeGraphNode` deleted, the
+ *     `retrieveFromGraphAdapter`/`retrieveFromGenericGraph` strategies
+ *     removed, the Cypher queries in `getEpisodeRelationships` and prior-
+ *     failures lookups replaced with SQL.
  */
 
-import type { IDatabaseConnection, DatabaseRows } from '../types/database.types.js';
-import { normalizeRowId } from '../types/database.types.js';
 import { EmbeddingService } from './EmbeddingService.js';
 import type { VectorBackend } from '../backends/VectorBackend.js';
 import type { LearningBackend } from '../backends/LearningBackend.js';
-import type { GraphBackend, GraphNode } from '../backends/GraphBackend.js';
-import type { GraphDatabaseAdapter } from '../backends/graph/GraphDatabaseAdapter.js';
-import { NodeIdMapper } from '../utils/NodeIdMapper.js';
+import type { PostgresBackend } from '../backends/postgres/PostgresBackend.js';
 import { cosineSimilarity } from '../utils/vector-math.js';
 import { QueryCache, type QueryCacheConfig } from '../core/QueryCache.js';
 
@@ -50,31 +60,41 @@ export interface ReflexionQuery {
   timeWindowDays?: number;
 }
 
+interface EpisodeRow {
+  id: number | bigint | string;
+  ts: number | bigint | string;
+  session_id: string;
+  task: string;
+  input: string | null;
+  output: string | null;
+  critique: string | null;
+  reward: number;
+  success: boolean;
+  latency_ms: number | bigint | null;
+  tokens_used: number | bigint | null;
+  tags: string | null;
+  metadata: any;
+}
+
 // ADR-0076 A4: Dual-instance guard — prevent duplicate construction
-// when both ControllerRegistry and AgentDBService create this controller
+// when both ControllerRegistry and AgentDBService create this controller.
 let _singleton: InstanceType<typeof ReflexionMemory> | null = null;
 
 export class ReflexionMemory {
-  private db: IDatabaseConnection;
-  private embedder: EmbeddingService;
+  private db!: PostgresBackend;
+  private embedder!: EmbeddingService;
   private vectorBackend?: VectorBackend;
   private learningBackend?: LearningBackend;
-  private graphBackend?: GraphBackend;
-  private queryCache: QueryCache;
-  /**
-   * ADR-0166 Phase 3 (Option F): true when reflexion_episode_vec sqlite-vec
-   * virtual table is present. Detected once at construction.
-   */
-  private optionFEnabled: boolean = false;
+  private queryCache!: QueryCache;
+  private ready!: Promise<void>;
 
   static _resetSingleton(): void { _singleton = null; }
 
   constructor(
-    db: IDatabaseConnection,
+    db: PostgresBackend,
     embedder: EmbeddingService,
     vectorBackend?: VectorBackend,
     learningBackend?: LearningBackend,
-    graphBackend?: GraphBackend,
     cacheConfig?: QueryCacheConfig
   ) {
     if (_singleton) {
@@ -88,212 +108,97 @@ export class ReflexionMemory {
     this.embedder = embedder;
     this.vectorBackend = vectorBackend;
     this.learningBackend = learningBackend;
-    this.graphBackend = graphBackend;
     this.queryCache = new QueryCache(cacheConfig);
 
-    // ADR-0090 B5 fix: initialize SQLite schema on construction.
-    // Previously only `agentdb-mcp-server.ts` ran the DDL (separate
-    // boot path, not wired into the ControllerRegistry used by
-    // @claude-flow/cli), so when the fork's memory-router
-    // instantiated ReflexionMemory the `episodes` table was missing
-    // and every `storeEpisode` INSERT failed with `no such table:
-    // episodes`. Mirrors ReasoningBank / LearningSystem /
-    // HierarchicalMemory / MemoryConsolidation / AttestationLog
-    // which already CREATE TABLE IF NOT EXISTS in their constructors.
-    // Schema mirrors schemas/schema.sql:21-50 — idempotent so safe
-    // across restarts.
-    if (this.db && typeof (this.db as any).exec === 'function') {
-      (this.db as any).exec(`
-        CREATE TABLE IF NOT EXISTS episodes (
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          ts INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
-          session_id TEXT NOT NULL,
-          task TEXT NOT NULL,
-          input TEXT,
-          output TEXT,
-          critique TEXT,
-          reward REAL DEFAULT 0.0,
-          success BOOLEAN DEFAULT 0,
-          latency_ms INTEGER,
-          tokens_used INTEGER,
-          tags TEXT,
-          metadata JSON,
-          created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
-        );
-        CREATE INDEX IF NOT EXISTS idx_episodes_ts ON episodes(ts DESC);
-        CREATE INDEX IF NOT EXISTS idx_episodes_session ON episodes(session_id);
-        CREATE INDEX IF NOT EXISTS idx_episodes_reward ON episodes(reward DESC);
-        CREATE INDEX IF NOT EXISTS idx_episodes_task ON episodes(task);
-        CREATE TABLE IF NOT EXISTS episode_embeddings (
-          episode_id INTEGER PRIMARY KEY,
-          embedding BLOB NOT NULL,
-          embedding_model TEXT DEFAULT 'all-MiniLM-L6-v2',
-          FOREIGN KEY(episode_id) REFERENCES episodes(id) ON DELETE CASCADE
-        );
-      `);
-    }
-    // ADR-0166 Phase 3 (Option F): detect virtual table availability once.
-    this.optionFEnabled = this.detectOptionF();
+    // ADR-0090 B5: idempotent schema bootstrap. Postgres-dialect DDL,
+    // identical shape to schemas/schema.sql episodes + episode_embeddings.
+    // Constructors can't be async, so we expose a `ready` promise that
+    // every public method awaits.
+    this.ready = this.bootstrapSchema();
   }
 
-  /**
-   * ADR-0166 Phase 3 (Option F): detect whether reflexion_episode_vec exists.
-   */
-  private detectOptionF(): boolean {
-    try {
-      const row: any = (this.db as any).prepare?.(
-        `SELECT name FROM sqlite_master WHERE type='table' AND name='reflexion_episode_vec'`,
-      )?.get?.();
-      return !!row;
-    } catch {
-      return false;
-    }
+  private async bootstrapSchema(): Promise<void> {
+    await this.db.exec(`
+      CREATE TABLE IF NOT EXISTS episodes (
+        id BIGSERIAL PRIMARY KEY,
+        ts BIGINT NOT NULL DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT,
+        session_id TEXT NOT NULL,
+        task TEXT NOT NULL,
+        input TEXT,
+        output TEXT,
+        critique TEXT,
+        reward REAL DEFAULT 0.0,
+        success BOOLEAN DEFAULT FALSE,
+        latency_ms BIGINT,
+        tokens_used BIGINT,
+        tags TEXT,
+        metadata JSONB,
+        created_at BIGINT NOT NULL DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT
+      );
+      CREATE INDEX IF NOT EXISTS idx_episodes_ts ON episodes(ts DESC);
+      CREATE INDEX IF NOT EXISTS idx_episodes_session ON episodes(session_id);
+      CREATE INDEX IF NOT EXISTS idx_episodes_reward ON episodes(reward DESC);
+      CREATE INDEX IF NOT EXISTS idx_episodes_task ON episodes(task);
+      CREATE TABLE IF NOT EXISTS episode_embeddings (
+        episode_id BIGINT PRIMARY KEY,
+        embedding BYTEA NOT NULL,
+        embedding_model TEXT DEFAULT 'all-MiniLM-L6-v2',
+        FOREIGN KEY(episode_id) REFERENCES episodes(id) ON DELETE CASCADE
+      );
+    `);
   }
 
   /**
    * Store a new episode with its critique and outcome
-   * Invalidates relevant cache entries
-   *
-   * Persistence guarantee (issue #128 fix):
-   *   storeEpisode() always writes to the SQLite `episodes` and
-   *   `episode_embeddings` tables when a SQL-capable connection is present,
-   *   even when a graph or vector backend handles the primary index. This
-   *   ensures data survives process restarts (graph/vector backends are
-   *   often in-memory or rebuildable from SQL).
    */
   async storeEpisode(episode: Episode): Promise<number> {
+    await this.ready;
+
     // Invalidate episode caches on write
     this.queryCache.invalidateCategory('episodes');
     this.queryCache.invalidateCategory('task-stats');
-    // Use GraphDatabaseAdapter if available (AgentDB v2)
-    if (this.graphBackend && 'storeEpisode' in this.graphBackend) {
-      // GraphDatabaseAdapter has specialized storeEpisode method
-      const graphAdapter = this.graphBackend as any as GraphDatabaseAdapter;
-
-      // Generate embedding for the task
-      const taskEmbedding = await this.embedder.embed(episode.task);
-
-      // Create episode node using GraphDatabaseAdapter
-      const nodeId = await graphAdapter.storeEpisode(
-        {
-          id: episode.id ? `episode-${episode.id}` : `episode-${Date.now()}-${Math.random()}`,
-          sessionId: episode.sessionId,
-          task: episode.task,
-          reward: episode.reward,
-          success: episode.success,
-          input: episode.input,
-          output: episode.output,
-          critique: episode.critique,
-          createdAt: episode.ts ? episode.ts * 1000 : Date.now(),
-          tokensUsed: episode.tokensUsed,
-          latencyMs: episode.latencyMs,
-        },
-        taskEmbedding
-      );
-
-      // Return a numeric ID (parse from string ID)
-      const numericId = parseInt(nodeId.split('-').pop() || '0', 36);
-
-      // Register mapping for later use by CausalMemoryGraph
-      NodeIdMapper.getInstance().register(numericId, nodeId);
-
-      // #128: dual-write to SQL for restart-safe persistence. Graph adapter
-      // index is typically in-memory; SQL is the durable record.
-      this.dualWriteEpisodeToSQL(episode, taskEmbedding);
-
-      return numericId;
-    }
-
-    // Use generic GraphBackend if available
-    if (this.graphBackend) {
-      // Generate embedding for the task
-      const taskEmbedding = await this.embedder.embed(episode.task);
-
-      // Create episode node ID
-      const nodeId = await this.graphBackend.createNode(['Episode'], {
-        sessionId: episode.sessionId,
-        task: episode.task,
-        input: episode.input || '',
-        output: episode.output || '',
-        critique: episode.critique || '',
-        reward: episode.reward,
-        success: episode.success,
-        latencyMs: episode.latencyMs || 0,
-        tokensUsed: episode.tokensUsed || 0,
-        tags: episode.tags ? JSON.stringify(episode.tags) : '[]',
-        metadata: episode.metadata ? JSON.stringify(episode.metadata) : '{}',
-        createdAt: Date.now(),
-      });
-
-      // Store embedding using vectorBackend if available
-      if (this.vectorBackend && taskEmbedding) {
-        try {
-          this.vectorBackend.insert(nodeId, taskEmbedding, {
-            type: 'episode',
-            sessionId: episode.sessionId
-          });
-        } catch { /* vectorBackend insert failed — graph node still created */ }
-      }
-
-      // Return a numeric ID (parse from string ID)
-      const numericId = parseInt(nodeId.split('-').pop() || '0', 36);
-
-      // Register mapping for later use by CausalMemoryGraph
-      NodeIdMapper.getInstance().register(numericId, nodeId);
-
-      // #128: dual-write to SQL for restart-safe persistence.
-      this.dualWriteEpisodeToSQL(episode, taskEmbedding);
-
-      return numericId;
-    }
-
-    // Fallback to SQLite (v1 compatibility)
-    const stmt = this.db.prepare(`
-      INSERT INTO episodes (
-        session_id, task, input, output, critique, reward, success,
-        latency_ms, tokens_used, tags, metadata
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `);
 
     const tags = episode.tags ? JSON.stringify(episode.tags) : null;
     const metadata = episode.metadata ? JSON.stringify(episode.metadata) : null;
 
-    const result = stmt.run(
-      episode.sessionId,
-      episode.task,
-      episode.input || null,
-      episode.output || null,
-      episode.critique || null,
-      episode.reward,
-      episode.success ? 1 : 0,
-      episode.latencyMs || null,
-      episode.tokensUsed || null,
-      tags,
-      metadata
+    const insertResult = await this.db.query(
+      `INSERT INTO episodes (
+        session_id, task, input, output, critique, reward, success,
+        latency_ms, tokens_used, tags, metadata
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+      RETURNING id`,
+      [
+        episode.sessionId,
+        episode.task,
+        episode.input ?? null,
+        episode.output ?? null,
+        episode.critique ?? null,
+        episode.reward,
+        episode.success,
+        episode.latencyMs ?? null,
+        episode.tokensUsed ?? null,
+        tags,
+        metadata,
+      ]
     );
 
-    const episodeId = normalizeRowId(result.lastInsertRowid);
+    const episodeId = toNumber((insertResult.rows[0] as { id: number | bigint | string }).id);
 
     // Generate and store embedding
     const text = this.buildEpisodeText(episode);
     const embedding = await this.embedder.embed(text);
 
-    // Use vector backend if available (150x faster retrieval)
+    // Hand to vector backend if present (Phase A: in-memory accelerator;
+    // Phase C replaces with pgvector and removes this parallel write).
     if (this.vectorBackend) {
       try {
         this.vectorBackend.insert(episodeId.toString(), embedding);
-      } catch { /* vectorBackend insert failed — SQL fallback used */ }
+      } catch { /* in-memory accelerator failed — SQL row is durable */ }
     }
 
-    // Also store in SQL for fallback
-    this.storeEmbedding(episodeId, embedding);
+    await this.storeEmbedding(episodeId, embedding);
 
-    // Create graph node for episode if graph backend available
-    if (this.graphBackend) {
-      await this.createEpisodeGraphNode(episodeId, episode, embedding);
-    }
-
-    // Add training sample if learning backend available
+    // Feed learning backend if wired
     if (this.learningBackend && episode.success !== undefined) {
       this.learningBackend.addSample({
         embedding,
@@ -316,6 +221,8 @@ export class ReflexionMemory {
    * Results are cached for improved performance
    */
   async retrieveRelevant(query: ReflexionQuery): Promise<EpisodeWithEmbedding[]> {
+    await this.ready;
+
     const {
       task,
       currentState = '',
@@ -326,7 +233,6 @@ export class ReflexionMemory {
       timeWindowDays,
     } = query;
 
-    // Check cache first
     const cacheKey = this.queryCache.generateKey(
       'retrieveRelevant',
       [task, currentState, k, minReward, onlyFailures, onlySuccesses, timeWindowDays],
@@ -338,24 +244,15 @@ export class ReflexionMemory {
       return cached;
     }
 
-    // Generate and enhance query embedding
     const queryEmbedding = await this.prepareQueryEmbedding(task, currentState, k);
 
-    // Try different retrieval strategies in order of preference
-    let episodes: EpisodeWithEmbedding[] = [];
-
-    if (this.graphBackend && 'searchSimilarEpisodes' in this.graphBackend) {
-      episodes = await this.retrieveFromGraphAdapter(queryEmbedding, query);
-    } else if (this.graphBackend && 'execute' in this.graphBackend) {
-      episodes = await this.retrieveFromGenericGraph(query);
-    } else if (this.vectorBackend) {
+    let episodes: EpisodeWithEmbedding[];
+    if (this.vectorBackend) {
       episodes = await this.retrieveFromVectorBackend(queryEmbedding, query);
-      // ADR-0094 Phase 13.2 fix: vectorBackend is an in-memory
-      // accelerator that is *not* persisted across CLI process
-      // boundaries — but SQLite episode_embeddings ARE persisted.
-      // If the vectorBackend came back empty, ALWAYS fall back to
-      // the SQL similarity search before declaring "no matches".
-      // ADR-0082 forbids silent-empty returns when a fallback exists.
+      // ADR-0094 Phase 13.2: vectorBackend is an in-memory accelerator;
+      // postgres episode_embeddings are durable. If the accelerator came
+      // back empty, fall through to the SQL similarity search before
+      // declaring "no matches" (ADR-0082).
       if (episodes.length === 0) {
         episodes = await this.retrieveFromSQLFallback(queryEmbedding, query);
       }
@@ -363,7 +260,6 @@ export class ReflexionMemory {
       episodes = await this.retrieveFromSQLFallback(queryEmbedding, query);
     }
 
-    // Cache and return results
     this.queryCache.set(cacheKey, episodes);
     return episodes;
   }
@@ -379,7 +275,6 @@ export class ReflexionMemory {
     const queryText = currentState ? `${task}\n${currentState}` : task;
     let queryEmbedding = await this.embedder.embed(queryText);
 
-    // Enhance query with GNN if learning backend available
     if (this.learningBackend) {
       queryEmbedding = await this.enhanceQueryWithGNN(queryEmbedding, k);
     }
@@ -388,48 +283,7 @@ export class ReflexionMemory {
   }
 
   /**
-   * Retrieve episodes using GraphDatabaseAdapter (AgentDB v2)
-   */
-  private async retrieveFromGraphAdapter(
-    queryEmbedding: Float32Array,
-    query: ReflexionQuery
-  ): Promise<EpisodeWithEmbedding[]> {
-    const { k = 5, minReward, onlyFailures, onlySuccesses, timeWindowDays } = query;
-    const graphAdapter = this.graphBackend as any as GraphDatabaseAdapter;
-
-    // Search using vector similarity
-    const results = await graphAdapter.searchSimilarEpisodes(queryEmbedding, k * 3);
-
-    // Apply filters
-    const filtered = this.applyEpisodeFilters(results, {
-      minReward,
-      onlyFailures,
-      onlySuccesses,
-      timeWindowDays,
-    });
-
-    // Convert to EpisodeWithEmbedding format
-    return filtered.slice(0, k).map((ep: any) => this.convertGraphEpisode(ep));
-  }
-
-  /**
-   * Retrieve episodes using generic GraphBackend
-   */
-  private async retrieveFromGenericGraph(query: ReflexionQuery): Promise<EpisodeWithEmbedding[]> {
-    const { k = 5 } = query;
-    const cypherQuery = this.buildCypherQuery(query);
-    const result = await this.graphBackend!.execute(cypherQuery);
-
-    // Convert to EpisodeWithEmbedding format
-    const episodes: EpisodeWithEmbedding[] = result.rows.map((row: any) =>
-      this.convertCypherEpisode(row.e)
-    );
-
-    return episodes.slice(0, k);
-  }
-
-  /**
-   * Retrieve episodes using VectorBackend (150x faster)
+   * Retrieve episodes using VectorBackend (150x faster) + SQL hydration.
    */
   private async retrieveFromVectorBackend(
     queryEmbedding: Float32Array,
@@ -437,28 +291,23 @@ export class ReflexionMemory {
   ): Promise<EpisodeWithEmbedding[]> {
     const { k = 5, minReward, onlyFailures, onlySuccesses, timeWindowDays } = query;
 
-    // Get candidates from vector backend
     const searchResults = this.vectorBackend!.search(queryEmbedding, k * 3, {
       threshold: 0.0,
     });
 
-    // Fetch full episode data from DB
-    const episodeIds = searchResults.map((r) => parseInt(r.id));
+    const episodeIds = searchResults.map((r) => parseInt(r.id)).filter((n) => Number.isFinite(n));
     if (episodeIds.length === 0) {
       return [];
     }
 
-    const rows = this.fetchEpisodesByIds(episodeIds);
-    const episodeMap = new Map(rows.map((r) => [r.id.toString(), r]));
+    const rows = await this.fetchEpisodesByIds(episodeIds);
+    const episodeMap = new Map(rows.map((r) => [toNumber(r.id).toString(), r]));
 
-    // Map results with similarity scores and apply filters
     const episodes: EpisodeWithEmbedding[] = [];
-
     for (const result of searchResults) {
       const row = episodeMap.get(result.id);
       if (!row) continue;
 
-      // Apply filters
       if (
         !this.passesEpisodeFilters(row, { minReward, onlyFailures, onlySuccesses, timeWindowDays })
       ) {
@@ -466,7 +315,6 @@ export class ReflexionMemory {
       }
 
       episodes.push(this.convertDatabaseEpisode(row, result.similarity));
-
       if (episodes.length >= k) break;
     }
 
@@ -474,15 +322,11 @@ export class ReflexionMemory {
   }
 
   /**
-   * Retrieve episodes using SQL-based similarity search (fallback)
+   * Retrieve episodes using SQL-based similarity search (durable path).
    *
-   * ADR-0094 Phase 13.2 fix: previously this method called
-   * `this.buildSQLFilters()` and `this.cosineSimilarity()` — neither
-   * existed as methods on the class. The moment this branch executed
-   * it threw ReferenceError, caught nowhere, surfacing as a silent
-   * empty result through `retrieveRelevant`. Inline the filter
-   * construction (pattern from the unreachable block further down in
-   * the file) and use the imported `cosineSimilarity` function.
+   * Phase C will replace this with pgvector `ORDER BY embedding <-> $1`.
+   * In Phase A/B the embeddings are BYTEA blobs; cosine similarity is
+   * computed in JS after a filtered SQL fetch.
    */
   private async retrieveFromSQLFallback(
     queryEmbedding: Float32Array,
@@ -492,67 +336,46 @@ export class ReflexionMemory {
 
     const filters: string[] = [];
     const params: any[] = [];
+    let nextParam = 1;
+
     if (minReward !== undefined) {
-      filters.push('e.reward >= ?');
+      filters.push(`e.reward >= $${nextParam++}`);
       params.push(minReward);
     }
-    if (onlyFailures) filters.push('e.success = 0');
-    if (onlySuccesses) filters.push('e.success = 1');
+    if (onlyFailures) filters.push('e.success = FALSE');
+    if (onlySuccesses) filters.push('e.success = TRUE');
     if (timeWindowDays) {
-      filters.push("e.ts > strftime('%s', 'now') - ?");
+      filters.push(`e.ts > EXTRACT(EPOCH FROM NOW())::BIGINT - $${nextParam++}`);
       params.push(timeWindowDays * 86400);
     }
     const whereClause = filters.length > 0 ? `WHERE ${filters.join(' AND ')}` : '';
 
-    const stmt = this.db.prepare<DatabaseRows.Episode & { embedding: Buffer }>(`
-      SELECT e.*, ee.embedding
-      FROM episodes e
-      JOIN episode_embeddings ee ON e.id = ee.episode_id
-      ${whereClause}
-      ORDER BY e.reward DESC
-    `);
+    const result = await this.db.query(
+      `SELECT e.*, ee.embedding
+       FROM episodes e
+       JOIN episode_embeddings ee ON e.id = ee.episode_id
+       ${whereClause}
+       ORDER BY e.reward DESC`,
+      params
+    );
 
-    const rows = stmt.all(...params);
+    const rows = result.rows as Array<EpisodeRow & { embedding: Buffer | Uint8Array }>;
 
-    // Calculate similarities and convert
     const episodes: EpisodeWithEmbedding[] = rows.map((row) => {
       const embedding = this.deserializeEmbedding(row.embedding);
       const similarity = cosineSimilarity(queryEmbedding, embedding);
       return this.convertDatabaseEpisode(row, similarity, embedding);
     });
 
-    // Sort by similarity and return top-k
     episodes.sort((a, b) => (b.similarity || 0) - (a.similarity || 0));
     return episodes.slice(0, k);
-  }
-
-  /**
-   * Apply episode filters to search results
-   */
-  private applyEpisodeFilters(
-    episodes: any[],
-    filters: {
-      minReward?: number;
-      onlyFailures?: boolean;
-      onlySuccesses?: boolean;
-      timeWindowDays?: number;
-    }
-  ): any[] {
-    return episodes.filter((ep) => {
-      if (filters.minReward !== undefined && ep.reward < filters.minReward) return false;
-      if (filters.onlyFailures && ep.success) return false;
-      if (filters.onlySuccesses && !ep.success) return false;
-      if (filters.timeWindowDays && ep.createdAt < Date.now() - filters.timeWindowDays * 86400000)
-        return false;
-      return true;
-    });
   }
 
   /**
    * Check if database row passes episode filters
    */
   private passesEpisodeFilters(
-    row: DatabaseRows.Episode,
+    row: EpisodeRow,
     filters: {
       minReward?: number;
       onlyFailures?: boolean;
@@ -561,136 +384,49 @@ export class ReflexionMemory {
     }
   ): boolean {
     if (filters.minReward !== undefined && row.reward < filters.minReward) return false;
-    if (filters.onlyFailures && row.success === 1) return false;
-    if (filters.onlySuccesses && row.success === 0) return false;
-    if (filters.timeWindowDays && row.ts < Date.now() / 1000 - filters.timeWindowDays * 86400)
-      return false;
+    if (filters.onlyFailures && row.success === true) return false;
+    if (filters.onlySuccesses && row.success === false) return false;
+    if (filters.timeWindowDays) {
+      const ts = toNumber(row.ts);
+      if (ts < Date.now() / 1000 - filters.timeWindowDays * 86400) return false;
+    }
     return true;
-  }
-
-  /**
-   * Build Cypher query with filters for the generic GraphBackend path.
-   *
-   * Returns a Cypher MATCH statement that:
-   *   - filters Episode nodes by reward / success / time window
-   *   - returns the node aliased as `e` (caller in `retrieveFromGenericGraph`
-   *     iterates `result.rows` and reads `row.e`)
-   *   - orders by reward desc and limits to k so the backend can enforce
-   *     the top-k cap server-side
-   *
-   * Historical note: the body of this method was previously garbled — the
-   * first 17 lines built the Cypher string correctly but the remainder was
-   * an orphaned paste of the old `retrieveRelevant` vector/SQL body (left
-   * behind when that logic was split into `retrieveFromVectorBackend` and
-   * `retrieveFromSQLFallback`). The orphan referenced an unbound
-   * `queryEmbedding` and returned `EpisodeWithEmbedding[]` from a `: string`
-   * method. The method always fell through to the orphan code instead of
-   * returning `cypherQuery`, so the Cypher path silently produced wrong
-   * results (or threw ReferenceError at runtime) whenever a generic
-   * GraphBackend with `execute` but no `searchSimilarEpisodes` was wired.
-   */
-  private buildCypherQuery(query: ReflexionQuery): string {
-    const { k = 5, minReward, onlyFailures, onlySuccesses, timeWindowDays } = query;
-    let cypherQuery = 'MATCH (e:Episode) WHERE 1=1';
-
-    if (minReward !== undefined) {
-      cypherQuery += ` AND e.reward >= ${minReward}`;
-    }
-    if (onlyFailures) {
-      cypherQuery += ` AND e.success = false`;
-    }
-    if (onlySuccesses) {
-      cypherQuery += ` AND e.success = true`;
-    }
-    if (timeWindowDays) {
-      const cutoff = Date.now() - timeWindowDays * 86400000;
-      cypherQuery += ` AND e.createdAt >= ${cutoff}`;
-    }
-
-    cypherQuery += ` RETURN e ORDER BY e.reward DESC LIMIT ${k}`;
-    return cypherQuery;
   }
 
   /**
    * Fetch episodes by IDs from database
    */
-  private fetchEpisodesByIds(episodeIds: number[]): DatabaseRows.Episode[] {
-    const placeholders = episodeIds.map(() => '?').join(',');
-    const stmt = this.db.prepare<DatabaseRows.Episode>(`
-      SELECT * FROM episodes
-      WHERE id IN (${placeholders})
-    `);
-    return stmt.all(...episodeIds);
-  }
-
-  /**
-   * Convert GraphDatabaseAdapter episode to EpisodeWithEmbedding
-   */
-  private convertGraphEpisode(ep: any): EpisodeWithEmbedding {
-    return {
-      id: parseInt(ep.id.split('-').pop() || '0', 36),
-      sessionId: ep.sessionId,
-      task: ep.task,
-      input: ep.input,
-      output: ep.output,
-      critique: ep.critique,
-      reward: ep.reward,
-      success: ep.success,
-      latencyMs: ep.latencyMs,
-      tokensUsed: ep.tokensUsed,
-      ts: Math.floor(ep.createdAt / 1000),
-    };
-  }
-
-  /**
-   * Convert Cypher query result to EpisodeWithEmbedding
-   */
-  private convertCypherEpisode(node: any): EpisodeWithEmbedding {
-    return {
-      id: parseInt(node.id.split('-').pop() || '0', 36),
-      sessionId: node.properties.sessionId,
-      task: node.properties.task,
-      input: node.properties.input,
-      output: node.properties.output,
-      critique: node.properties.critique,
-      reward:
-        typeof node.properties.reward === 'string'
-          ? parseFloat(node.properties.reward)
-          : node.properties.reward,
-      success:
-        typeof node.properties.success === 'string'
-          ? node.properties.success === 'true'
-          : node.properties.success,
-      latencyMs: node.properties.latencyMs,
-      tokensUsed: node.properties.tokensUsed,
-      tags: node.properties.tags ? JSON.parse(node.properties.tags) : [],
-      metadata: node.properties.metadata ? JSON.parse(node.properties.metadata) : {},
-      ts: Math.floor(node.properties.createdAt / 1000),
-    };
+  private async fetchEpisodesByIds(episodeIds: number[]): Promise<EpisodeRow[]> {
+    const placeholders = episodeIds.map((_, i) => `$${i + 1}`).join(',');
+    const result = await this.db.query(
+      `SELECT * FROM episodes WHERE id IN (${placeholders})`,
+      episodeIds
+    );
+    return result.rows as EpisodeRow[];
   }
 
   /**
    * Convert database row to EpisodeWithEmbedding
    */
   private convertDatabaseEpisode(
-    row: DatabaseRows.Episode,
+    row: EpisodeRow,
     similarity?: number,
     embedding?: Float32Array
   ): EpisodeWithEmbedding {
     return {
-      id: row.id,
-      ts: row.ts,
+      id: toNumber(row.id),
+      ts: toNumber(row.ts),
       sessionId: row.session_id,
       task: row.task,
       input: row.input ?? undefined,
       output: row.output ?? undefined,
       critique: row.critique ?? undefined,
       reward: row.reward,
-      success: row.success === 1,
-      latencyMs: row.latency_ms ?? undefined,
-      tokensUsed: row.tokens_used ?? undefined,
+      success: row.success === true,
+      latencyMs: row.latency_ms !== null ? toNumber(row.latency_ms) : undefined,
+      tokensUsed: row.tokens_used !== null ? toNumber(row.tokens_used) : undefined,
       tags: row.tags ? JSON.parse(row.tags) : undefined,
-      metadata: row.metadata ? JSON.parse(row.metadata) : undefined,
+      metadata: row.metadata ? (typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata) : undefined,
       embedding,
       similarity,
     };
@@ -699,17 +435,18 @@ export class ReflexionMemory {
   /**
    * Get statistics for a task (cached)
    */
-  getTaskStats(
+  async getTaskStats(
     task: string,
     timeWindowDays?: number
-  ): {
+  ): Promise<{
     totalAttempts: number;
     successRate: number;
     avgReward: number;
     avgLatency: number;
     improvementTrend: number;
-  } {
-    // Check cache first
+  }> {
+    await this.ready;
+
     const cacheKey = this.queryCache.generateKey(
       'getTaskStats',
       [task, timeWindowDays],
@@ -723,61 +460,62 @@ export class ReflexionMemory {
       avgLatency: number;
       improvementTrend: number;
     }>(cacheKey);
+    if (cached) return cached;
 
-    if (cached) {
-      return cached;
-    }
-    const windowFilter = timeWindowDays
-      ? `AND ts > strftime('%s', 'now') - ${timeWindowDays * 86400}`
-      : '';
-
-    interface TaskStats {
-      total: number;
-      success_rate: number;
-      avg_reward: number;
-      avg_latency: number | null;
+    const params: any[] = [task];
+    let windowFilter = '';
+    if (timeWindowDays !== undefined) {
+      windowFilter = `AND ts > EXTRACT(EPOCH FROM NOW())::BIGINT - $2`;
+      params.push(timeWindowDays * 86400);
     }
 
-    const stmt = this.db.prepare<TaskStats>(`
-      SELECT
-        COUNT(*) as total,
-        AVG(CASE WHEN success = 1 THEN 1.0 ELSE 0.0 END) as success_rate,
-        AVG(reward) as avg_reward,
-        AVG(latency_ms) as avg_latency
+    const statsResult = await this.db.query(
+      `SELECT
+        COUNT(*) AS total,
+        AVG(CASE WHEN success = TRUE THEN 1.0 ELSE 0.0 END) AS success_rate,
+        AVG(reward) AS avg_reward,
+        AVG(latency_ms) AS avg_latency
       FROM episodes
-      WHERE task = ? ${windowFilter}
-    `);
+      WHERE task = $1 ${windowFilter}`,
+      params
+    );
+    const statsRow = (statsResult.rows[0] as any) ?? {};
 
-    const stats = stmt.get(task);
+    const trendParams: any[] = [task];
+    let trendWindowFilter = '';
+    if (timeWindowDays !== undefined) {
+      trendWindowFilter = `AND ts > EXTRACT(EPOCH FROM NOW())::BIGINT - $2`;
+      trendParams.push(timeWindowDays * 86400);
+    }
 
-    // Calculate improvement trend (recent vs older)
-    const trendStmt = this.db.prepare(`
-      SELECT
+    const trendResult = await this.db.query(
+      `SELECT
         AVG(CASE
-          WHEN ts > strftime('%s', 'now') - ${7 * 86400} THEN reward
-        END) as recent_reward,
+          WHEN ts > EXTRACT(EPOCH FROM NOW())::BIGINT - ${7 * 86400} THEN reward
+        END) AS recent_reward,
         AVG(CASE
-          WHEN ts <= strftime('%s', 'now') - ${7 * 86400} THEN reward
-        END) as older_reward
+          WHEN ts <= EXTRACT(EPOCH FROM NOW())::BIGINT - ${7 * 86400} THEN reward
+        END) AS older_reward
       FROM episodes
-      WHERE task = ? ${windowFilter}
-    `);
-
-    const trend = trendStmt.get(task) as any;
+      WHERE task = $1 ${trendWindowFilter}`,
+      trendParams
+    );
+    const trendRow = (trendResult.rows[0] as any) ?? {};
+    const recentReward = trendRow.recent_reward != null ? Number(trendRow.recent_reward) : null;
+    const olderReward = trendRow.older_reward != null ? Number(trendRow.older_reward) : null;
     const improvementTrend =
-      trend.recent_reward && trend.older_reward
-        ? (trend.recent_reward - trend.older_reward) / trend.older_reward
+      recentReward != null && olderReward != null && olderReward !== 0
+        ? (recentReward - olderReward) / olderReward
         : 0;
 
     const results = {
-      totalAttempts: stats?.total ?? 0,
-      successRate: stats?.success_rate ?? 0,
-      avgReward: stats?.avg_reward ?? 0,
-      avgLatency: stats?.avg_latency ?? 0,
+      totalAttempts: statsRow.total != null ? Number(statsRow.total) : 0,
+      successRate: statsRow.success_rate != null ? Number(statsRow.success_rate) : 0,
+      avgReward: statsRow.avg_reward != null ? Number(statsRow.avg_reward) : 0,
+      avgLatency: statsRow.avg_latency != null ? Number(statsRow.avg_latency) : 0,
       improvementTrend,
     };
 
-    // Cache the results
     this.queryCache.set(cacheKey, results);
     return results;
   }
@@ -786,7 +524,6 @@ export class ReflexionMemory {
    * Build critique summary from similar failed episodes (cached)
    */
   async getCritiqueSummary(query: ReflexionQuery): Promise<string> {
-    // Check cache first
     const cacheKey = this.queryCache.generateKey(
       'getCritiqueSummary',
       [query.task, query.k],
@@ -794,9 +531,8 @@ export class ReflexionMemory {
     );
 
     const cached = this.queryCache.get<string>(cacheKey);
-    if (cached) {
-      return cached;
-    }
+    if (cached) return cached;
+
     const failures = await this.retrieveRelevant({
       ...query,
       onlyFailures: true,
@@ -813,8 +549,6 @@ export class ReflexionMemory {
       .join('\n');
 
     const result = `Prior failures and lessons learned:\n${critiques}`;
-
-    // Cache the result
     this.queryCache.set(cacheKey, result);
     return result;
   }
@@ -823,7 +557,6 @@ export class ReflexionMemory {
    * Get successful strategies for a task (cached)
    */
   async getSuccessStrategies(query: ReflexionQuery): Promise<string> {
-    // Check cache first
     const cacheKey = this.queryCache.generateKey(
       'getSuccessStrategies',
       [query.task, query.k],
@@ -831,9 +564,8 @@ export class ReflexionMemory {
     );
 
     const cached = this.queryCache.get<string>(cacheKey);
-    if (cached) {
-      return cached;
-    }
+    if (cached) return cached;
+
     const successes = await this.retrieveRelevant({
       ...query,
       onlySuccesses: true,
@@ -853,8 +585,6 @@ export class ReflexionMemory {
       .join('\n');
 
     const result = `Successful strategies:\n${strategies}`;
-
-    // Cache the result
     this.queryCache.set(cacheKey, result);
     return result;
   }
@@ -863,69 +593,73 @@ export class ReflexionMemory {
    * Get recent episodes for a session
    */
   async getRecentEpisodes(sessionId: string, limit: number = 10): Promise<Episode[]> {
-    const stmt = this.db.prepare<DatabaseRows.Episode>(`
-      SELECT * FROM episodes
-      WHERE session_id = ?
-      ORDER BY ts DESC
-      LIMIT ?
-    `);
+    await this.ready;
 
-    const rows = stmt.all(sessionId, limit);
+    const result = await this.db.query(
+      `SELECT * FROM episodes
+       WHERE session_id = $1
+       ORDER BY ts DESC
+       LIMIT $2`,
+      [sessionId, limit]
+    );
 
-    return rows.map((row) => ({
-      id: row.id,
-      ts: row.ts,
+    return (result.rows as EpisodeRow[]).map((row) => ({
+      id: toNumber(row.id),
+      ts: toNumber(row.ts),
       sessionId: row.session_id,
       task: row.task,
       input: row.input ?? undefined,
       output: row.output ?? undefined,
       critique: row.critique ?? undefined,
       reward: row.reward,
-      success: row.success === 1,
-      latencyMs: row.latency_ms ?? undefined,
-      tokensUsed: row.tokens_used ?? undefined,
+      success: row.success === true,
+      latencyMs: row.latency_ms !== null ? toNumber(row.latency_ms) : undefined,
+      tokensUsed: row.tokens_used !== null ? toNumber(row.tokens_used) : undefined,
       tags: row.tags ? JSON.parse(row.tags) : undefined,
-      metadata: row.metadata ? JSON.parse(row.metadata) : undefined,
+      metadata: row.metadata ? (typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata) : undefined,
     }));
   }
 
   /**
-   * Prune low-quality episodes based on TTL and quality threshold
-   * Invalidates cache on completion
+   * Prune low-quality episodes based on TTL and quality threshold.
+   * Returns the number of episodes removed.
    */
-  pruneEpisodes(config: {
+  async pruneEpisodes(config: {
     minReward?: number;
     maxAgeDays?: number;
     keepMinPerTask?: number;
-  }): number {
+  }): Promise<number> {
+    await this.ready;
+
     const { minReward = 0.3, maxAgeDays = 30, keepMinPerTask = 5 } = config;
 
-    // Keep high-reward episodes and minimum per task
-    const stmt = this.db.prepare(`
-      DELETE FROM episodes
-      WHERE id IN (
-        SELECT id FROM (
-          SELECT
-            id,
-            reward,
-            ts,
-            ROW_NUMBER() OVER (PARTITION BY task ORDER BY reward DESC) as rank
-          FROM episodes
-          WHERE reward < ?
-            AND ts < strftime('%s', 'now') - ?
-        ) WHERE rank > ?
-      )
-    `);
+    // Postgres window-function subquery, structurally identical to the
+    // SQLite original. Note the additional CTE-style aliasing required
+    // by postgres (subqueries returning multiple columns need a name).
+    const result = await this.db.query(
+      `DELETE FROM episodes
+       WHERE id IN (
+         SELECT id FROM (
+           SELECT
+             id,
+             reward,
+             ts,
+             ROW_NUMBER() OVER (PARTITION BY task ORDER BY reward DESC) AS rnk
+           FROM episodes
+           WHERE reward < $1
+             AND ts < EXTRACT(EPOCH FROM NOW())::BIGINT - $2
+         ) ranked WHERE rnk > $3
+       )`,
+      [minReward, maxAgeDays * 86400, keepMinPerTask]
+    );
 
-    const result = stmt.run(minReward, maxAgeDays * 86400, keepMinPerTask);
-
-    // Invalidate caches after pruning
-    if (result.changes > 0) {
+    const changes = (result as any).rowCount ?? 0;
+    if (changes > 0) {
       this.queryCache.invalidateCategory('episodes');
       this.queryCache.invalidateCategory('task-stats');
     }
 
-    return result.changes;
+    return changes;
   }
 
   // ========================================================================
@@ -939,136 +673,37 @@ export class ReflexionMemory {
     return parts.join('\n');
   }
 
-  private storeEmbedding(episodeId: number, embedding: Float32Array): void {
-    const stmt = this.db.prepare(`
-      INSERT INTO episode_embeddings (episode_id, embedding)
-      VALUES (?, ?)
-    `);
-
-    stmt.run(episodeId, this.serializeEmbedding(embedding));
-
-    // ADR-0166 Phase 3 (Option F): mirror into reflexion_episode_vec for
-    // HNSW-indexed k-NN via SQL. Idempotent w.r.t. vectorBackend.
-    // ID stringified — sqlite-vec auxiliary column types are TEXT uniformly
-    // (see AgentDB.createOptionFVirtualTables for rationale).
-    if (this.optionFEnabled) {
-      try {
-        const vecStmt = this.db.prepare(
-          `INSERT INTO reflexion_episode_vec(id, embedding) VALUES (?, ?)`,
-        );
-        vecStmt.run(String(episodeId), this.serializeEmbedding(embedding));
-      } catch (err) {
-        console.error(`[ReflexionMemory] Option F vec mirror failed for episode=${episodeId}: ${(err as Error).message}`);
-        throw err;
-      }
-    }
+  private async storeEmbedding(episodeId: number, embedding: Float32Array): Promise<void> {
+    const blob = this.serializeEmbedding(embedding);
+    await this.db.query(
+      `INSERT INTO episode_embeddings (episode_id, embedding)
+       VALUES ($1, $2)
+       ON CONFLICT (episode_id) DO UPDATE SET embedding = EXCLUDED.embedding`,
+      [episodeId, blob]
+    );
   }
 
   private serializeEmbedding(embedding: Float32Array): Buffer {
-    // Handle empty/null embeddings
     if (!embedding || !embedding.buffer) {
       return Buffer.alloc(0);
     }
-    return Buffer.from(embedding.buffer);
+    return Buffer.from(embedding.buffer, embedding.byteOffset, embedding.byteLength);
   }
 
-  private deserializeEmbedding(buffer: Buffer): Float32Array {
-    return new Float32Array(buffer.buffer, buffer.byteOffset, buffer.length / 4);
+  private deserializeEmbedding(blob: Buffer | Uint8Array): Float32Array {
+    // postgres BYTEA may surface as Buffer (pg) or Uint8Array (pglite).
+    const buf = Buffer.isBuffer(blob) ? blob : Buffer.from(blob);
+    return new Float32Array(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength));
   }
 
   // ========================================================================
-  // GNN and Graph Integration Methods
+  // GNN integration (in-process; no graph backend involved)
   // ========================================================================
 
   /**
-   * Create graph node for episode with relationships
-   */
-  private async createEpisodeGraphNode(
-    episodeId: number,
-    episode: Episode,
-    embedding: Float32Array
-  ): Promise<void> {
-    if (!this.graphBackend) return;
-
-    // Create episode node
-    const nodeId = await this.graphBackend.createNode(
-      ['Episode', episode.success ? 'Success' : 'Failure'],
-      {
-        episodeId,
-        sessionId: episode.sessionId,
-        task: episode.task,
-        reward: episode.reward,
-        success: episode.success,
-        timestamp: episode.ts || Date.now(),
-        latencyMs: episode.latencyMs,
-        tokensUsed: episode.tokensUsed,
-      }
-    );
-
-    // Find similar episodes using graph vector search
-    const similarEpisodes = await this.graphBackend.vectorSearch(embedding, 5, nodeId);
-
-    // Create similarity relationships to similar episodes
-    for (const similar of similarEpisodes) {
-      if (similar.id !== nodeId && similar.properties.episodeId !== episodeId) {
-        await this.graphBackend.createRelationship(
-          nodeId,
-          similar.id,
-          'SIMILAR_TO',
-          {
-            similarity: cosineSimilarity(
-              embedding,
-              similar.embedding || new Float32Array()
-            ),
-            createdAt: Date.now()
-          }
-        );
-      }
-    }
-
-    // Create session relationship
-    const sessionNodes = await this.graphBackend.execute(
-      'MATCH (s:Session {sessionId: $sessionId}) RETURN s',
-      { sessionId: episode.sessionId }
-    );
-
-    let sessionNodeId: string;
-    if (sessionNodes.rows.length === 0) {
-      // Create session node if doesn't exist
-      sessionNodeId = await this.graphBackend.createNode(['Session'], {
-        sessionId: episode.sessionId,
-        startTime: episode.ts || Date.now(),
-      });
-    } else {
-      sessionNodeId = sessionNodes.rows[0].s.id;
-    }
-
-    await this.graphBackend.createRelationship(nodeId, sessionNodeId, 'BELONGS_TO_SESSION', {
-      timestamp: episode.ts || Date.now(),
-    });
-
-    // If episode has critique, create causal relationship to previous failures
-    if (episode.critique && !episode.success) {
-      const previousFailures = await this.graphBackend.execute(
-        `MATCH (e:Episode:Failure {sessionId: $sessionId})
-         WHERE e.timestamp < $timestamp
-         RETURN e
-         ORDER BY e.timestamp DESC
-         LIMIT 3`,
-        { sessionId: episode.sessionId, timestamp: episode.ts || Date.now() }
-      );
-
-      for (const prevFailure of previousFailures.rows) {
-        await this.graphBackend.createRelationship(nodeId, prevFailure.e.id, 'LEARNED_FROM', {
-          critique: episode.critique,
-          improvementAttempt: true,
-        });
-      }
-    }
-  }
-
-  /**
-   * Enhance query embedding using GNN attention mechanism
+   * Enhance query embedding using GNN attention mechanism.
+   * Uses the vector backend (in-memory accelerator) + a SQL fetch of the
+   * matched embeddings — no graph backend involved.
    */
   private async enhanceQueryWithGNN(
     queryEmbedding: Float32Array,
@@ -1079,7 +714,6 @@ export class ReflexionMemory {
     }
 
     try {
-      // Get initial neighbors
       const initialResults = this.vectorBackend.search(queryEmbedding, k * 2, {
         threshold: 0.0,
       });
@@ -1088,34 +722,26 @@ export class ReflexionMemory {
         return queryEmbedding;
       }
 
-      // Fetch neighbor embeddings
+      const episodeIds = initialResults.map((r) => parseInt(r.id)).filter((n) => Number.isFinite(n));
+      if (episodeIds.length === 0) return queryEmbedding;
+      const placeholders = episodeIds.map((_, i) => `$${i + 1}`).join(',');
+
+      const result = await this.db.query(
+        `SELECT ee.embedding, e.reward
+         FROM episode_embeddings ee
+         JOIN episodes e ON e.id = ee.episode_id
+         WHERE ee.episode_id IN (${placeholders})`,
+        episodeIds
+      );
+
       const neighborEmbeddings: Float32Array[] = [];
       const weights: number[] = [];
-
-      const episodeIds = initialResults.map((r) => r.id);
-      const placeholders = episodeIds.map(() => '?').join(',');
-      const episodes = this.db
-        .prepare(
-          `
-        SELECT ee.embedding, e.reward
-        FROM episode_embeddings ee
-        JOIN episodes e ON e.id = ee.episode_id
-        WHERE ee.episode_id IN (${placeholders})
-      `
-        )
-        .all(...episodeIds) as any[];
-
-      for (const ep of episodes) {
-        const embedding = this.deserializeEmbedding(ep.embedding);
-        neighborEmbeddings.push(embedding);
-        // Use reward as weight (higher reward = more important)
+      for (const ep of result.rows as Array<{ embedding: Buffer | Uint8Array; reward: number }>) {
+        neighborEmbeddings.push(this.deserializeEmbedding(ep.embedding));
         weights.push(Math.max(0.1, ep.reward));
       }
 
-      // Enhance query using GNN
-      const enhanced = this.learningBackend.enhance(queryEmbedding, neighborEmbeddings, weights);
-
-      return enhanced;
+      return this.learningBackend.enhance(queryEmbedding, neighborEmbeddings, weights);
     } catch (error) {
       console.warn('[ReflexionMemory] GNN enhancement failed:', error);
       return queryEmbedding;
@@ -1123,38 +749,50 @@ export class ReflexionMemory {
   }
 
   /**
-   * Get graph-based episode relationships
+   * Get SQL-derived episode relationships for an episode. Replaces the
+   * Cypher `MATCH ... OPTIONAL MATCH ...` graph traversal with a session
+   * + reward proximity SQL lookup.
+   *
+   * `similar` is determined by cosine similarity over episode_embeddings
+   * (limited to the same session for relevance); `learnedFrom` lists prior
+   * failures in the same session that this episode might be a reflection
+   * of (per Reflexion's causal-failure pattern).
    */
   async getEpisodeRelationships(episodeId: number): Promise<{
     similar: number[];
     session: string;
     learnedFrom: number[];
   }> {
-    if (!this.graphBackend) {
-      return { similar: [], session: '', learnedFrom: [] };
-    }
+    await this.ready;
 
-    const result = await this.graphBackend.execute(
-      `MATCH (e:Episode {episodeId: $episodeId})
-       OPTIONAL MATCH (e)-[:SIMILAR_TO]->(similar:Episode)
-       OPTIONAL MATCH (e)-[:BELONGS_TO_SESSION]->(s:Session)
-       OPTIONAL MATCH (e)-[:LEARNED_FROM]->(learned:Episode)
-       RETURN e, collect(DISTINCT similar.episodeId) as similar,
-              s.sessionId as session,
-              collect(DISTINCT learned.episodeId) as learnedFrom`,
-      { episodeId }
+    const epResult = await this.db.query(
+      `SELECT id, session_id, ts FROM episodes WHERE id = $1`,
+      [episodeId]
     );
-
-    if (result.rows.length === 0) {
+    if (epResult.rows.length === 0) {
       return { similar: [], session: '', learnedFrom: [] };
     }
+    const ep = epResult.rows[0] as { id: number | bigint | string; session_id: string; ts: number | bigint | string };
 
-    const row = result.rows[0];
-    return {
-      similar: (row.similar || []).filter((id: any) => id != null),
-      session: row.session || '',
-      learnedFrom: (row.learnedFrom || []).filter((id: any) => id != null),
-    };
+    const similarResult = await this.db.query(
+      `SELECT id FROM episodes
+       WHERE session_id = $1 AND id <> $2
+       ORDER BY ABS(ts - $3) ASC
+       LIMIT 5`,
+      [ep.session_id, episodeId, toNumber(ep.ts)]
+    );
+    const similar = (similarResult.rows as Array<{ id: number | bigint | string }>).map((r) => toNumber(r.id));
+
+    const learnedResult = await this.db.query(
+      `SELECT id FROM episodes
+       WHERE session_id = $1 AND success = FALSE AND ts < $2
+       ORDER BY ts DESC
+       LIMIT 3`,
+      [ep.session_id, toNumber(ep.ts)]
+    );
+    const learnedFrom = (learnedResult.rows as Array<{ id: number | bigint | string }>).map((r) => toNumber(r.id));
+
+    return { similar, session: ep.session_id, learnedFrom };
   }
 
   /**
@@ -1192,16 +830,6 @@ export class ReflexionMemory {
   }
 
   /**
-   * Get graph backend statistics
-   */
-  getGraphStats() {
-    if (!this.graphBackend) {
-      return null;
-    }
-    return this.graphBackend.getStats();
-  }
-
-  /**
    * Get query cache statistics
    */
   getCacheStats() {
@@ -1226,113 +854,50 @@ export class ReflexionMemory {
    * Warm cache with common queries
    */
   async warmCache(sessionId?: string): Promise<void> {
-    await this.queryCache.warm(async (cache) => {
-      // Warm cache with recent sessions if sessionId provided
+    await this.queryCache.warm(async (_cache) => {
       if (sessionId) {
-        const recent = await this.getRecentEpisodes(sessionId, 10);
-        // Episodes are already loaded, cache will be populated on next access
+        await this.getRecentEpisodes(sessionId, 10);
       }
     });
   }
 
   /**
-   * Delete an episode by id. Closes the gap from issue #150 (downstream:
-   * ruflo#1784, RuVector#427) — once an episode is written there was no
-   * first-class way to remove it through any backend.
+   * Delete an episode by id.
    *
-   * Strategy mirrors storeEpisode: when a graph backend is present we go
-   * through it (`graphAdapter.deleteNode` / `graphBackend.deleteNode` —
-   * both Cypher-backed under the hood), and we ALWAYS also purge the SQL
-   * `episodes` and `episode_embeddings` rows so durable storage stays in
-   * sync. Vector backend entries are removed too when present.
-   *
-   * @returns True if the episode existed in any backend and was removed.
+   * Removes the SQL `episodes` and `episode_embeddings` rows (FK CASCADE
+   * handles the latter when present, but we issue both deletes for
+   * defence-in-depth across drivers). Also clears the vector-backend
+   * accelerator entry when wired.
    */
   async deleteEpisode(id: number | string): Promise<boolean> {
-    const numericId = typeof id === 'number' ? id : parseInt(String(id), 10);
-    const stringId = String(id);
+    await this.ready;
 
-    // Invalidate caches up front — failures below shouldn't leave stale reads.
+    const numericId = typeof id === 'number' ? id : parseInt(String(id), 10);
+
     this.queryCache.invalidateCategory('episodes');
     this.queryCache.invalidateCategory('task-stats');
 
     let removed = false;
 
-    // 1. Graph adapter (AgentDB v2 fast path)
-    if (this.graphBackend && 'storeEpisode' in this.graphBackend) {
-      const adapter = this.graphBackend as any;
-      if (typeof adapter.deleteNode === 'function') {
-        try {
-          // Adapter accepts either the canonical "episode-<id>" key or a raw
-          // id; try the canonical form first since that's what storeEpisode
-          // emits.
-          const r = await adapter.deleteNode(`episode-${numericId}`, { cascade: true });
-          if (r?.deletedNode) removed = true;
-          if (!removed) {
-            const r2 = await adapter.deleteNode(stringId, { cascade: true });
-            if (r2?.deletedNode) removed = true;
-          }
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          // eslint-disable-next-line no-console
-          console.warn(`[ReflexionMemory] deleteEpisode: graph adapter delete failed: ${msg}`);
-        }
-      }
-    }
-    // 2. Generic graph backend
-    else if (this.graphBackend && typeof (this.graphBackend as any).deleteNode === 'function') {
-      try {
-        const r = await (this.graphBackend as any).deleteNode(stringId);
-        if (r === true) removed = true;
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        // eslint-disable-next-line no-console
-        console.warn(`[ReflexionMemory] deleteEpisode: graph backend delete failed: ${msg}`);
-      }
-    }
-
-    // 3. Vector backend (HNSW/RuVector); some implementations don't expose
-    //    delete — guard with a feature check.
     if (this.vectorBackend && typeof (this.vectorBackend as any).delete === 'function') {
       try {
         const r = await (this.vectorBackend as any).delete(String(numericId));
         if (r === true) removed = true;
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
-        // eslint-disable-next-line no-console
         console.warn(`[ReflexionMemory] deleteEpisode: vector backend delete failed: ${msg}`);
       }
     }
 
-    // 4. SQL durable storage — always attempt so persistence stays clean
-    //    even when the primary backend was a no-op.
-    if (this.db && typeof this.db.prepare === 'function' && Number.isFinite(numericId)) {
+    if (Number.isFinite(numericId)) {
       try {
-        const embStmt = this.db.prepare(
-          `DELETE FROM episode_embeddings WHERE episode_id = ?`
-        );
-        embStmt.run(numericId);
-        // ADR-0166 Phase 3 (Option F): mirror delete into reflexion_episode_vec.
-        // ID stringified to match the TEXT auxiliary column type.
-        if (this.optionFEnabled) {
-          try {
-            this.db.prepare(`DELETE FROM reflexion_episode_vec WHERE id = ?`).run(String(numericId));
-          } catch (vecErr) {
-            const vecMsg = vecErr instanceof Error ? vecErr.message : String(vecErr);
-            // eslint-disable-next-line no-console
-            console.warn(`[ReflexionMemory] Option F vec delete failed for episode=${numericId}: ${vecMsg}`);
-          }
-        }
-        const stmt = this.db.prepare(`DELETE FROM episodes WHERE id = ?`);
-        const r = stmt.run(numericId);
-        const changes = (r as any)?.changes ?? 0;
+        await this.db.query(`DELETE FROM episode_embeddings WHERE episode_id = $1`, [numericId]);
+        const r = await this.db.query(`DELETE FROM episodes WHERE id = $1`, [numericId]);
+        const changes = (r as any).rowCount ?? 0;
         if (changes > 0) removed = true;
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
-        if (!/no such table/i.test(msg)) {
-          // eslint-disable-next-line no-console
-          console.warn(`[ReflexionMemory] deleteEpisode: SQL delete failed: ${msg}`);
-        }
+        console.warn(`[ReflexionMemory] deleteEpisode: SQL delete failed: ${msg}`);
       }
     }
 
@@ -1340,126 +905,64 @@ export class ReflexionMemory {
   }
 
   /**
-   * Dual-write helper for issue #128.
+   * Rebuild the in-memory vector index from the postgres `episodes` /
+   * `episode_embeddings` tables. Used as a recovery path after the
+   * accelerator's in-memory state was lost across a process restart.
    *
-   * Inserts the given episode into the SQLite `episodes` and
-   * `episode_embeddings` tables when the underlying connection supports it.
-   * Used when a graph or vector backend handles the primary index but the
-   * caller still wants restart-safe persistence.
-   *
-   * Errors are swallowed and logged — the primary write to the graph/vector
-   * backend has already succeeded, and we don't want to fail the caller if
-   * SQL persistence is unavailable (e.g. read-only DB, schema not present).
-   */
-  private dualWriteEpisodeToSQL(episode: Episode, embedding?: Float32Array): void {
-    if (!this.db || typeof this.db.prepare !== 'function') return;
-    try {
-      const stmt = this.db.prepare(`
-        INSERT INTO episodes (
-          session_id, task, input, output, critique, reward, success,
-          latency_ms, tokens_used, tags, metadata
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `);
-      const tags = episode.tags ? JSON.stringify(episode.tags) : null;
-      const metadata = episode.metadata ? JSON.stringify(episode.metadata) : null;
-      const result = stmt.run(
-        episode.sessionId,
-        episode.task,
-        episode.input ?? null,
-        episode.output ?? null,
-        episode.critique ?? null,
-        episode.reward,
-        episode.success ? 1 : 0,
-        episode.latencyMs ?? null,
-        episode.tokensUsed ?? null,
-        tags,
-        metadata
-      );
-      if (embedding) {
-        const episodeId = normalizeRowId(result.lastInsertRowid);
-        this.storeEmbedding(episodeId, embedding);
-      }
-    } catch (err) {
-      // The expected failure here is "no such table: episodes" on databases
-      // that intentionally don't carry the v1 schema. Don't escalate — the
-      // primary backend already has the data.
-      const msg = err instanceof Error ? err.message : String(err);
-      if (!/no such table/i.test(msg)) {
-        // eslint-disable-next-line no-console
-        console.warn('[ReflexionMemory] dualWriteEpisodeToSQL failed:', msg);
-      }
-    }
-  }
-
-  /**
-   * Rebuild the in-memory vector index from the SQLite `episodes` /
-   * `episode_embeddings` tables, going through the proper backend channels
-   * so `retrieveRelevant()` sees the data afterwards.
-   *
-   * Fixes the user's recovery use-case from issue #129: rather than calling
-   * `vectorBackend.getInner().insert()` directly (which bypasses the
-   * GuardedBackend wrapper and confuses retrieveRelevant), call this method
-   * to re-hydrate the vector and graph indices from durable storage.
-   *
-   * Returns the number of episodes re-indexed. No-ops cleanly when the SQL
-   * tables are empty or absent.
+   * Returns the number of episodes re-indexed. No-ops when the SQL
+   * tables are empty.
    */
   async rebuildIndex(options: { fromTimestamp?: number } = {}): Promise<number> {
-    if (!this.db || typeof this.db.prepare !== 'function') return 0;
+    await this.ready;
 
-    const where = options.fromTimestamp !== undefined ? 'WHERE e.ts >= ?' : '';
-    const params: any[] = options.fromTimestamp !== undefined ? [options.fromTimestamp] : [];
-    let rows: any[] = [];
-    try {
-      const stmt = this.db.prepare(`
-        SELECT
-          e.id, e.ts, e.session_id, e.task, e.input, e.output, e.critique,
-          e.reward, e.success, e.latency_ms, e.tokens_used, e.tags, e.metadata,
-          ee.embedding
-        FROM episodes e
-        LEFT JOIN episode_embeddings ee ON ee.episode_id = e.id
-        ${where}
-        ORDER BY e.id ASC
-      `);
-      rows = stmt.all(...params) as any[];
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      if (/no such table/i.test(msg)) return 0;
-      throw err;
+    const params: any[] = [];
+    let where = '';
+    if (options.fromTimestamp !== undefined) {
+      where = 'WHERE e.ts >= $1';
+      params.push(options.fromTimestamp);
     }
+
+    const result = await this.db.query(
+      `SELECT
+         e.id, e.ts, e.session_id, e.task, e.input, e.output, e.critique,
+         e.reward, e.success, e.latency_ms, e.tokens_used, e.tags, e.metadata,
+         ee.embedding
+       FROM episodes e
+       LEFT JOIN episode_embeddings ee ON ee.episode_id = e.id
+       ${where}
+       ORDER BY e.id ASC`,
+      params
+    );
+    const rows = result.rows as Array<EpisodeRow & { embedding: Buffer | Uint8Array | null }>;
 
     let reindexed = 0;
     for (const row of rows) {
       const episode: Episode = {
-        id: row.id,
-        ts: row.ts,
+        id: toNumber(row.id),
+        ts: toNumber(row.ts),
         sessionId: row.session_id,
         task: row.task,
         input: row.input ?? undefined,
         output: row.output ?? undefined,
         critique: row.critique ?? undefined,
         reward: row.reward,
-        success: row.success === 1,
-        latencyMs: row.latency_ms ?? undefined,
-        tokensUsed: row.tokens_used ?? undefined,
+        success: row.success === true,
+        latencyMs: row.latency_ms !== null ? toNumber(row.latency_ms) : undefined,
+        tokensUsed: row.tokens_used !== null ? toNumber(row.tokens_used) : undefined,
         tags: row.tags ? JSON.parse(row.tags) : undefined,
-        metadata: row.metadata ? JSON.parse(row.metadata) : undefined,
+        metadata: row.metadata ? (typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata) : undefined,
       };
 
-      // Prefer the stored embedding; fall back to recomputing if missing.
-      let embedding: Float32Array | undefined;
+      let embedding: Float32Array;
       if (row.embedding) {
-        const buf: Buffer = row.embedding;
-        embedding = new Float32Array(buf.buffer, buf.byteOffset, buf.length / 4);
+        embedding = this.deserializeEmbedding(row.embedding);
       } else {
         embedding = await this.embedder.embed(this.buildEpisodeText(episode));
       }
 
-      // Re-insert through the proper public APIs so the GuardedBackend
-      // wrapper, graph adapter, and HNSW all stay in sync.
       if (this.vectorBackend) {
         try {
-          this.vectorBackend.insert(String(row.id), embedding, {
+          this.vectorBackend.insert(String(toNumber(row.id)), embedding, {
             type: 'episode',
             sessionId: episode.sessionId,
             reward: episode.reward,
@@ -1467,45 +970,25 @@ export class ReflexionMemory {
           });
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
-          // eslint-disable-next-line no-console
-          console.warn(`[ReflexionMemory] rebuildIndex: vector insert failed for ${row.id}: ${msg}`);
-        }
-      }
-
-      if (this.graphBackend && 'storeEpisode' in this.graphBackend) {
-        const adapter = this.graphBackend as any as GraphDatabaseAdapter;
-        try {
-          await adapter.storeEpisode(
-            {
-              id: `episode-${row.id}`,
-              sessionId: episode.sessionId,
-              task: episode.task,
-              reward: episode.reward,
-              success: episode.success,
-              input: episode.input,
-              output: episode.output,
-              critique: episode.critique,
-              createdAt: (episode.ts ?? Date.now() / 1000) * 1000,
-              tokensUsed: episode.tokensUsed,
-              latencyMs: episode.latencyMs,
-            },
-            embedding
-          );
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          // eslint-disable-next-line no-console
-          console.warn(`[ReflexionMemory] rebuildIndex: graph store failed for ${row.id}: ${msg}`);
+          console.warn(`[ReflexionMemory] rebuildIndex: vector insert failed for ${toNumber(row.id)}: ${msg}`);
         }
       }
 
       reindexed++;
     }
 
-    // Bust any stale read caches so the next retrieveRelevant sees the
-    // freshly-rebuilt index.
     this.queryCache.invalidateCategory('episodes');
     this.queryCache.invalidateCategory('task-stats');
 
     return reindexed;
   }
+}
+
+function toNumber(v: number | bigint | string | null | undefined): number {
+  if (v === null || v === undefined) {
+    throw new Error('toNumber: received null/undefined');
+  }
+  if (typeof v === 'string') return parseInt(v, 10);
+  if (typeof v === 'bigint') return Number(v);
+  return v;
 }

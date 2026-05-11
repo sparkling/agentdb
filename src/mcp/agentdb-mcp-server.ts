@@ -356,26 +356,18 @@ db.exec(`
 `);
 
 // Initialize all controllers
-// ADR-0056: pass vectorBackend to controllers that support it
-// ADR-0170 Phase B.2: ReflexionMemory now runs on PostgresBackend
-// (pglite embedded by default). Other controllers retain the SQLite `db`
-// handle until their own Phase B commit lands. The MCP server boot path
-// holds both substrates side-by-side during the rollout window.
+// ADR-0170 Phase B (Wave 1a end): all 9 ported controllers consume the
+// shared PostgresBackend. The `db` (SQLite) handle remains for
+// BatchOperations and other unported call sites; Wave 1b ports those.
 const { PostgresBackend } = await import('../backends/postgres/PostgresBackend.js');
 const postgresBackend = new PostgresBackend({ metric: 'cosine' });
+await postgresBackend.initialize();
 const reflexion = new ReflexionMemory(postgresBackend, embeddingService, vectorBackend);
-const skills = new SkillLibrary(db, embeddingService, vectorBackend);
-const causalRecall = new CausalRecall(db, embeddingService, vectorBackend);
-const reasoningBank = new ReasoningBank(db, embeddingService, vectorBackend);
-// These don't take vectorBackend:
-// ADR-0170 Phase B.7: CausalMemoryGraph routes through the same
-// PostgresBackend B-2 constructed for ReflexionMemory above.
+const skills = new SkillLibrary(postgresBackend, embeddingService, vectorBackend);
+const causalRecall = new CausalRecall(postgresBackend, embeddingService, vectorBackend);
+const reasoningBank = new ReasoningBank(postgresBackend, embeddingService, vectorBackend);
 const causalGraph = new CausalMemoryGraph(postgresBackend);
-const learner = new NightlyLearner(db, embeddingService);
-// ADR-0170 Phase B.6: LearningSystem routes through the same PostgresBackend
-// constructed for ReflexionMemory / CausalMemoryGraph above. GROUP BY queries
-// hardened to postgres strictness; the SQLite path and learning_vec mirror
-// writes are dead-stripped from the controller.
+const learner = new NightlyLearner(postgresBackend, embeddingService);
 const learningSystem = new LearningSystem(postgresBackend, embeddingService);
 const batchOps = new BatchOperations(db, embeddingService);
 const caches = new MCPToolCaches();

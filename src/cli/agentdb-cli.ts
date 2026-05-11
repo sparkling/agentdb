@@ -203,24 +203,23 @@ class AgentDBCLI {
     });
     await this.embedder.initialize();
 
-    // ADR-0170 Phase B.2 + B.7: PostgresBackend hosts the migrated
-    // controllers (ReflexionMemory, CausalMemoryGraph) alongside the
-    // legacy SQLite handle. Other controllers retain the SQLite `db`
-    // until their own Phase B commits land; the CLI boot path holds
-    // both substrates side-by-side during the Wave 1a rollout.
+    // ADR-0170 Phase B (Wave 1a end): all 9 ported controllers route
+    // through the shared PostgresBackend. The CLI `this.db` SQLite handle
+    // remains for Wave 1b-bound consumers (none in this file post-Wave-1a).
     const { PostgresBackend } = await import('../backends/postgres/PostgresBackend.js');
     const postgresBackend = new PostgresBackend({ metric: 'cosine' });
+    await postgresBackend.initialize();
 
     // Initialize controllers
     this.causalGraph = new CausalMemoryGraph(postgresBackend);
-    this.explainableRecall = new ExplainableRecall(this.db);
-    this.causalRecall = new CausalRecall(this.db, this.embedder, undefined, {
+    this.explainableRecall = new ExplainableRecall(postgresBackend);
+    this.causalRecall = new CausalRecall(postgresBackend, this.embedder, undefined, {
       alpha: 0.7,
       beta: 0.2,
       gamma: 0.1,
       minConfidence: 0.6
     });
-    this.nightlyLearner = new NightlyLearner(this.db, this.embedder);
+    this.nightlyLearner = new NightlyLearner(postgresBackend, this.embedder);
 
     this.reflexion = new ReflexionMemory(
       postgresBackend,
@@ -228,7 +227,7 @@ class AgentDBCLI {
       undefined,  // vectorBackend - would be created with detectBackends()
       undefined,  // learningBackend - requires @ruvector/gnn
     );
-    this.skills = new SkillLibrary(this.db, this.embedder);
+    this.skills = new SkillLibrary(postgresBackend, this.embedder);
   }
 
   // ============================================================================

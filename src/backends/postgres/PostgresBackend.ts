@@ -236,7 +236,11 @@ export class PostgresBackend implements VectorBackend {
 
     let Client: new (cfg: { connectionString: string }) => PgServerClient;
     try {
+      // pg is in `dependencies` but @types/pg is not installed in this
+      // package (server mode is opt-in and out-of-scope for type checking
+      // in Phase A/B). The runtime import succeeds when pg is installed.
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      // @ts-ignore - pg has no type declarations available in this repo
       const pg: any = await import('pg');
       Client = pg.Client ?? pg.default?.Client;
       if (typeof Client !== 'function') {

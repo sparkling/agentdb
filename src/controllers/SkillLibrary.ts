@@ -60,11 +60,14 @@ export interface SkillQuery {
 let _singleton: InstanceType<typeof SkillLibrary> | null = null;
 
 export class SkillLibrary {
-  private db: PostgresBackend;
-  private embedder: EmbeddingService;
-  private vectorBackend: VectorBackend | null;
-  private queryCache: QueryCache;
-  private schemaReady: Promise<void>;
+  // ADR-0076 A4: definite-assignment due to _singleton early-return pattern
+  // in the constructor. TS doesn't see that the early-return is reachable
+  // before assignment.
+  private db!: PostgresBackend;
+  private embedder!: EmbeddingService;
+  private vectorBackend!: VectorBackend | null;
+  private queryCache!: QueryCache;
+  private schemaReady!: Promise<void>;
 
   static _resetSingleton(): void { _singleton = null; }
 

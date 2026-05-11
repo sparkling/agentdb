@@ -183,28 +183,22 @@ export class AgentDB {
   async initialize(): Promise<void> {
     if (this.initialized) return;
 
-    // Dynamic import: try better-sqlite3 (native), fallback to sql.js (WASM)
-    const dbPath = this.config.dbPath || ':memory:';
-    // ADR-0069 A1: config-chain SQLite pragmas
-    const sq = this.config.sqlite;
-    try {
-      const Database = (await import('better-sqlite3')).default;
-      this.db = new Database(dbPath);
-      this.db.pragma(`journal_mode = ${sq?.journalMode ?? 'WAL'}`);
-      this.db.pragma(`synchronous = ${sq?.synchronous ?? 'NORMAL'}`);
-      this.db.pragma(`cache_size = ${sq?.cacheSize ?? -64000}`);
-      this.db.pragma(`busy_timeout = ${sq?.busyTimeoutMs ?? 5000}`);
-      console.log('✅ Using better-sqlite3 (native performance)');
-    } catch {
-      console.log('⚠️  better-sqlite3 unavailable, using sql.js (WASM fallback)');
-      const { getDatabaseImplementation } = await import('../db-fallback.js');
-      const DatabaseImpl = await getDatabaseImplementation();
-      this.db = new DatabaseImpl(dbPath);
-      // ADR-0069 A1: config-chain SQLite pragmas (WASM — skip journal_mode=WAL, not supported)
-      this.db.pragma(`cache_size = ${sq?.cacheSize ?? -64000}`);
-      this.db.pragma(`busy_timeout = ${sq?.busyTimeoutMs ?? 5000}`);
-      this.usingWasm = true;
-    }
+    // ADR-0170 Phase B (Wave 1a end): open PostgresBackend as the sole
+    // relational substrate. The better-sqlite3 / sql.js fallback path
+    // dead-strips here — every controller in Wave 1a expects a
+    // PostgresBackend handle. The legacy `this.db` field stays for
+    // backward-compat with non-controller call sites that still reference
+    // it (queryOptimizer, batchOperations, wasmVectorSearch lazy-construct
+    // against it). Phase D removes the field entirely.
+    this.postgresBackend = this.getPostgresBackend();
+    await this.postgresBackend.initialize();
+    // `this.db` is set to the PostgresBackend for the legacy lazy-construct
+    // call sites (QueryOptimizer/BatchOperations/WASMVectorSearch). Those
+    // controllers consume `database` directly; they receive the postgres
+    // handle which has `query()` / `exec()` shape, not the SQLite
+    // `prepare()`/`exec()` shape. Phase B Wave 1b ports the remaining
+    // controllers; Phase D removes the legacy field outright.
+    this.db = this.postgresBackend;
 
     // Resolve embedding config from layered sources (env, file, registry, overrides)
     const embConfig = getEmbeddingConfig({
@@ -213,17 +207,17 @@ export class AgentDB {
     });
     const dim = embConfig.dimension;
 
-    // Load schemas
+    // Load schemas — PostgreSQL dialect (ported by Phase A.5 commit 590b6c2).
     const schemaPath = path.join(__dirname, '../../schemas/schema.sql');
     if (fs.existsSync(schemaPath)) {
       const schema = fs.readFileSync(schemaPath, 'utf-8');
-      this.db.exec(schema);
+      await this.postgresBackend.exec(schema);
     }
 
     const frontierSchemaPath = path.join(__dirname, '../../schemas/frontier-schema.sql');
     if (fs.existsSync(frontierSchemaPath)) {
       const frontierSchema = fs.readFileSync(frontierSchemaPath, 'utf-8');
-      this.db.exec(frontierSchema);
+      await this.postgresBackend.exec(frontierSchema);
     }
 
     // Initialize embedder using centralized config
@@ -301,15 +295,14 @@ export class AgentDB {
       );
     }
 
-    // ADR-0166 Phase 3 (Option F): try to load the sqlite-vec extension.
-    // - WASM substrate: extension loading unsupported; loud-error iff user
-    //   explicitly opted in (vectorIndex='sqlite-vec') per feedback-no-fallbacks.
-    // - Native substrate: try sqliteVec.load(); on failure, loud-error iff opted in,
-    //   else proceed in degraded mode (pre-Option-F path remains valid).
-    this._sqliteVecLoaded = await this.tryLoadSqliteVec(resolvedVI);
-    if (this._sqliteVecLoaded) {
-      this.createOptionFVirtualTables(dim);
-    }
+    // ADR-0170 Phase B (Wave 1a end): sqlite-vec Option F is retired for
+    // ported controllers — vectors become first-class columns under
+    // pgvector in Phase C. The tryLoadSqliteVec() + createOptionFVirtualTables()
+    // methods remain in this file for the moment so the legacy
+    // sqliteVecLoaded getter still resolves to `false`; Phase D removes
+    // them outright. The flags below are pinned false so any consumer
+    // still reading them (none expected) sees the substrate-retired state.
+    this._sqliteVecLoaded = false;
 
     // Initialize proof-gated vector backend (ADR-060)
     // ADR-0166 Phase 1: honor the resolved vectorIndex (was hard-coded 'auto').
@@ -357,33 +350,43 @@ export class AgentDB {
       });
     }
 
-    // Initialize controllers — wire vectorBackend where supported
-    this.reflexion = new ReflexionMemory(this.db, this.embedder, controllerVB ?? undefined);
-    this.skills = new SkillLibrary(this.db, this.embedder, controllerVB ?? undefined);
-    this.reasoning = new ReasoningBank(this.db, this.embedder, controllerVB ?? undefined);
+    // ADR-0170 Phase B (Wave 1a end): all 9 ported controllers consume
+    // PostgresBackend (pglite-embedded by default; postgres-server when
+    // AGENTDB_POSTGRES_URL or config.connectionString is set). Constructor
+    // signatures changed during Wave 1a — notably CausalMemoryGraph dropped
+    // graphAdapter (now 5 args), SkillLibrary dropped graphBackend.
+    // Wave 1b ports the dependent controllers (MemoryConsolidation, etc.).
+    this.reflexion = new ReflexionMemory(this.postgresBackend, this.embedder, controllerVB ?? undefined);
+    this.skills = new SkillLibrary(this.postgresBackend, this.embedder, controllerVB ?? undefined);
+    this.reasoning = new ReasoningBank(this.postgresBackend, this.embedder, controllerVB ?? undefined);
+    // The AttentionService argument is cast to `any` because each
+    // controller imports the LegacyAttentionAdapter wrapper class
+    // (utils/LegacyAttentionAdapter), not the production
+    // controllers/AttentionService that AgentDB constructs. The wrapper
+    // class is name-equivalent but a distinct TS type. Phase D will
+    // consolidate the two surfaces.
+    const attentionArg = (this.attentionService ?? undefined) as any;
     this.causalGraph = new CausalMemoryGraph(
-      this.db, undefined, undefined, undefined, undefined,
-      this.attentionService,
+      this.postgresBackend,
+      undefined, // embedder
+      undefined, // config
+      undefined, // vectorBackend
+      attentionArg,
     );
     this.explainableRecall = new ExplainableRecall(
-      this.db, this.embedder, undefined,
-      this.attentionService,
+      this.postgresBackend, this.embedder, undefined,
+      attentionArg,
     );
-    // ADR-0170 Phase B.6: LearningSystem now runs on PostgresBackend.
-    // GROUP BY queries hardened to postgres strictness — every non-aggregate
-    // SELECT column appears in GROUP BY; date-bucketed aggregates use the
-    // computed expression verbatim, not a SELECT alias. Sibling controllers
-    // retain their SQLite `this.db` handle until their own Phase B commit lands.
-    this.learningSystem = new LearningSystem(this.getPostgresBackend(), this.embedder);
+    this.learningSystem = new LearningSystem(this.postgresBackend, this.embedder);
     this.causalRecall = new CausalRecall(
-      this.db, this.embedder, controllerVB ?? undefined,
+      this.postgresBackend, this.embedder, controllerVB ?? undefined,
       undefined, // config — use default
       this.causalGraph, this.explainableRecall,
     );
     this.nightlyLearner = new NightlyLearner(
-      this.db, this.embedder, undefined, // config — use default
+      this.postgresBackend, this.embedder, undefined, // config — use default
       this.causalGraph, this.reflexion, this.skills,
-      this.attentionService,
+      attentionArg,
     );
 
     // Initialize optional graph database adapter (gated by enableGraph config)
@@ -477,15 +480,19 @@ export class AgentDB {
       case 'attentionService':
         return this.attentionService;
       case 'hierarchicalMemory':
-        // ADR-0170 Phase B.1: HierarchicalMemory runs on PostgresBackend
-        // (pglite-embedded by default, postgres-server when AGENTDB_POSTGRES_URL
-        // or config.connectionString is set). Sibling controllers retain
-        // their SQLite `this.db` handle until their own Phase B commit lands.
+        // ADR-0170 Phase B (Wave 1a end): HierarchicalMemory routes through
+        // the same shared PostgresBackend instance as the rest of the Wave 1a
+        // controllers. PostgresBackend.initialize() is idempotent — already
+        // awaited at AgentDB.initialize() before this lazy switch is hit.
         return (this.hierarchicalMemory ??= new HierarchicalMemory(
-          this.getPostgresBackend(),
+          this.postgresBackend!,
           this.embedder,
         ));
       case 'memoryConsolidation':
+        // Wave 1b will port MemoryConsolidation to PostgresBackend; for now
+        // it consumes `this.db` (which is the PostgresBackend handle assigned
+        // in initialize(), so legacy `prepare()`/`exec()` calls will throw
+        // loud at runtime until the port lands).
         return (this.memoryConsolidation ??= new MemoryConsolidation(
           this.db,
           this.getController('hierarchicalMemory'),

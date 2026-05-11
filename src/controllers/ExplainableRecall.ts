@@ -99,10 +99,10 @@ export interface ProvenanceSource {
 let _singleton: InstanceType<typeof ExplainableRecall> | null = null;
 
 export class ExplainableRecall {
-  private db: PostgresBackend;
+  // ADR-0076 A4: definite-assignment due to _singleton early-return pattern in ctor
+  private db!: PostgresBackend;
   private attentionService?: AttentionService;
   private embedder?: EmbeddingService;
-  // ADR-0076 A4: definite-assignment due to _singleton early-return pattern in ctor
   private config!: ExplainableRecallConfig;
 
   /**

@@ -94,9 +94,12 @@ export class AgentDBFast extends EventEmitter {
 
       await this.db.initialize();
 
-      // Access the vector backend directly (it's a property, not a method)
-      if (this.db.vectorBackend) {
-        this.backend = this.db.vectorBackend;
+      // Access the vector backend via getController (the underlying field
+      // is private). Falls through to the "not available" error when the
+      // factory returned null in initialize().
+      const vb = this.db.getController('vectorBackend');
+      if (vb) {
+        this.backend = vb;
       } else {
         throw new Error('Vector backend not available');
       }

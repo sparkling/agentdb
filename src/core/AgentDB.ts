@@ -494,12 +494,13 @@ export class AgentDB {
           this.embedder,
         ));
       case 'memoryConsolidation':
-        // Wave 1b will port MemoryConsolidation to PostgresBackend; for now
-        // it consumes `this.db` (which is the PostgresBackend handle assigned
-        // in initialize(), so legacy `prepare()`/`exec()` calls will throw
-        // loud at runtime until the port lands).
+        // ADR-0170 Phase B.10 (2026-05-11): ported to PostgresBackend.
+        // Shares the same `postgresBackend` instance that HierarchicalMemory
+        // uses (its `hierarchical_memory` table is what this controller
+        // reads). PostgresBackend.initialize() is idempotent and was already
+        // awaited at AgentDB.initialize() before this lazy switch is hit.
         return (this.memoryConsolidation ??= new MemoryConsolidation(
-          this.db,
+          this.postgresBackend!,
           this.getController('hierarchicalMemory'),
           this.embedder,
         ));

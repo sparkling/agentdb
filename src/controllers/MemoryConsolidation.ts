@@ -18,15 +18,19 @@
  * 6. Schedule spaced repetition for important memories
  *
  * ADR-066 Phase P2-3
+ *
+ * ADR-0170 Phase B.10 (2026-05-11): ported from SQLite (better-sqlite3) to
+ * PostgreSQL via PostgresBackend. The sqlite code path was dead-stripped
+ * atomically with this commit. Reads HierarchicalMemory's
+ * `hierarchical_memory` table (ported in Wave 1a / B.1). Public methods
+ * are async because pglite is Promise-based.
  */
 
+import type { PostgresBackend } from '../backends/postgres/PostgresBackend.js';
 import type { VectorBackend } from '../backends/VectorBackend.js';
 import { HierarchicalMemory, type MemoryItem, type MemoryTier } from './HierarchicalMemory.js';
 import { EmbeddingService } from './EmbeddingService.js';
 import { cosineSimilarity } from '../utils/vector-math.js';
-
-// Database type from db-fallback
-type Database = any;
 
 /** Consolidation result report */
 export interface ConsolidationReport {
@@ -80,24 +84,63 @@ export interface ConsolidationConfig {
   forgettingThreshold: number;
 }
 
+/**
+ * Row shape returned by postgres SELECTs against `hierarchical_memory`.
+ * Mirrors HierarchicalMemory's private interface — duplicated here to keep
+ * the row hydration local to this controller.
+ */
+interface HierarchicalMemoryRow {
+  id: string;
+  tier: MemoryTier;
+  content: string;
+  importance: number;
+  access_count: number;
+  created_at: number;
+  last_accessed_at: number;
+  last_rehearsed_at: number | null;
+  consolidated_at: number | null;
+  tags: string | null;
+  context: string | null;
+  metadata: string | null;
+}
+
+interface SpacedRepetitionRow {
+  memory_id: string;
+  next_review: number;
+  interval: number;
+  ease_factor: number;
+  repetitions: number;
+}
+
+interface ConsolidationLogRow {
+  timestamp: number;
+  execution_time_ms: number;
+  episodic_processed: number;
+  semantic_created: number;
+  memories_forgotten: number;
+  clusters_formed: number;
+  retention_rate: number;
+}
+
 export class MemoryConsolidation {
-  private db: Database;
+  private backend: PostgresBackend;
   private hierarchicalMemory: HierarchicalMemory;
   private embedder: EmbeddingService;
   private vectorBackend?: VectorBackend;
   private config: ConsolidationConfig;
+  private schemaReady: Promise<void>;
 
   // Spaced repetition tracking
   private repetitionSchedules = new Map<string, RepetitionSchedule>();
 
   constructor(
-    db: Database,
+    backend: PostgresBackend,
     hierarchicalMemory: HierarchicalMemory,
     embedder: EmbeddingService,
     vectorBackend?: VectorBackend,
     config?: Partial<ConsolidationConfig>
   ) {
-    this.db = db;
+    this.backend = backend;
     this.hierarchicalMemory = hierarchicalMemory;
     this.embedder = embedder;
     this.vectorBackend = vectorBackend;
@@ -115,42 +158,53 @@ export class MemoryConsolidation {
       ...config,
     };
 
-    this.initializeDatabase();
-    this.loadRepetitionSchedules();
+    this.schemaReady = this.initializeDatabase();
   }
 
   /**
-   * Initialize database tables for consolidation tracking
+   * Initialize database tables for consolidation tracking and hydrate the
+   * in-memory spaced-repetition schedule cache.
+   *
+   * `backend.initialize()` is idempotent — the first controller to touch
+   * the shared PostgresBackend pays the cluster-warm-up cost; subsequent
+   * controllers no-op. The returned promise is awaited by every public
+   * method before issuing its own SQL, so callers don't have to gate on a
+   * separate ready() promise.
    */
-  private initializeDatabase(): void {
-    this.db.exec(`
+  private async initializeDatabase(): Promise<void> {
+    await this.backend.initialize();
+    await this.backend.exec(`
       CREATE TABLE IF NOT EXISTS consolidation_log (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        timestamp INTEGER NOT NULL,
-        execution_time_ms INTEGER NOT NULL,
-        episodic_processed INTEGER NOT NULL,
-        semantic_created INTEGER NOT NULL,
-        memories_forgotten INTEGER NOT NULL,
-        clusters_formed INTEGER NOT NULL,
+        id BIGSERIAL PRIMARY KEY,
+        timestamp BIGINT NOT NULL,
+        execution_time_ms BIGINT NOT NULL,
+        episodic_processed BIGINT NOT NULL,
+        semantic_created BIGINT NOT NULL,
+        memories_forgotten BIGINT NOT NULL,
+        clusters_formed BIGINT NOT NULL,
         retention_rate REAL NOT NULL
       );
 
       CREATE TABLE IF NOT EXISTS spaced_repetition (
         memory_id TEXT PRIMARY KEY,
-        next_review INTEGER NOT NULL,
-        interval INTEGER NOT NULL,
+        next_review BIGINT NOT NULL,
+        interval BIGINT NOT NULL,
         ease_factor REAL NOT NULL,
-        repetitions INTEGER NOT NULL
+        repetitions BIGINT NOT NULL
       );
 
       CREATE INDEX IF NOT EXISTS idx_spaced_next_review ON spaced_repetition(next_review);
     `);
+
+    await this.loadRepetitionSchedules();
   }
 
   /**
    * Run nightly consolidation process
    */
   async consolidate(): Promise<ConsolidationReport> {
+    await this.schemaReady;
+
     console.log('\n🌙 Starting Memory Consolidation...\n');
     const startTime = Date.now();
 
@@ -223,7 +277,7 @@ export class MemoryConsolidation {
       report.executionTimeMs = Date.now() - startTime;
 
       // Log consolidation
-      this.logConsolidation(report);
+      await this.logConsolidation(report);
 
       console.log('\n✅ Memory Consolidation Complete');
       console.log(`   Time: ${report.executionTimeMs}ms`);
@@ -241,13 +295,17 @@ export class MemoryConsolidation {
    * Get episodic memories that are candidates for consolidation
    */
   private async getConsolidationCandidates(): Promise<MemoryItem[]> {
-    const rows = this.db.prepare(`
-      SELECT * FROM hierarchical_memory
-      WHERE tier = 'episodic'
-        AND importance >= ?
-        AND access_count >= ?
-      ORDER BY importance DESC, access_count DESC
-    `).all(this.config.importanceThreshold, this.config.minAccessCount);
+    await this.schemaReady;
+
+    const res = await this.backend.query(
+      `SELECT * FROM hierarchical_memory
+       WHERE tier = 'episodic'
+         AND importance >= $1
+         AND access_count >= $2
+       ORDER BY importance DESC, access_count DESC`,
+      [this.config.importanceThreshold, this.config.minAccessCount],
+    );
+    const rows = res.rows as HierarchicalMemoryRow[];
 
     const candidates: MemoryItem[] = [];
 
@@ -255,15 +313,15 @@ export class MemoryConsolidation {
       const embedding = await this.embedder.embed(row.content);
       candidates.push({
         id: row.id,
-        tier: row.tier as MemoryTier,
+        tier: row.tier,
         content: row.content,
         embedding,
-        importance: row.importance,
-        accessCount: row.access_count,
-        createdAt: row.created_at,
-        lastAccessedAt: row.last_accessed_at,
-        lastRehearsedAt: row.last_rehearsed_at,
-        consolidatedAt: row.consolidated_at,
+        importance: Number(row.importance),
+        accessCount: Number(row.access_count),
+        createdAt: Number(row.created_at),
+        lastAccessedAt: Number(row.last_accessed_at),
+        lastRehearsedAt: row.last_rehearsed_at != null ? Number(row.last_rehearsed_at) : undefined,
+        consolidatedAt: row.consolidated_at != null ? Number(row.consolidated_at) : undefined,
         tags: row.tags ? JSON.parse(row.tags) : undefined,
         context: row.context ? JSON.parse(row.context) : undefined,
         metadata: row.metadata ? JSON.parse(row.metadata) : undefined,
@@ -351,13 +409,15 @@ export class MemoryConsolidation {
 
     // Calculate consolidated importance (weighted by access count)
     const totalAccess = cluster.members.reduce((sum, m) => sum + m.accessCount, 0);
-    const weightedImportance = cluster.members.reduce(
-      (sum, m) => sum + (m.importance * m.accessCount),
-      0
-    ) / totalAccess;
+    const weightedImportance = totalAccess > 0
+      ? cluster.members.reduce(
+          (sum, m) => sum + (m.importance * m.accessCount),
+          0,
+        ) / totalAccess
+      : cluster.avgImportance;
 
     // Store as semantic memory
-    const memoryId = await (this.hierarchicalMemory as any).store(
+    const memoryId = await this.hierarchicalMemory.store(
       pattern,
       weightedImportance,
       'semantic',
@@ -388,9 +448,6 @@ export class MemoryConsolidation {
 
     // Simple pattern: find common themes in content
     // In production, this could use LLM for better abstraction
-    const contents = cluster.members.map(m => m.content);
-
-    // For now, just return a summary of the most important memory
     const mostImportant = cluster.members.reduce(
       (best, m) => m.importance > best.importance ? m : best
     );
@@ -425,18 +482,23 @@ export class MemoryConsolidation {
    * Mark episodic memory as consolidated
    */
   private async markConsolidated(memoryId: string): Promise<void> {
+    await this.schemaReady;
+
     const now = Date.now();
-    this.db.prepare(`
-      UPDATE hierarchical_memory
-      SET consolidated_at = ?
-      WHERE id = ?
-    `).run(now, memoryId);
+    await this.backend.query(
+      `UPDATE hierarchical_memory
+       SET consolidated_at = $1
+       WHERE id = $2`,
+      [now, memoryId],
+    );
   }
 
   /**
    * Apply forgetting curve and delete low-value memories
    */
   private async applyForgettingCurve(memories: MemoryItem[]): Promise<number> {
+    await this.schemaReady;
+
     let forgotten = 0;
 
     for (const memory of memories) {
@@ -444,7 +506,10 @@ export class MemoryConsolidation {
 
       if (retention < this.config.forgettingThreshold) {
         // Delete from database
-        this.db.prepare('DELETE FROM hierarchical_memory WHERE id = ?').run(memory.id);
+        await this.backend.query(
+          `DELETE FROM hierarchical_memory WHERE id = $1`,
+          [memory.id],
+        );
 
         // Remove from vector backend
         if (this.vectorBackend) {
@@ -491,7 +556,7 @@ export class MemoryConsolidation {
       if (existingSchedule) {
         // Update existing schedule if review is due
         if (now >= existingSchedule.nextReview) {
-          this.updateRepetitionSchedule(memory.id, true);
+          await this.updateRepetitionSchedule(memory.id, true);
         }
       } else {
         // Create new schedule
@@ -504,7 +569,7 @@ export class MemoryConsolidation {
         };
 
         this.repetitionSchedules.set(memory.id, schedule);
-        this.saveRepetitionSchedule(schedule);
+        await this.saveRepetitionSchedule(schedule);
       }
     }
   }
@@ -512,7 +577,7 @@ export class MemoryConsolidation {
   /**
    * Update repetition schedule after review
    */
-  private updateRepetitionSchedule(memoryId: string, success: boolean): void {
+  private async updateRepetitionSchedule(memoryId: string, success: boolean): Promise<void> {
     const schedule = this.repetitionSchedules.get(memoryId);
     if (!schedule) return;
 
@@ -528,39 +593,48 @@ export class MemoryConsolidation {
       schedule.nextReview = Date.now() + schedule.interval;
     }
 
-    this.saveRepetitionSchedule(schedule);
+    await this.saveRepetitionSchedule(schedule);
   }
 
   /**
    * Save repetition schedule to database
    */
-  private saveRepetitionSchedule(schedule: RepetitionSchedule): void {
-    this.db.prepare(`
-      INSERT OR REPLACE INTO spaced_repetition
-      (memory_id, next_review, interval, ease_factor, repetitions)
-      VALUES (?, ?, ?, ?, ?)
-    `).run(
-      schedule.memoryId,
-      schedule.nextReview,
-      schedule.interval,
-      schedule.easeFactor,
-      schedule.repetitions
+  private async saveRepetitionSchedule(schedule: RepetitionSchedule): Promise<void> {
+    await this.schemaReady;
+
+    await this.backend.query(
+      `INSERT INTO spaced_repetition
+       (memory_id, next_review, interval, ease_factor, repetitions)
+       VALUES ($1, $2, $3, $4, $5)
+       ON CONFLICT (memory_id) DO UPDATE SET
+         next_review = EXCLUDED.next_review,
+         interval = EXCLUDED.interval,
+         ease_factor = EXCLUDED.ease_factor,
+         repetitions = EXCLUDED.repetitions`,
+      [
+        schedule.memoryId,
+        schedule.nextReview,
+        schedule.interval,
+        schedule.easeFactor,
+        schedule.repetitions,
+      ],
     );
   }
 
   /**
    * Load repetition schedules from database
    */
-  private loadRepetitionSchedules(): void {
-    const rows = this.db.prepare('SELECT * FROM spaced_repetition').all();
+  private async loadRepetitionSchedules(): Promise<void> {
+    const res = await this.backend.query(`SELECT * FROM spaced_repetition`);
+    const rows = res.rows as SpacedRepetitionRow[];
 
     for (const row of rows) {
       this.repetitionSchedules.set(row.memory_id, {
         memoryId: row.memory_id,
-        nextReview: row.next_review,
-        interval: row.interval,
-        easeFactor: row.ease_factor,
-        repetitions: row.repetitions,
+        nextReview: Number(row.next_review),
+        interval: Number(row.interval),
+        easeFactor: Number(row.ease_factor),
+        repetitions: Number(row.repetitions),
       });
     }
   }
@@ -597,20 +671,23 @@ export class MemoryConsolidation {
   /**
    * Log consolidation to database
    */
-  private logConsolidation(report: ConsolidationReport): void {
-    this.db.prepare(`
-      INSERT INTO consolidation_log (
-        timestamp, execution_time_ms, episodic_processed, semantic_created,
-        memories_forgotten, clusters_formed, retention_rate
-      ) VALUES (?, ?, ?, ?, ?, ?, ?)
-    `).run(
-      report.timestamp,
-      report.executionTimeMs,
-      report.episodicProcessed,
-      report.semanticCreated,
-      report.memoriesForgotten,
-      report.clustersFormed,
-      report.retentionRate
+  private async logConsolidation(report: ConsolidationReport): Promise<void> {
+    await this.schemaReady;
+
+    await this.backend.query(
+      `INSERT INTO consolidation_log (
+         timestamp, execution_time_ms, episodic_processed, semantic_created,
+         memories_forgotten, clusters_formed, retention_rate
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+      [
+        report.timestamp,
+        report.executionTimeMs,
+        report.episodicProcessed,
+        report.semanticCreated,
+        report.memoriesForgotten,
+        report.clustersFormed,
+        report.retentionRate,
+      ],
     );
   }
 
@@ -618,21 +695,25 @@ export class MemoryConsolidation {
    * Get consolidation history
    */
   async getConsolidationHistory(limit: number = 10): Promise<ConsolidationReport[]> {
-    const rows = this.db.prepare(`
-      SELECT * FROM consolidation_log
-      ORDER BY timestamp DESC
-      LIMIT ?
-    `).all(limit);
+    await this.schemaReady;
+
+    const res = await this.backend.query(
+      `SELECT * FROM consolidation_log
+       ORDER BY timestamp DESC
+       LIMIT $1`,
+      [limit],
+    );
+    const rows = res.rows as ConsolidationLogRow[];
 
     return rows.map(row => ({
-      timestamp: row.timestamp,
-      executionTimeMs: row.execution_time_ms,
-      episodicProcessed: row.episodic_processed,
-      semanticCreated: row.semantic_created,
-      memoriesForgotten: row.memories_forgotten,
-      clustersFormed: row.clusters_formed,
+      timestamp: Number(row.timestamp),
+      executionTimeMs: Number(row.execution_time_ms),
+      episodicProcessed: Number(row.episodic_processed),
+      semanticCreated: Number(row.semantic_created),
+      memoriesForgotten: Number(row.memories_forgotten),
+      clustersFormed: Number(row.clusters_formed),
       avgImportance: 0,
-      retentionRate: row.retention_rate,
+      retentionRate: Number(row.retention_rate),
       recommendations: [],
     }));
   }

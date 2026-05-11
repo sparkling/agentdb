@@ -214,14 +214,17 @@ class AgentDBCLI {
     });
     this.nightlyLearner = new NightlyLearner(this.db, this.embedder);
 
-    // ReflexionMemory and SkillLibrary support optional GNN/Graph backends
-    // These will be undefined if @ruvector/gnn or @ruvector/graph-node are not installed
+    // ADR-0170 Phase B.2: ReflexionMemory now runs on PostgresBackend
+    // (pglite embedded by default). The @ruvector/graph-node Cypher path
+    // retired in this Phase B commit — graphBackend is no longer a
+    // constructor parameter. Vector and learning backends remain optional.
+    const { PostgresBackend } = await import('../backends/postgres/PostgresBackend.js');
+    const postgresBackend = new PostgresBackend({ metric: 'cosine' });
     this.reflexion = new ReflexionMemory(
-      this.db,
+      postgresBackend,
       this.embedder,
       undefined,  // vectorBackend - would be created with detectBackends()
       undefined,  // learningBackend - requires @ruvector/gnn
-      undefined   // graphBackend - requires @ruvector/graph-node
     );
     this.skills = new SkillLibrary(this.db, this.embedder);
   }
@@ -833,7 +836,7 @@ class AgentDBCLI {
 
     log.header('\n🧹 Pruning Skills');
 
-    const pruned = this.skills.pruneSkills({
+    const pruned = await this.skills.pruneSkills({
       minUses: params.minUses || 3,
       minSuccessRate: params.minSuccessRate || 0.4,
       maxAgeDays: params.maxAgeDays || 60

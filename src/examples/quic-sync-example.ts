@@ -34,9 +34,15 @@ async function exampleQUICSync() {
     provider: 'transformers',
   });
 
+  // ADR-0170 Phase B.2: ReflexionMemory now runs on PostgresBackend.
+  // Example uses two pglite-embedded backends to mirror the two-DB setup.
+  const { PostgresBackend } = await import('../backends/postgres/PostgresBackend.js');
+  const localPostgres = new PostgresBackend({ metric: 'cosine', dataDir: './local-agent.pglite' });
+  const remotePostgres = new PostgresBackend({ metric: 'cosine', dataDir: './remote-agent.pglite' });
+
   // Initialize memory controllers
-  const localReflexion = new ReflexionMemory(localDB, localEmbedder);
-  const remoteReflexion = new ReflexionMemory(remoteDB, remoteEmbedder);
+  const localReflexion = new ReflexionMemory(localPostgres, localEmbedder);
+  const remoteReflexion = new ReflexionMemory(remotePostgres, remoteEmbedder);
   const remoteSkillLib = new SkillLibrary(remoteDB, remoteEmbedder);
 
   try {

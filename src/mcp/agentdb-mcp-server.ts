@@ -357,7 +357,13 @@ db.exec(`
 
 // Initialize all controllers
 // ADR-0056: pass vectorBackend to controllers that support it
-const reflexion = new ReflexionMemory(db, embeddingService, vectorBackend);
+// ADR-0170 Phase B.2: ReflexionMemory now runs on PostgresBackend
+// (pglite embedded by default). Other controllers retain the SQLite `db`
+// handle until their own Phase B commit lands. The MCP server boot path
+// holds both substrates side-by-side during the rollout window.
+const { PostgresBackend } = await import('../backends/postgres/PostgresBackend.js');
+const postgresBackend = new PostgresBackend({ metric: 'cosine' });
+const reflexion = new ReflexionMemory(postgresBackend, embeddingService, vectorBackend);
 const skills = new SkillLibrary(db, embeddingService, vectorBackend);
 const causalRecall = new CausalRecall(db, embeddingService, vectorBackend);
 const reasoningBank = new ReasoningBank(db, embeddingService, vectorBackend);

@@ -6,14 +6,16 @@
  *
  * Based on: "Voyager: An Open-Ended Embodied Agent with Large Language Models"
  * https://arxiv.org/abs/2305.16291
+ *
+ * ADR-0170 Phase B.3 — ported from SQLite to PostgreSQL dialect.
+ * - SQLite path dead-stripped (better-sqlite3/sql.js).
+ * - skill_vec Option F mirror writes dead-stripped (Phase C uses pgvector).
+ * - @ruvector/graph-node Cypher branches dead-stripped (per resolution-J).
  */
 
-import type { IDatabaseConnection, DatabaseRows } from '../types/database.types.js';
-import { normalizeRowId } from '../types/database.types.js';
 import { EmbeddingService } from './EmbeddingService.js';
 import { VectorBackend } from '../backends/VectorBackend.js';
-import type { GraphDatabaseAdapter } from '../backends/graph/GraphDatabaseAdapter.js';
-import { NodeIdMapper } from '../utils/NodeIdMapper.js';
+import { PostgresBackend } from '../backends/postgres/PostgresBackend.js';
 import { cosineSimilarity } from '../utils/vector-math.js';
 import { QueryCache, type QueryCacheConfig } from '../core/QueryCache.js';
 
@@ -58,24 +60,18 @@ export interface SkillQuery {
 let _singleton: InstanceType<typeof SkillLibrary> | null = null;
 
 export class SkillLibrary {
-  private db: IDatabaseConnection;
+  private db: PostgresBackend;
   private embedder: EmbeddingService;
   private vectorBackend: VectorBackend | null;
-  private graphBackend?: any; // GraphBackend or GraphDatabaseAdapter
   private queryCache: QueryCache;
-  /**
-   * ADR-0166 Phase 3 (Option F): true when skill_vec sqlite-vec virtual
-   * table is present on this.db. Detected once at construction.
-   */
-  private optionFEnabled: boolean = false;
+  private schemaReady: Promise<void>;
 
   static _resetSingleton(): void { _singleton = null; }
 
   constructor(
-    db: IDatabaseConnection,
+    db: PostgresBackend,
     embedder: EmbeddingService,
     vectorBackend?: VectorBackend,
-    graphBackend?: any,
     cacheConfig?: QueryCacheConfig
   ) {
     if (_singleton) {
@@ -88,49 +84,40 @@ export class SkillLibrary {
     this.db = db;
     this.embedder = embedder;
     this.vectorBackend = vectorBackend || null;
-    this.graphBackend = graphBackend;
     this.queryCache = new QueryCache(cacheConfig);
-    // ADR-0090 B5 skillLibrary fix: mirror pattern from ReasoningBank.ts:135,
-    // LearningSystem.ts, MemoryConsolidation etc. Constructor must create
-    // its own SQLite schema, otherwise `INSERT INTO skills` throws
-    // "no such table: skills" (silent in-memory fallback per ADR-0082).
-    // Schema mirrors `schemas/schema.sql:57-101`. Idempotent.
-    this.initializeSchema();
-    // ADR-0166 Phase 3 (Option F): detect virtual table availability once.
-    this.optionFEnabled = this.detectOptionF();
+    // ADR-0170 Phase B.3: schema initialization is async — kick it off
+    // immediately, await it on the first DB-touching call.
+    this.schemaReady = this.initializeSchema();
   }
 
   /**
    * Initialize skills / skill_links / skill_embeddings tables.
    *
-   * Mirrors `packages/agentdb/src/schemas/schema.sql` lines 57-101 so a
-   * freshly-constructed SkillLibrary can immediately accept
-   * `createSkill()` without requiring an external migration step.
+   * Mirrors `src/schemas/schema.sql:67-111` (PostgreSQL dialect) so a
+   * freshly-constructed SkillLibrary can immediately accept `createSkill()`
+   * without requiring an external migration step.
    *
-   * ADR-0090 B5 (2026-04-15): previously this schema only existed in
-   * `mcp/agentdb-mcp-server.js:71`, a separate standalone path never
-   * reached by the CLI-driven `getController('skills')` code path, so
-   * every CLI skill INSERT silently failed. This mirror restores the
-   * "controller constructs its own tables" invariant documented in
-   * ReasoningBank / LearningSystem / MemoryConsolidation / etc.
+   * ADR-0090 B5 (2026-04-15): previously this schema only existed in the
+   * standalone mcp-server path; the mirror preserves the
+   * "controller constructs its own tables" invariant.
    */
-  private initializeSchema(): void {
-    this.db.exec(`
+  private async initializeSchema(): Promise<void> {
+    await this.db.exec(`
       CREATE TABLE IF NOT EXISTS skills (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        id BIGSERIAL PRIMARY KEY,
         name TEXT UNIQUE NOT NULL,
         description TEXT,
-        signature JSON NOT NULL,
+        signature JSONB NOT NULL,
         code TEXT,
         success_rate REAL DEFAULT 0.0,
-        uses INTEGER DEFAULT 0,
+        uses BIGINT DEFAULT 0,
         avg_reward REAL DEFAULT 0.0,
-        avg_latency_ms INTEGER DEFAULT 0,
-        created_from_episode INTEGER,
-        created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
-        updated_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
-        last_used_at INTEGER,
-        metadata JSON
+        avg_latency_ms BIGINT DEFAULT 0,
+        created_from_episode BIGINT,
+        created_at BIGINT NOT NULL DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT,
+        updated_at BIGINT NOT NULL DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT,
+        last_used_at BIGINT,
+        metadata JSONB
       );
 
       CREATE INDEX IF NOT EXISTS idx_skills_success ON skills(success_rate DESC);
@@ -138,12 +125,12 @@ export class SkillLibrary {
       CREATE INDEX IF NOT EXISTS idx_skills_name ON skills(name);
 
       CREATE TABLE IF NOT EXISTS skill_links (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        parent_skill_id INTEGER NOT NULL,
-        child_skill_id INTEGER NOT NULL,
+        id BIGSERIAL PRIMARY KEY,
+        parent_skill_id BIGINT NOT NULL,
+        child_skill_id BIGINT NOT NULL,
         relationship TEXT NOT NULL,
         weight REAL DEFAULT 1.0,
-        metadata JSON,
+        metadata JSONB,
         FOREIGN KEY(parent_skill_id) REFERENCES skills(id) ON DELETE CASCADE,
         FOREIGN KEY(child_skill_id) REFERENCES skills(id) ON DELETE CASCADE,
         UNIQUE(parent_skill_id, child_skill_id, relationship)
@@ -153,8 +140,8 @@ export class SkillLibrary {
       CREATE INDEX IF NOT EXISTS idx_skill_links_child ON skill_links(child_skill_id);
 
       CREATE TABLE IF NOT EXISTS skill_embeddings (
-        skill_id INTEGER PRIMARY KEY,
-        embedding BLOB NOT NULL,
+        skill_id BIGINT PRIMARY KEY,
+        embedding BYTEA NOT NULL,
         embedding_model TEXT DEFAULT 'all-MiniLM-L6-v2',
         FOREIGN KEY(skill_id) REFERENCES skills(id) ON DELETE CASCADE
       );
@@ -166,78 +153,50 @@ export class SkillLibrary {
    * Invalidates skill cache
    */
   async createSkill(skill: Skill): Promise<number> {
+    await this.schemaReady;
     // Invalidate skills cache on write
     this.queryCache.invalidateCategory('skills');
-    // Use GraphDatabaseAdapter if available (AgentDB v2)
-    if (this.graphBackend && 'storeSkill' in this.graphBackend) {
-      const graphAdapter = this.graphBackend as any as GraphDatabaseAdapter;
 
-      const text = this.buildSkillText(skill);
-      const embedding = await this.embedder.embed(text);
+    // v1 API compatibility: provide defaults for optional fields.
+    // `uses` and `avg_latency_ms` are BIGINT columns; coerce to integer
+    // (postgres rejects floats for BIGINT, where SQLite silently
+    // truncated). Math.round preserves the SQLite-era rounding behavior
+    // for callers that previously passed `Math.random() * 200`-style
+    // floats.
+    const signature = skill.signature || { inputs: {}, outputs: {} };
+    const uses = Math.round(skill.uses ?? 0);
+    const avgReward = skill.avgReward ?? 0;
+    const avgLatencyMs = Math.round(skill.avgLatencyMs ?? 0);
 
-      const nodeId = await graphAdapter.storeSkill(
-        {
-          id: skill.id ? `skill-${skill.id}` : `skill-${Date.now()}-${Math.random()}`,
-          name: skill.name,
-          description: skill.description || '',
-          code: skill.code || '',
-          usageCount: skill.uses ?? 0,
-          avgReward: skill.avgReward ?? 0,
-          createdAt: Date.now(),
-          updatedAt: Date.now(),
-          tags: JSON.stringify(skill.metadata || {}),
-        },
-        embedding
-      );
-
-      const numericId = parseInt(nodeId.split('-').pop() || '0', 36);
-      NodeIdMapper.getInstance().register(numericId, nodeId);
-      return numericId;
-    }
-
-    // Fallback to SQLite
-    const stmt = this.db.prepare(`
-      INSERT INTO skills (
+    const result = await this.db.query(
+      `INSERT INTO skills (
         name, description, signature, code, success_rate, uses,
         avg_reward, avg_latency_ms, metadata
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `);
-
-    // v1 API compatibility: provide defaults for optional fields
-    const signature = skill.signature || { inputs: {}, outputs: {} };
-    const uses = skill.uses ?? 0;
-    const avgReward = skill.avgReward ?? 0;
-    const avgLatencyMs = skill.avgLatencyMs ?? 0;
-
-    const result = stmt.run(
-      skill.name,
-      skill.description || null,
-      JSON.stringify(signature),
-      skill.code || null,
-      skill.successRate,
-      uses,
-      avgReward,
-      avgLatencyMs,
-      skill.metadata ? JSON.stringify(skill.metadata) : null
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+      RETURNING id`,
+      [
+        skill.name,
+        skill.description ?? null,
+        JSON.stringify(signature),
+        skill.code ?? null,
+        skill.successRate,
+        uses,
+        avgReward,
+        avgLatencyMs,
+        skill.metadata ? JSON.stringify(skill.metadata) : null,
+      ]
     );
 
-    const skillId = normalizeRowId(result.lastInsertRowid);
+    const skillId = Number((result.rows[0] as any).id);
 
-    // Generate and store embedding in VectorBackend
+    // Generate and store embedding
     const text = this.buildSkillText(skill);
     const embedding = await this.embedder.embed(text);
 
-    // ADR-0094 Phase 13.2 fix: ALWAYS persist embedding to SQLite
-    // skill_embeddings, regardless of whether a vectorBackend is wired.
-    // Previously only the `else` branch wrote to SQLite — so when the
-    // runtime (AgentDB.initialize) passed an in-memory vectorBackend,
-    // the embedding lived only in that per-process index. A subsequent
-    // CLI invocation had a fresh empty vectorBackend, and the read
-    // path in `retrieveSkills` couldn't find anything. SQLite is the
-    // cross-process truth store (.swarm/memory.db); the vectorBackend
-    // is an accelerator. Mirrors ReflexionMemory.storeEpisode which
-    // already does vectorBackend.insert + storeEmbedding in tandem.
-    this.storeSkillEmbeddingLegacy(skillId, embedding);
+    // ADR-0094 Phase 13.2 fix: ALWAYS persist embedding to skill_embeddings,
+    // regardless of whether a vectorBackend is wired. The relational table is
+    // the cross-process truth store; vectorBackend is an in-memory accelerator.
+    await this.storeSkillEmbedding(skillId, embedding);
 
     // Also populate the in-memory vectorBackend accelerator if available
     if (this.vectorBackend) {
@@ -253,7 +212,7 @@ export class SkillLibrary {
           }
         );
       } catch {
-        // vectorBackend insert failed — SQLite already has it, so
+        // vectorBackend insert failed — skill_embeddings already has it, so
         // retrieveSkillsLegacy will still find this skill on search.
       }
     }
@@ -265,20 +224,23 @@ export class SkillLibrary {
    * Update skill statistics after use
    * Invalidates skill cache
    */
-  updateSkillStats(skillId: number, success: boolean, reward: number, latencyMs: number): void {
+  async updateSkillStats(skillId: number, success: boolean, reward: number, latencyMs: number): Promise<void> {
+    await this.schemaReady;
     // Invalidate skills cache on update
     this.queryCache.invalidateCategory('skills');
-    const stmt = this.db.prepare(`
-      UPDATE skills
-      SET
-        uses = uses + 1,
-        success_rate = (success_rate * uses + ?) / (uses + 1),
-        avg_reward = (avg_reward * uses + ?) / (uses + 1),
-        avg_latency_ms = (avg_latency_ms * uses + ?) / (uses + 1)
-      WHERE id = ?
-    `);
-
-    stmt.run(success ? 1 : 0, reward, latencyMs, skillId);
+    // avg_latency_ms is BIGINT; ROUND() returns NUMERIC under postgres so
+    // cast back to BIGINT for the column. success_rate / avg_reward are
+    // REAL and accept the running-average float result directly.
+    await this.db.query(
+      `UPDATE skills
+       SET
+         uses = uses + 1,
+         success_rate = (success_rate * uses + $1) / (uses + 1),
+         avg_reward = (avg_reward * uses + $2) / (uses + 1),
+         avg_latency_ms = ROUND((avg_latency_ms * uses + $3) / (uses + 1))::BIGINT
+       WHERE id = $4`,
+      [success ? 1 : 0, reward, Math.round(latencyMs), skillId]
+    );
   }
 
   /**
@@ -289,6 +251,7 @@ export class SkillLibrary {
   }
 
   async retrieveSkills(query: SkillQuery): Promise<Skill[]> {
+    await this.schemaReady;
     // v1 API compatibility: accept both 'query' and 'task'
     const task = query.task || query.query;
     if (!task) {
@@ -312,58 +275,13 @@ export class SkillLibrary {
     // Generate query embedding
     const queryEmbedding = await this.embedder.embed(task);
 
-    // Use GraphDatabaseAdapter if available (AgentDB v2)
-    if (this.graphBackend && 'searchSkills' in this.graphBackend) {
-      const graphAdapter = this.graphBackend as any as GraphDatabaseAdapter;
-
-      const searchResults = await graphAdapter.searchSkills(queryEmbedding, k);
-
-      const results = searchResults
-        .map((result) => {
-          // Handle metadata/tags parsing
-          let metadata: any = undefined;
-          if (result.tags) {
-            if (typeof result.tags === 'string') {
-              // Skip parsing if it's a String object representation
-              if (!result.tags.startsWith('String(')) {
-                try {
-                  metadata = JSON.parse(result.tags);
-                } catch (e) {
-                  // Invalid JSON, skip
-                  metadata = undefined;
-                }
-              }
-            } else {
-              // Already an object
-              metadata = result.tags;
-            }
-          }
-
-          return {
-            id: parseInt(result.id.split('-').pop() || '0', 36),
-            name: result.name,
-            description: result.description,
-            code: result.code,
-            successRate: result.avgReward, // Use avgReward as successRate proxy
-            uses: result.usageCount,
-            avgReward: result.avgReward,
-            metadata,
-          };
-        })
-        .filter((skill) => skill.successRate >= minSuccessRate);
-
-      // Cache the results
-      this.queryCache.set(cacheKey, results);
-      return results;
-    }
-
     // Use VectorBackend for semantic search (if available)
     if (this.vectorBackend) {
       try {
         const searchResults = this.vectorBackend.search(queryEmbedding, k * 3);
 
         // ADR-0094 Phase 13.2 fix: when the vectorBackend is empty (e.g.
-        // fresh process, only SQLite is persisted), fall through to the
+        // fresh process, only postgres is persisted), fall through to the
         // SQL-based retrieveSkillsLegacy instead of returning []. ADR-0082
         // forbids silent-empty returns when a fallback path exists.
         if (!searchResults || searchResults.length === 0) {
@@ -373,15 +291,16 @@ export class SkillLibrary {
         // Map results back to skill IDs and fetch full skill data
         const skillsWithSimilarity: (Skill & { similarity: number })[] = [];
 
-        // Prepare statement ONCE outside loop (better-sqlite3 best practice)
-        const getSkillStmt = this.db.prepare('SELECT * FROM skills WHERE id = ?');
-
         for (const result of searchResults) {
           // Extract skill ID from vector ID (format: "skill:123")
           const skillId = parseInt(result.id.replace('skill:', ''));
 
           // Fetch full skill data from database
-          const row = getSkillStmt.get(skillId);
+          const rowResult = await this.db.query(
+            'SELECT * FROM skills WHERE id = $1',
+            [skillId]
+          );
+          const row = rowResult.rows[0] as any;
 
           if (!row) continue;
 
@@ -389,23 +308,23 @@ export class SkillLibrary {
           if (row.success_rate < minSuccessRate) continue;
 
           skillsWithSimilarity.push({
-            id: row.id,
+            id: Number(row.id),
             name: row.name,
             description: row.description,
-            signature: JSON.parse(row.signature),
+            signature: this.parseJSON(row.signature),
             code: row.code,
             successRate: row.success_rate,
-            uses: row.uses,
+            uses: Number(row.uses),
             avgReward: row.avg_reward,
-            avgLatencyMs: row.avg_latency_ms,
-            createdFromEpisode: row.created_from_episode,
-            metadata: row.metadata ? JSON.parse(row.metadata) : undefined,
+            avgLatencyMs: Number(row.avg_latency_ms),
+            createdFromEpisode: row.created_from_episode != null ? Number(row.created_from_episode) : undefined,
+            metadata: row.metadata ? this.parseJSON(row.metadata) : undefined,
             similarity: result.similarity
           });
         }
 
         // ADR-0094 Phase 13.2 fix: vectorBackend returned candidates but
-        // none survived the SQLite join (e.g. vectorBackend state is stale
+        // none survived the SQL join (e.g. vectorBackend state is stale
         // — ids in the in-memory index don't match rows in skills table).
         // Fall through to SQL similarity search rather than return empty.
         if (skillsWithSimilarity.length === 0) {
@@ -441,24 +360,24 @@ export class SkillLibrary {
     const queryEmbedding = await this.embedder.embed(task);
 
     // Fetch all skills with embeddings
-    const stmt = this.db.prepare<DatabaseRows.Skill & { embedding: Buffer }>(`
-      SELECT s.*, e.embedding
-      FROM skills s
-      LEFT JOIN skill_embeddings e ON s.id = e.skill_id
-      WHERE s.success_rate >= ?
-    `);
-    const rows = stmt.all(minSuccessRate);
+    const result = await this.db.query(
+      `SELECT s.*, e.embedding
+       FROM skills s
+       LEFT JOIN skill_embeddings e ON s.id = e.skill_id
+       WHERE s.success_rate >= $1`,
+      [minSuccessRate]
+    );
+    const rows = result.rows as any[];
 
     // Compute similarities
     const skillsWithSimilarity: (Skill & { similarity: number })[] = [];
     // ADR-0094 Phase 13.2 fix: pre-embedded legacy fixtures (and skills
     // created before the embedding write-through fix shipped) have rows
     // in `skills` but no corresponding `skill_embeddings` row. Previously
-    // we silently skipped them (`if (!row.embedding) continue;`) which
-    // returned [] for every query against such a fixture — an ADR-0082
-    // silent-empty violation. Instead, when the embedding is missing,
-    // fall back to a substring match on name/description/code using the
-    // raw task text so the skill is still retrievable.
+    // we silently skipped them which returned [] for every query against
+    // such a fixture — an ADR-0082 silent-empty violation. Instead, when
+    // the embedding is missing, fall back to a substring match on
+    // name/description/code so the skill is still retrievable.
     const taskLower = task.toLowerCase();
     for (const row of rows) {
       if (!row.embedding) {
@@ -469,17 +388,17 @@ export class SkillLibrary {
         const textMatch = haystack.includes(taskLower);
         if (!textMatch) continue;
         skillsWithSimilarity.push({
-          id: row.id,
+          id: Number(row.id),
           name: row.name,
           description: row.description ?? undefined,
-          signature: JSON.parse(row.signature),
+          signature: this.parseJSON(row.signature),
           code: row.code ?? undefined,
           successRate: row.success_rate,
-          uses: row.uses,
+          uses: Number(row.uses),
           avgReward: row.avg_reward,
-          avgLatencyMs: row.avg_latency_ms,
-          createdFromEpisode: row.created_from_episode ?? undefined,
-          metadata: row.metadata ? JSON.parse(row.metadata) : undefined,
+          avgLatencyMs: Number(row.avg_latency_ms),
+          createdFromEpisode: row.created_from_episode != null ? Number(row.created_from_episode) : undefined,
+          metadata: row.metadata ? this.parseJSON(row.metadata) : undefined,
           // Conservative similarity score: lower than a real vector match
           // but above zero so the result is ranked and returned.
           similarity: 0.5,
@@ -487,21 +406,24 @@ export class SkillLibrary {
         continue;
       }
 
-      const embedding = new Float32Array(row.embedding.buffer);
+      const buf = Buffer.isBuffer(row.embedding)
+        ? row.embedding
+        : Buffer.from(row.embedding as Uint8Array);
+      const embedding = new Float32Array(buf.buffer, buf.byteOffset, buf.byteLength / 4);
       const similarity = cosineSimilarity(queryEmbedding, embedding);
 
       skillsWithSimilarity.push({
-        id: row.id,
+        id: Number(row.id),
         name: row.name,
         description: row.description ?? undefined,
-        signature: JSON.parse(row.signature),
+        signature: this.parseJSON(row.signature),
         code: row.code ?? undefined,
         successRate: row.success_rate,
-        uses: row.uses,
+        uses: Number(row.uses),
         avgReward: row.avg_reward,
-        avgLatencyMs: row.avg_latency_ms,
-        createdFromEpisode: row.created_from_episode ?? undefined,
-        metadata: row.metadata ? JSON.parse(row.metadata) : undefined,
+        avgLatencyMs: Number(row.avg_latency_ms),
+        createdFromEpisode: row.created_from_episode != null ? Number(row.created_from_episode) : undefined,
+        metadata: row.metadata ? this.parseJSON(row.metadata) : undefined,
         similarity,
       });
     }
@@ -517,109 +439,80 @@ export class SkillLibrary {
   }
 
   /**
-   * Store skill embedding (legacy fallback)
+   * Store skill embedding via UPSERT (legacy fallback)
    */
-  private storeSkillEmbeddingLegacy(skillId: number, embedding: Float32Array): void {
-    const stmt = this.db.prepare(`
-      INSERT INTO skill_embeddings (skill_id, embedding)
-      VALUES (?, ?)
-      ON CONFLICT(skill_id) DO UPDATE SET embedding = excluded.embedding
-    `);
-    const buffer = Buffer.from(embedding.buffer);
-    stmt.run(skillId, buffer);
-
-    // ADR-0166 Phase 3 (Option F): mirror embedding into skill_vec for
-    // SQL-side k-NN via the sqlite-vec virtual table. vec0 doesn't support
-    // ON CONFLICT, so DELETE-then-INSERT for upsert semantics matching the
-    // skill_embeddings UPSERT above. ID stringified — see AgentDB.ts for the
-    // uniform-TEXT-aux-column rationale.
-    if (this.optionFEnabled) {
-      try {
-        const idStr = String(skillId);
-        this.db.prepare(`DELETE FROM skill_vec WHERE id = ?`).run(idStr);
-        const vecStmt = this.db.prepare(
-          `INSERT INTO skill_vec(id, embedding) VALUES (?, ?)`,
-        );
-        vecStmt.run(idStr, Buffer.from(embedding.buffer));
-      } catch (err) {
-        console.error(`[SkillLibrary] Option F vec mirror failed for skill=${skillId}: ${(err as Error).message}`);
-        throw err;
-      }
-    }
-  }
-
-  /**
-   * ADR-0166 Phase 3 (Option F): detect whether skill_vec exists.
-   */
-  private detectOptionF(): boolean {
-    try {
-      const row: any = (this.db as any).prepare?.(
-        `SELECT name FROM sqlite_master WHERE type='table' AND name='skill_vec'`,
-      )?.get?.();
-      return !!row;
-    } catch {
-      return false;
-    }
+  private async storeSkillEmbedding(skillId: number, embedding: Float32Array): Promise<void> {
+    const buffer = Buffer.from(embedding.buffer, embedding.byteOffset, embedding.byteLength);
+    await this.db.query(
+      `INSERT INTO skill_embeddings (skill_id, embedding)
+       VALUES ($1, $2)
+       ON CONFLICT(skill_id) DO UPDATE SET embedding = EXCLUDED.embedding`,
+      [skillId, buffer]
+    );
   }
 
   /**
    * Link two skills with a relationship
    */
-  linkSkills(link: SkillLink): void {
-    const stmt = this.db.prepare(`
-      INSERT INTO skill_links (parent_skill_id, child_skill_id, relationship, weight, metadata)
-      VALUES (?, ?, ?, ?, ?)
-      ON CONFLICT(parent_skill_id, child_skill_id, relationship)
-      DO UPDATE SET weight = excluded.weight
-    `);
-
-    stmt.run(
-      link.parentSkillId,
-      link.childSkillId,
-      link.relationship,
-      link.weight,
-      link.metadata ? JSON.stringify(link.metadata) : null
+  async linkSkills(link: SkillLink): Promise<void> {
+    await this.schemaReady;
+    await this.db.query(
+      `INSERT INTO skill_links (parent_skill_id, child_skill_id, relationship, weight, metadata)
+       VALUES ($1, $2, $3, $4, $5)
+       ON CONFLICT(parent_skill_id, child_skill_id, relationship)
+       DO UPDATE SET weight = EXCLUDED.weight`,
+      [
+        link.parentSkillId,
+        link.childSkillId,
+        link.relationship,
+        link.weight,
+        link.metadata ? JSON.stringify(link.metadata) : null,
+      ]
     );
   }
 
   /**
    * Get skill composition plan (prerequisites and alternatives)
    */
-  getSkillPlan(skillId: number): {
+  async getSkillPlan(skillId: number): Promise<{
     skill: Skill;
     prerequisites: Skill[];
     alternatives: Skill[];
     refinements: Skill[];
-  } {
+  }> {
+    await this.schemaReady;
     // Get main skill
-    const skill = this.getSkillById(skillId);
+    const skill = await this.getSkillById(skillId);
 
     // Get prerequisites
-    const prereqStmt = this.db.prepare(`
-      SELECT s.* FROM skills s
-      JOIN skill_links sl ON s.id = sl.child_skill_id
-      WHERE sl.parent_skill_id = ? AND sl.relationship = 'prerequisite'
-      ORDER BY sl.weight DESC
-    `);
-    const prerequisites = prereqStmt.all(skillId).map(this.rowToSkill);
+    const prereqResult = await this.db.query(
+      `SELECT s.* FROM skills s
+       JOIN skill_links sl ON s.id = sl.child_skill_id
+       WHERE sl.parent_skill_id = $1 AND sl.relationship = 'prerequisite'
+       ORDER BY sl.weight DESC`,
+      [skillId]
+    );
+    const prerequisites = (prereqResult.rows as any[]).map((r) => this.rowToSkill(r));
 
     // Get alternatives
-    const altStmt = this.db.prepare(`
-      SELECT s.* FROM skills s
-      JOIN skill_links sl ON s.id = sl.child_skill_id
-      WHERE sl.parent_skill_id = ? AND sl.relationship = 'alternative'
-      ORDER BY sl.weight DESC, s.success_rate DESC
-    `);
-    const alternatives = altStmt.all(skillId).map(this.rowToSkill);
+    const altResult = await this.db.query(
+      `SELECT s.* FROM skills s
+       JOIN skill_links sl ON s.id = sl.child_skill_id
+       WHERE sl.parent_skill_id = $1 AND sl.relationship = 'alternative'
+       ORDER BY sl.weight DESC, s.success_rate DESC`,
+      [skillId]
+    );
+    const alternatives = (altResult.rows as any[]).map((r) => this.rowToSkill(r));
 
     // Get refinements
-    const refStmt = this.db.prepare(`
-      SELECT s.* FROM skills s
-      JOIN skill_links sl ON s.id = sl.child_skill_id
-      WHERE sl.parent_skill_id = ? AND sl.relationship = 'refinement'
-      ORDER BY sl.weight DESC, s.created_at DESC
-    `);
-    const refinements = refStmt.all(skillId).map(this.rowToSkill);
+    const refResult = await this.db.query(
+      `SELECT s.* FROM skills s
+       JOIN skill_links sl ON s.id = sl.child_skill_id
+       WHERE sl.parent_skill_id = $1 AND sl.relationship = 'refinement'
+       ORDER BY sl.weight DESC, s.created_at DESC`,
+      [skillId]
+    );
+    const refinements = (refResult.rows as any[]).map((r) => this.rowToSkill(r));
 
     return { skill, prerequisites, alternatives, refinements };
   }
@@ -643,35 +536,35 @@ export class SkillLibrary {
       avgReward: number;
     }>;
   }> {
+    await this.schemaReady;
     const { minAttempts = 3, minReward = 0.7, timeWindowDays = 7, extractPatterns = true } = config;
 
-    interface ConsolidationCandidate {
+    const candidatesResult = await this.db.query(
+      `SELECT
+         task,
+         COUNT(*) as attempt_count,
+         AVG(reward) as avg_reward,
+         AVG(CASE WHEN success THEN 1.0 ELSE 0.0 END) as success_rate,
+         AVG(latency_ms) as avg_latency,
+         MAX(id) as latest_episode_id,
+         STRING_AGG(id::TEXT, ',') as episode_ids
+       FROM episodes
+       WHERE ts > EXTRACT(EPOCH FROM NOW())::BIGINT - $1
+         AND reward >= $2
+       GROUP BY task
+       HAVING COUNT(*) >= $3`,
+      [timeWindowDays * 86400, minReward, minAttempts]
+    );
+
+    const candidates = candidatesResult.rows as Array<{
       task: string;
-      attempt_count: number;
+      attempt_count: string | number;
       avg_reward: number;
       success_rate: number;
       avg_latency: number | null;
-      latest_episode_id: number;
+      latest_episode_id: string | number;
       episode_ids: string;
-    }
-
-    const stmt = this.db.prepare<ConsolidationCandidate>(`
-      SELECT
-        task,
-        COUNT(*) as attempt_count,
-        AVG(reward) as avg_reward,
-        AVG(success) as success_rate,
-        AVG(latency_ms) as avg_latency,
-        MAX(id) as latest_episode_id,
-        GROUP_CONCAT(id) as episode_ids
-      FROM episodes
-      WHERE ts > strftime('%s', 'now') - ?
-        AND reward >= ?
-      GROUP BY task
-      HAVING attempt_count >= ?
-    `);
-
-    const candidates = stmt.all(timeWindowDays * 86400, minReward, minAttempts);
+    }>;
     let created = 0;
     let updated = 0;
     const patterns: Array<{
@@ -684,6 +577,8 @@ export class SkillLibrary {
     for (const candidate of candidates) {
       try {
         const episodeIds = candidate.episode_ids.split(',').map(Number);
+        const attemptCount = Number(candidate.attempt_count);
+        const latestEpisodeId = Number(candidate.latest_episode_id);
 
         // Extract patterns from successful episodes if requested
         let extractedPatterns: string[] = [];
@@ -708,7 +603,11 @@ export class SkillLibrary {
         }
 
         // Check if skill already exists
-        const existing = this.db.prepare('SELECT id FROM skills WHERE name = ?').get(candidate.task);
+        const existingResult = await this.db.query(
+          'SELECT id FROM skills WHERE name = $1',
+          [candidate.task]
+        );
+        const existing = existingResult.rows[0] as any;
 
         if (!existing) {
           // Create new skill with extracted patterns
@@ -720,10 +619,10 @@ export class SkillLibrary {
               outputs: { result: 'any' },
             },
             successRate: candidate.success_rate,
-            uses: candidate.attempt_count,
+            uses: attemptCount,
             avgReward: candidate.avg_reward,
             avgLatencyMs: candidate.avg_latency ?? 0,
-            createdFromEpisode: candidate.latest_episode_id,
+            createdFromEpisode: latestEpisodeId,
             metadata: {
               sourceEpisodes: episodeIds,
               autoGenerated: true,
@@ -741,8 +640,8 @@ export class SkillLibrary {
           created++;
         } else {
           // Update existing skill stats
-          this.updateSkillStats(
-            (existing as any).id,
+          await this.updateSkillStats(
+            Number(existing.id),
             candidate.success_rate > 0.5,
             candidate.avg_reward,
             candidate.avg_latency ?? 0
@@ -765,17 +664,20 @@ export class SkillLibrary {
     commonPatterns: string[];
     successIndicators: string[];
   }> {
-    // Retrieve episodes with their outputs and critiques
-    const episodes = this.db
-      .prepare(
-        `
-      SELECT id, task, input, output, critique, reward, success, metadata
-      FROM episodes
-      WHERE id IN (${episodeIds.map(() => '?').join(',')})
-      AND success = 1
-    `
-      )
-      .all(...episodeIds) as any[];
+    if (episodeIds.length === 0) {
+      return { commonPatterns: [], successIndicators: [] };
+    }
+
+    // Build $1, $2, … placeholder list for IN clause
+    const placeholders = episodeIds.map((_, i) => `$${i + 1}`).join(',');
+    const episodesResult = await this.db.query(
+      `SELECT id, task, input, output, critique, reward, success, metadata
+       FROM episodes
+       WHERE id IN (${placeholders})
+       AND success = TRUE`,
+      episodeIds
+    );
+    const episodes = episodesResult.rows as any[];
 
     if (episodes.length === 0) {
       return { commonPatterns: [], successIndicators: [] };
@@ -953,7 +855,7 @@ export class SkillLibrary {
     if (episodes.length < 3) return null;
 
     // Sort by episode ID (temporal order)
-    const sorted = [...episodes].sort((a, b) => a.id - b.id);
+    const sorted = [...episodes].sort((a, b) => Number(a.id) - Number(b.id));
 
     const firstHalfReward =
       sorted.slice(0, Math.floor(sorted.length / 2)).reduce((sum, ep) => sum + ep.reward, 0) /
@@ -992,24 +894,26 @@ export class SkillLibrary {
    * Prune underperforming skills
    * Invalidates cache on completion
    */
-  pruneSkills(config: { minUses?: number; minSuccessRate?: number; maxAgeDays?: number }): number {
+  async pruneSkills(config: { minUses?: number; minSuccessRate?: number; maxAgeDays?: number }): Promise<number> {
+    await this.schemaReady;
     const { minUses = 3, minSuccessRate = 0.4, maxAgeDays = 60 } = config;
 
-    const stmt = this.db.prepare(`
-      DELETE FROM skills
-      WHERE uses < ?
-        AND success_rate < ?
-        AND created_at < strftime('%s', 'now') - ?
-    `);
+    const result = await this.db.query(
+      `DELETE FROM skills
+       WHERE uses < $1
+         AND success_rate < $2
+         AND created_at < EXTRACT(EPOCH FROM NOW())::BIGINT - $3`,
+      [minUses, minSuccessRate, maxAgeDays * 86400]
+    );
 
-    const result = stmt.run(minUses, minSuccessRate, maxAgeDays * 86400);
+    const changes = (result as any).rowCount ?? 0;
 
     // Invalidate cache after pruning
-    if (result.changes > 0) {
+    if (changes > 0) {
       this.queryCache.invalidateCategory('skills');
     }
 
-    return result.changes;
+    return changes;
   }
 
   /**
@@ -1049,27 +953,43 @@ export class SkillLibrary {
   // Private Helper Methods
   // ========================================================================
 
-  private getSkillById(id: number): Skill {
-    const stmt = this.db.prepare('SELECT * FROM skills WHERE id = ?');
-    const row = stmt.get(id);
+  private async getSkillById(id: number): Promise<Skill> {
+    const result = await this.db.query('SELECT * FROM skills WHERE id = $1', [id]);
+    const row = result.rows[0] as any;
     if (!row) throw new Error(`Skill ${id} not found`);
     return this.rowToSkill(row);
   }
 
   private rowToSkill(row: any): Skill {
     return {
-      id: row.id,
+      id: Number(row.id),
       name: row.name,
       description: row.description,
-      signature: JSON.parse(row.signature),
+      signature: this.parseJSON(row.signature),
       code: row.code,
       successRate: row.success_rate,
-      uses: row.uses,
+      uses: Number(row.uses),
       avgReward: row.avg_reward,
-      avgLatencyMs: row.avg_latency_ms,
-      createdFromEpisode: row.created_from_episode,
-      metadata: row.metadata ? JSON.parse(row.metadata) : undefined,
+      avgLatencyMs: Number(row.avg_latency_ms),
+      createdFromEpisode: row.created_from_episode != null ? Number(row.created_from_episode) : undefined,
+      metadata: row.metadata ? this.parseJSON(row.metadata) : undefined,
     };
+  }
+
+  /**
+   * Parse JSONB values. PostgreSQL drivers may hand back either a parsed
+   * object (pg JSONB) or a string (pglite uses JSON encoding for some paths).
+   */
+  private parseJSON(value: any): any {
+    if (value == null) return value;
+    if (typeof value === 'string') {
+      try {
+        return JSON.parse(value);
+      } catch {
+        return value;
+      }
+    }
+    return value;
   }
 
   private buildSkillText(skill: Skill): string {

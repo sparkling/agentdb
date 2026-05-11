@@ -56,24 +56,13 @@ describe('ADR-0166 Phase 3 — per-controller Option F wiring', () => {
     expect(rowCount.c).toBe(1);
   });
 
-  it('SkillLibrary.createSkill mirrors into skill_vec', async () => {
-    if (!(await sqliteVecAvailable())) return;
-    const db = new AgentDB({ vectorIndex: 'sqlite-vec' });
-    await db.initialize();
-
-    const skills: any = db.getController('skills');
-    const skillId = await skills.createSkill({
-      name: 'test-skill-' + Math.random().toString(36).slice(2, 10),
-      description: 'test description',
-      signature: { args: [], returns: 'void' },
-    });
-    expect(typeof skillId).toBe('number');
-
-    const rawDb = (db as any).db;
-    const rowCount = rawDb
-      .prepare(`SELECT COUNT(*) AS c FROM skill_vec WHERE id = ?`)
-      .get(String(skillId)) as { c: number };
-    expect(rowCount.c).toBe(1);
+  // ADR-0170 Phase B.3 (2026-05-11): SkillLibrary ported to PostgresBackend;
+  // the `skill_vec` Option F mirror writes were dead-stripped atomically
+  // with the port. This contract no longer applies — under postgres, vector
+  // ops live alongside the row via pgvector (Phase C), not a sidecar
+  // virtual table.
+  it.skip('SkillLibrary.createSkill mirrors into skill_vec (RETIRED — ADR-0170 Phase B.3)', () => {
+    /* intentionally skipped */
   });
 
   it('ReasoningBank.createPattern mirrors into reasoning_pattern_vec', async () => {

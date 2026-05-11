@@ -1,44 +1,49 @@
 /**
  * Unit Tests for SkillLibrary Controller
  *
- * Tests skill management, consolidation, and pattern extraction
+ * Tests skill management, consolidation, and pattern extraction.
+ *
+ * ADR-0170 Phase B.3: ported from better-sqlite3 to PostgresBackend
+ * (pglite-embedded). Each test gets a fresh ephemeral pglite cluster
+ * under `os.tmpdir()`.
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import Database from 'better-sqlite3';
 import { SkillLibrary, Skill } from '../../../src/controllers/SkillLibrary.js';
-import { ReflexionMemory, Episode } from '../../../src/controllers/ReflexionMemory.js';
+import { ReflexionMemory } from '../../../src/controllers/ReflexionMemory.js';
 import { EmbeddingService } from '../../../src/controllers/EmbeddingService.js';
+import { PostgresBackend } from '../../../src/backends/postgres/PostgresBackend.js';
 import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
 
-const TEST_DB_PATH = './tests/fixtures/test-skills.db';
-
 describe('SkillLibrary', () => {
-  let db: Database.Database;
+  let backend: PostgresBackend;
+  let dataDir: string;
   let embedder: EmbeddingService;
   let skills: SkillLibrary;
   let reflexion: ReflexionMemory;
 
   beforeEach(async () => {
-    // Clean up
-    [TEST_DB_PATH, `${TEST_DB_PATH}-wal`, `${TEST_DB_PATH}-shm`].forEach(file => {
-      if (fs.existsSync(file)) fs.unlinkSync(file);
-    });
+    // ADR-0076 A4: reset the dual-instance guard so each test gets a fresh
+    // SkillLibrary/ReflexionMemory singleton tied to this test's pglite
+    // cluster (otherwise tests share the first beforeEach's backend).
+    SkillLibrary._resetSingleton();
+    ReflexionMemory._resetSingleton();
 
-    // Initialize
-    db = new Database(TEST_DB_PATH);
-    db.pragma('journal_mode = WAL');
+    dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agentdb-skill-test-'));
+    backend = new PostgresBackend({ metric: 'cosine', dataDir });
+    await backend.initialize();
 
-    // Load schemas
+    // Load schemas (postgres dialect)
     const schemaPath = path.join(__dirname, '../../../src/schemas/schema.sql');
     if (fs.existsSync(schemaPath)) {
-      db.exec(fs.readFileSync(schemaPath, 'utf-8'));
+      await backend.exec(fs.readFileSync(schemaPath, 'utf-8'));
     }
 
     const frontierSchemaPath = path.join(__dirname, '../../../src/schemas/frontier-schema.sql');
     if (fs.existsSync(frontierSchemaPath)) {
-      db.exec(fs.readFileSync(frontierSchemaPath, 'utf-8'));
+      await backend.exec(fs.readFileSync(frontierSchemaPath, 'utf-8'));
     }
 
     embedder = new EmbeddingService({
@@ -48,15 +53,21 @@ describe('SkillLibrary', () => {
     });
     await embedder.initialize();
 
-    skills = new SkillLibrary(db, embedder);
-    reflexion = new ReflexionMemory(db, embedder);
+    skills = new SkillLibrary(backend, embedder);
+    reflexion = new ReflexionMemory(backend, embedder);
   });
 
-  afterEach(() => {
-    db.close();
-    [TEST_DB_PATH, `${TEST_DB_PATH}-wal`, `${TEST_DB_PATH}-shm`].forEach(file => {
-      if (fs.existsSync(file)) fs.unlinkSync(file);
-    });
+  afterEach(async () => {
+    try {
+      backend.close();
+    } catch {
+      /* best-effort */
+    }
+    try {
+      fs.rmSync(dataDir, { recursive: true, force: true });
+    } catch {
+      /* best-effort */
+    }
   });
 
   describe('createSkill', () => {
@@ -111,11 +122,17 @@ describe('SkillLibrary', () => {
       const skillId = await skills.createSkill(skill);
 
       // Verify embedding was stored
-      const embedding = db.prepare('SELECT embedding FROM skill_embeddings WHERE skill_id = ?')
-        .get(skillId) as any;
+      const result = await backend.query(
+        'SELECT embedding FROM skill_embeddings WHERE skill_id = $1',
+        [skillId]
+      );
+      const row = result.rows[0] as any;
 
-      expect(embedding).toBeDefined();
-      expect(embedding.embedding).toBeInstanceOf(Buffer);
+      expect(row).toBeDefined();
+      expect(row.embedding).toBeDefined();
+      // BYTEA is exposed as Buffer (pg) or Uint8Array (pglite)
+      const isBytes = Buffer.isBuffer(row.embedding) || row.embedding instanceof Uint8Array;
+      expect(isBytes).toBe(true);
     });
   });
 
@@ -205,12 +222,13 @@ describe('SkillLibrary', () => {
       });
 
       // Update with successful use
-      skills.updateSkillStats(skillId, true, 0.9, 90);
+      await skills.updateSkillStats(skillId, true, 0.9, 90);
 
       // Verify updated stats
-      const updated = db.prepare('SELECT * FROM skills WHERE id = ?').get(skillId) as any;
+      const result = await backend.query('SELECT * FROM skills WHERE id = $1', [skillId]);
+      const updated = result.rows[0] as any;
 
-      expect(updated.uses).toBe(11);
+      expect(Number(updated.uses)).toBe(11);
       expect(updated.success_rate).toBeGreaterThan(0.8);
       expect(updated.avg_reward).toBeGreaterThan(0.75);
     });
@@ -227,12 +245,13 @@ describe('SkillLibrary', () => {
       });
 
       // Update with failure
-      skills.updateSkillStats(skillId, false, 0.2, 200);
+      await skills.updateSkillStats(skillId, false, 0.2, 200);
 
       // Verify updated stats
-      const updated = db.prepare('SELECT * FROM skills WHERE id = ?').get(skillId) as any;
+      const result = await backend.query('SELECT * FROM skills WHERE id = $1', [skillId]);
+      const updated = result.rows[0] as any;
 
-      expect(updated.uses).toBe(11);
+      expect(Number(updated.uses)).toBe(11);
       expect(updated.success_rate).toBeLessThan(0.9);
       expect(updated.avg_reward).toBeLessThan(0.85);
     });
@@ -300,7 +319,7 @@ describe('SkillLibrary', () => {
 
     it('should update existing skills instead of duplicating', async () => {
       // First consolidation
-      const result1 = await skills.consolidateEpisodesIntoSkills({
+      await skills.consolidateEpisodesIntoSkills({
         minAttempts: 3,
         minReward: 0.7,
       });
@@ -392,8 +411,10 @@ describe('SkillLibrary', () => {
 
       const duration = Date.now() - startTime;
 
-      expect(duration).toBeLessThan(3000); // Should complete in less than 3 seconds
-    }, 10000);
+      // pglite-embedded is slower than better-sqlite3 native; 30s is generous
+      // for 50 sequential inserts including embedding generation.
+      expect(duration).toBeLessThan(30000);
+    }, 60000);
 
     it('should search skills efficiently', async () => {
       // Seed skills
@@ -418,7 +439,9 @@ describe('SkillLibrary', () => {
 
       const duration = Date.now() - startTime;
 
-      expect(duration).toBeLessThan(200); // Should complete in less than 200ms
-    });
+      // Single search across 30 skills with cosine similarity in JS;
+      // pglite query overhead is modest compared to embedding generation.
+      expect(duration).toBeLessThan(2000);
+    }, 60000);
   });
 });

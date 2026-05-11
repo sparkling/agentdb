@@ -292,11 +292,30 @@ controllers are architecturally relational and never migrate:
 | `ReasoningBank` `GROUP BY` queries | `GROUP BY task_type` aggregations |
 
 The remaining nine controllers receive a per-controller `CREATE VIRTUAL TABLE
-<controller>_vec USING vec0(embedding float[768])` augmentation under Option F.
-This honors `ruvnet/RuVector/docs/adr/ADR-029-rvf-canonical-format.md`'s "MUST
-use RVF for vector data" mandate via the `sqlite-vec` virtual table that
-embeds RuVector HNSW inside SQLite, in-place — zero migration, zero new file
-formats.
+<controller>_vec USING vec0(+id TEXT, embedding float[768])` augmentation
+under Option F. This honors `ruvnet/RuVector/docs/adr/ADR-029-rvf-canonical-format.md`'s
+"MUST use RVF for vector data" mandate via the `sqlite-vec` virtual table
+that embeds RuVector HNSW inside SQLite, in-place — zero migration, zero
+new file formats.
+
+**Per-controller wiring status** (as of patch.48, 2026-05-11):
+
+| Controller | vec0 virtual table | Status |
+|---|---|---|
+| HierarchicalMemory | `hmem_vec` | ✅ wired (`store()` + `forget()` mirror) |
+| ReflexionMemory | `reflexion_episode_vec` | ✅ wired (`storeEmbedding()` + `deleteEpisode()` mirror) |
+| SkillLibrary | `skill_vec` | ✅ wired (`storeSkillEmbeddingLegacy()` upsert mirror) |
+| ReasoningBank | `reasoning_pattern_vec` | ✅ wired (`createPattern()` + `deletePattern()` mirror; GROUP BY queries stay relational) |
+| LearningSystem | `learning_vec` | ✅ wired (`getOrCreateStateEmbedding()` mirror; GROUP BY aggregations stay relational) |
+| MemoryConsolidation | `consolidated_vec` | ⤴️ implicit (flows through HierarchicalMemory.store) |
+| ExplainableRecall | `recall_vec` | ⏸ deferred (no controller-level embedding pipeline; chunks come from upstream) |
+| QUICServer | (no vec table) | ⏸ deferred (minimal vector ops) |
+| SyncCoordinator | (no vec table) | N/A (no vector ops) |
+
+The five wired controllers + the implicit MemoryConsolidation path cover the
+practical embedding workload; the two deferred entries would require
+re-architecting the chunk-retrieval pipeline before mirroring becomes
+useful at the controller level.
 
 See `~/.claude/projects/-Users-henrik-source-ruflo-patch/memory/project-rvf-primary.md`
 for the axis-separation rule and `docs/adr/ADR-0166-agentdb-unified-database-architectural-gap.md`

@@ -1,69 +1,73 @@
 /**
  * Unit Tests for CausalMemoryGraph Controller
  *
- * Tests causal reasoning, intervention-based analysis, and uplift modeling
+ * ADR-0170 Phase B.7: ported from better-sqlite3 (sync) to PostgresBackend
+ * (pglite embedded, async). Each test gets a fresh ephemeral pglite cluster
+ * under `os.tmpdir()` so test isolation is preserved without WAL/-shm/-db
+ * cleanup hooks.
+ *
+ * The WITH RECURSIVE 5-hop chain exercise lives in the
+ * `getCausalChain (WITH RECURSIVE)` describe block — it verifies the
+ * postgres-dialect port of the SQLite recursive CTE: LEAST() instead of
+ * row-wise MIN(), explicit `::TEXT` casts on BIGINT path elements,
+ * COALESCE on uplift to avoid NULL propagation.
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import Database from 'better-sqlite3';
-import { CausalMemoryGraph, CausalEdge, CausalExperiment, CausalObservation } from '../../../src/controllers/CausalMemoryGraph.js';
+import { PostgresBackend } from '../../../src/backends/postgres/PostgresBackend.js';
+import {
+  CausalMemoryGraph,
+  CausalEdge,
+  CausalExperiment,
+  CausalObservation,
+} from '../../../src/controllers/CausalMemoryGraph.js';
 import * as fs from 'fs';
 import * as path from 'path';
-
-const TEST_DB_PATH = './tests/fixtures/test-causal.db';
+import * as os from 'os';
 
 describe('CausalMemoryGraph', () => {
-  let db: Database.Database;
+  let backend: PostgresBackend;
+  let dataDir: string;
   let causalGraph: CausalMemoryGraph;
 
-  beforeEach(() => {
-    // Clean up existing test database
-    if (fs.existsSync(TEST_DB_PATH)) {
-      fs.unlinkSync(TEST_DB_PATH);
-    }
-    if (fs.existsSync(`${TEST_DB_PATH}-wal`)) {
-      fs.unlinkSync(`${TEST_DB_PATH}-wal`);
-    }
-    if (fs.existsSync(`${TEST_DB_PATH}-shm`)) {
-      fs.unlinkSync(`${TEST_DB_PATH}-shm`);
-    }
+  beforeEach(async () => {
+    // Reset the dual-instance singleton so each test gets a fresh controller
+    // tied to this test's pglite cluster.
+    CausalMemoryGraph._resetSingleton();
 
-    // Initialize database
-    db = new Database(TEST_DB_PATH);
-    db.pragma('journal_mode = WAL');
+    dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agentdb-cmg-test-'));
+    backend = new PostgresBackend({ metric: 'cosine', dataDir });
+    await backend.initialize();
 
-    // Load base schema first (contains episodes, skills, patterns tables)
-    const baseSchemaPath = path.join(__dirname, '../../../src/schemas/schema.sql');
-    if (fs.existsSync(baseSchemaPath)) {
-      const baseSchema = fs.readFileSync(baseSchemaPath, 'utf-8');
-      db.exec(baseSchema);
+    // Load canonical postgres-dialect schemas (Phase A.5).
+    const schemaPath = path.join(__dirname, '../../../src/schemas/schema.sql');
+    if (fs.existsSync(schemaPath)) {
+      await backend.exec(fs.readFileSync(schemaPath, 'utf-8'));
     }
-
-    // Load frontier schema (contains causal_edges, experiments, observations)
     const frontierSchemaPath = path.join(__dirname, '../../../src/schemas/frontier-schema.sql');
     if (fs.existsSync(frontierSchemaPath)) {
-      const frontierSchema = fs.readFileSync(frontierSchemaPath, 'utf-8');
-      db.exec(frontierSchema);
+      await backend.exec(fs.readFileSync(frontierSchemaPath, 'utf-8'));
     }
 
-    causalGraph = new CausalMemoryGraph(db);
+    causalGraph = new CausalMemoryGraph(backend);
   });
 
-  afterEach(() => {
-    db.close();
-    if (fs.existsSync(TEST_DB_PATH)) {
-      fs.unlinkSync(TEST_DB_PATH);
+  afterEach(async () => {
+    CausalMemoryGraph._resetSingleton();
+    try {
+      backend.close();
+    } catch {
+      /* best-effort */
     }
-    if (fs.existsSync(`${TEST_DB_PATH}-wal`)) {
-      fs.unlinkSync(`${TEST_DB_PATH}-wal`);
-    }
-    if (fs.existsSync(`${TEST_DB_PATH}-shm`)) {
-      fs.unlinkSync(`${TEST_DB_PATH}-shm`);
+    try {
+      fs.rmSync(dataDir, { recursive: true, force: true });
+    } catch {
+      /* best-effort */
     }
   });
 
   describe('addCausalEdge', () => {
-    it('should add causal edge with all required fields', () => {
+    it('should add causal edge with all required fields', async () => {
       const edge: CausalEdge = {
         fromMemoryId: 1,
         fromMemoryType: 'episode',
@@ -76,13 +80,13 @@ describe('CausalMemoryGraph', () => {
         evidenceIds: ['e1', 'e2', 'e3'],
       };
 
-      const edgeId = causalGraph.addCausalEdge(edge);
+      const edgeId = await causalGraph.addCausalEdge(edge);
 
       expect(edgeId).toBeGreaterThan(0);
       expect(typeof edgeId).toBe('number');
     });
 
-    it('should add causal edge with minimal fields', () => {
+    it('should add causal edge with minimal fields', async () => {
       const edge: CausalEdge = {
         fromMemoryId: 1,
         fromMemoryType: 'skill',
@@ -92,12 +96,12 @@ describe('CausalMemoryGraph', () => {
         confidence: 0.8,
       };
 
-      const edgeId = causalGraph.addCausalEdge(edge);
+      const edgeId = await causalGraph.addCausalEdge(edge);
 
       expect(edgeId).toBeGreaterThan(0);
     });
 
-    it('should handle negative uplift (harmful effects)', () => {
+    it('should handle negative uplift (harmful effects)', async () => {
       const edge: CausalEdge = {
         fromMemoryId: 1,
         fromMemoryType: 'episode',
@@ -109,12 +113,12 @@ describe('CausalMemoryGraph', () => {
         sampleSize: 50,
       };
 
-      const edgeId = causalGraph.addCausalEdge(edge);
+      const edgeId = await causalGraph.addCausalEdge(edge);
 
       expect(edgeId).toBeGreaterThan(0);
     });
 
-    it('should store edge with mechanism explanation', () => {
+    it('should store edge with mechanism explanation', async () => {
       const edge: CausalEdge = {
         fromMemoryId: 1,
         fromMemoryType: 'episode',
@@ -126,14 +130,14 @@ describe('CausalMemoryGraph', () => {
         mechanism: 'Adding tests reduces bugs by catching errors early',
       };
 
-      const edgeId = causalGraph.addCausalEdge(edge);
+      const edgeId = await causalGraph.addCausalEdge(edge);
 
       expect(edgeId).toBeGreaterThan(0);
     });
   });
 
   describe('createExperiment', () => {
-    it('should create A/B test experiment', () => {
+    it('should create A/B test experiment', async () => {
       const experiment: CausalExperiment = {
         name: 'Test Impact of Code Reviews',
         hypothesis: 'Code reviews reduce bug rate',
@@ -145,12 +149,12 @@ describe('CausalMemoryGraph', () => {
         status: 'running',
       };
 
-      const expId = causalGraph.createExperiment(experiment);
+      const expId = await causalGraph.createExperiment(experiment);
 
       expect(expId).toBeGreaterThan(0);
     });
 
-    it('should create experiment without control group', () => {
+    it('should create experiment without control group', async () => {
       const experiment: CausalExperiment = {
         name: 'Test New Feature',
         hypothesis: 'Feature improves UX',
@@ -161,21 +165,22 @@ describe('CausalMemoryGraph', () => {
         status: 'running',
       };
 
-      const expId = causalGraph.createExperiment(experiment);
+      const expId = await causalGraph.createExperiment(experiment);
 
       expect(expId).toBeGreaterThan(0);
     });
   });
 
   describe('recordObservation', () => {
-    it('should record treatment observation', () => {
-      // Create episode first (required by foreign key constraint)
-      db.prepare(`
-        INSERT INTO episodes (id, ts, session_id, task, reward, success)
-        VALUES (1, ?, 'test-session', 'test task', 0.85, 1)
-      `).run(Date.now());
+    it('should record treatment observation', async () => {
+      // Create episode first (FK on causal_observations.episode_id).
+      await backend.query(
+        `INSERT INTO episodes (id, ts, session_id, task, reward, success)
+           VALUES ($1, $2, 'test-session', 'test task', 0.85, TRUE)`,
+        [1, Date.now()],
+      );
 
-      const expId = causalGraph.createExperiment({
+      const expId = await causalGraph.createExperiment({
         name: 'Test',
         hypothesis: 'Tests help',
         treatmentId: 1,
@@ -193,17 +198,17 @@ describe('CausalMemoryGraph', () => {
         outcomeType: 'reward',
       };
 
-      expect(() => causalGraph.recordObservation(observation)).not.toThrow();
+      await expect(causalGraph.recordObservation(observation)).resolves.toBeUndefined();
     });
 
-    it('should record control observation', () => {
-      // Create episode first (required by foreign key constraint)
-      db.prepare(`
-        INSERT INTO episodes (id, ts, session_id, task, reward, success)
-        VALUES (2, ?, 'test-session', 'test task', 0.65, 1)
-      `).run(Date.now());
+    it('should record control observation', async () => {
+      await backend.query(
+        `INSERT INTO episodes (id, ts, session_id, task, reward, success)
+           VALUES ($1, $2, 'test-session', 'test task', 0.65, TRUE)`,
+        [2, Date.now()],
+      );
 
-      const expId = causalGraph.createExperiment({
+      const expId = await causalGraph.createExperiment({
         name: 'Test',
         hypothesis: 'Tests help',
         treatmentId: 1,
@@ -221,23 +226,21 @@ describe('CausalMemoryGraph', () => {
         outcomeType: 'reward',
       };
 
-      expect(() => causalGraph.recordObservation(observation)).not.toThrow();
+      await expect(causalGraph.recordObservation(observation)).resolves.toBeUndefined();
     });
   });
 
   describe('calculateUplift', () => {
-    it('should calculate positive uplift', () => {
-      // Create all episodes first (required by foreign key constraint)
-      const insertEpisode = db.prepare(`
-        INSERT INTO episodes (id, ts, session_id, task, reward, success)
-        VALUES (?, ?, 'test-session', 'test task', ?, 1)
-      `);
-
+    it('should calculate positive uplift', async () => {
       for (let i = 0; i < 20; i++) {
-        insertEpisode.run(i, Date.now(), i < 10 ? 0.85 : 0.65);
+        await backend.query(
+          `INSERT INTO episodes (id, ts, session_id, task, reward, success)
+             VALUES ($1, $2, 'test-session', 'test task', $3, TRUE)`,
+          [i, Date.now(), i < 10 ? 0.85 : 0.65],
+        );
       }
 
-      const expId = causalGraph.createExperiment({
+      const expId = await causalGraph.createExperiment({
         name: 'Test',
         hypothesis: 'Tests help',
         treatmentId: 1,
@@ -247,9 +250,8 @@ describe('CausalMemoryGraph', () => {
         status: 'running',
       });
 
-      // Add treatment observations (higher rewards)
       for (let i = 0; i < 10; i++) {
-        causalGraph.recordObservation({
+        await causalGraph.recordObservation({
           experimentId: expId,
           episodeId: i,
           isTreatment: true,
@@ -258,9 +260,8 @@ describe('CausalMemoryGraph', () => {
         });
       }
 
-      // Add control observations (lower rewards)
       for (let i = 10; i < 20; i++) {
-        causalGraph.recordObservation({
+        await causalGraph.recordObservation({
           experimentId: expId,
           episodeId: i,
           isTreatment: false,
@@ -269,7 +270,7 @@ describe('CausalMemoryGraph', () => {
         });
       }
 
-      const result = causalGraph.calculateUplift(expId);
+      const result = await causalGraph.calculateUplift(expId);
 
       expect(result.uplift).toBeGreaterThan(0);
       expect(result.pValue).toBeGreaterThanOrEqual(0);
@@ -278,8 +279,8 @@ describe('CausalMemoryGraph', () => {
       expect(result.confidenceInterval[0]).toBeLessThan(result.confidenceInterval[1]);
     });
 
-    it('should handle experiment with no observations', () => {
-      const expId = causalGraph.createExperiment({
+    it('should handle experiment with no observations', async () => {
+      const expId = await causalGraph.createExperiment({
         name: 'Test',
         hypothesis: 'Tests help',
         treatmentId: 1,
@@ -289,7 +290,7 @@ describe('CausalMemoryGraph', () => {
         status: 'running',
       });
 
-      const result = causalGraph.calculateUplift(expId);
+      const result = await causalGraph.calculateUplift(expId);
 
       expect(result.uplift).toBe(0);
       expect(result.pValue).toBe(1.0);
@@ -297,9 +298,8 @@ describe('CausalMemoryGraph', () => {
   });
 
   describe('queryCausalEffects', () => {
-    beforeEach(() => {
-      // Seed some causal edges
-      causalGraph.addCausalEdge({
+    beforeEach(async () => {
+      await causalGraph.addCausalEdge({
         fromMemoryId: 1,
         fromMemoryType: 'episode',
         toMemoryId: 2,
@@ -310,7 +310,7 @@ describe('CausalMemoryGraph', () => {
         sampleSize: 100,
       });
 
-      causalGraph.addCausalEdge({
+      await causalGraph.addCausalEdge({
         fromMemoryId: 1,
         fromMemoryType: 'episode',
         toMemoryId: 3,
@@ -321,7 +321,7 @@ describe('CausalMemoryGraph', () => {
         sampleSize: 80,
       });
 
-      causalGraph.addCausalEdge({
+      await causalGraph.addCausalEdge({
         fromMemoryId: 2,
         fromMemoryType: 'episode',
         toMemoryId: 4,
@@ -333,8 +333,8 @@ describe('CausalMemoryGraph', () => {
       });
     });
 
-    it('should query causal effects by intervention', () => {
-      const effects = causalGraph.queryCausalEffects({
+    it('should query causal effects by intervention', async () => {
+      const effects = await causalGraph.queryCausalEffects({
         interventionMemoryId: 1,
         interventionMemoryType: 'episode',
       });
@@ -346,8 +346,8 @@ describe('CausalMemoryGraph', () => {
       });
     });
 
-    it('should filter by minimum confidence', () => {
-      const effects = causalGraph.queryCausalEffects({
+    it('should filter by minimum confidence', async () => {
+      const effects = await causalGraph.queryCausalEffects({
         interventionMemoryId: 1,
         interventionMemoryType: 'episode',
         minConfidence: 0.9,
@@ -358,8 +358,8 @@ describe('CausalMemoryGraph', () => {
       });
     });
 
-    it('should filter by minimum uplift', () => {
-      const effects = causalGraph.queryCausalEffects({
+    it('should filter by minimum uplift', async () => {
+      const effects = await causalGraph.queryCausalEffects({
         interventionMemoryId: 1,
         interventionMemoryType: 'episode',
         minUplift: 0.2,
@@ -370,14 +370,13 @@ describe('CausalMemoryGraph', () => {
       });
     });
 
-    it('should sort by impact (uplift * confidence)', () => {
-      const effects = causalGraph.queryCausalEffects({
+    it('should sort by impact (uplift * confidence)', async () => {
+      const effects = await causalGraph.queryCausalEffects({
         interventionMemoryId: 1,
         interventionMemoryType: 'episode',
         minConfidence: 0.5,
       });
 
-      // Verify descending order
       for (let i = 0; i < effects.length - 1; i++) {
         const impact1 = Math.abs(effects[i].uplift || 0) * effects[i].confidence;
         const impact2 = Math.abs(effects[i + 1].uplift || 0) * effects[i + 1].confidence;
@@ -386,8 +385,59 @@ describe('CausalMemoryGraph', () => {
     });
   });
 
+  describe('getCausalChain (WITH RECURSIVE)', () => {
+    it('should traverse multi-hop chain on postgres dialect', async () => {
+      // Build chain: 1 -> 2 -> 3 -> 4 (exercises the recursive arm with
+      // LEAST() aggregating confidence and column-type-consistent path
+      // concatenation under BIGSERIAL ids).
+      await causalGraph.addCausalEdge({
+        fromMemoryId: 1, fromMemoryType: 'episode',
+        toMemoryId: 2, toMemoryType: 'episode',
+        similarity: 0.9, uplift: 0.2, confidence: 0.9,
+      });
+      await causalGraph.addCausalEdge({
+        fromMemoryId: 2, fromMemoryType: 'episode',
+        toMemoryId: 3, toMemoryType: 'episode',
+        similarity: 0.85, uplift: 0.15, confidence: 0.85,
+      });
+      await causalGraph.addCausalEdge({
+        fromMemoryId: 3, fromMemoryType: 'episode',
+        toMemoryId: 4, toMemoryType: 'episode',
+        similarity: 0.8, uplift: 0.1, confidence: 0.8,
+      });
+
+      // 1-hop reachability (anchor row only).
+      const directChains = await causalGraph.getCausalChain(1, 2);
+      expect(directChains.length).toBeGreaterThan(0);
+      expect(directChains[0].path[0]).toBe(1);
+      expect(directChains[0].path[directChains[0].path.length - 1]).toBe(2);
+
+      // 3-hop chain — exercises the recursive arm.
+      const deepChains = await causalGraph.getCausalChain(1, 4, 5);
+      expect(deepChains.length).toBeGreaterThan(0);
+      const deepPath = deepChains[0].path;
+      expect(deepPath[0]).toBe(1);
+      expect(deepPath[deepPath.length - 1]).toBe(4);
+      // LEAST() over the chain — confidence must not exceed the weakest
+      // edge (0.8) and must clear the 0.5 floor the WHERE filter imposes.
+      expect(deepChains[0].confidence).toBeLessThanOrEqual(0.8);
+      expect(deepChains[0].confidence).toBeGreaterThanOrEqual(0.5);
+    });
+
+    it('should return empty chain when no path exists', async () => {
+      await causalGraph.addCausalEdge({
+        fromMemoryId: 1, fromMemoryType: 'episode',
+        toMemoryId: 2, toMemoryType: 'episode',
+        similarity: 0.9, uplift: 0.2, confidence: 0.9,
+      });
+
+      const chains = await causalGraph.getCausalChain(1, 99);
+      expect(chains).toEqual([]);
+    });
+  });
+
   describe('Edge Cases', () => {
-    it('should handle zero uplift', () => {
+    it('should handle zero uplift', async () => {
       const edge: CausalEdge = {
         fromMemoryId: 1,
         fromMemoryType: 'episode',
@@ -398,12 +448,12 @@ describe('CausalMemoryGraph', () => {
         confidence: 0.95,
       };
 
-      const edgeId = causalGraph.addCausalEdge(edge);
+      const edgeId = await causalGraph.addCausalEdge(edge);
 
       expect(edgeId).toBeGreaterThan(0);
     });
 
-    it('should handle very high confidence', () => {
+    it('should handle very high confidence', async () => {
       const edge: CausalEdge = {
         fromMemoryId: 1,
         fromMemoryType: 'episode',
@@ -415,12 +465,12 @@ describe('CausalMemoryGraph', () => {
         sampleSize: 1000,
       };
 
-      const edgeId = causalGraph.addCausalEdge(edge);
+      const edgeId = await causalGraph.addCausalEdge(edge);
 
       expect(edgeId).toBeGreaterThan(0);
     });
 
-    it('should handle low confidence edges', () => {
+    it('should handle low confidence edges', async () => {
       const edge: CausalEdge = {
         fromMemoryId: 1,
         fromMemoryType: 'episode',
@@ -432,12 +482,12 @@ describe('CausalMemoryGraph', () => {
         sampleSize: 10,
       };
 
-      const edgeId = causalGraph.addCausalEdge(edge);
+      const edgeId = await causalGraph.addCausalEdge(edge);
 
       expect(edgeId).toBeGreaterThan(0);
     });
 
-    it('should handle empty evidence IDs', () => {
+    it('should handle empty evidence IDs', async () => {
       const edge: CausalEdge = {
         fromMemoryId: 1,
         fromMemoryType: 'episode',
@@ -448,18 +498,18 @@ describe('CausalMemoryGraph', () => {
         evidenceIds: [],
       };
 
-      const edgeId = causalGraph.addCausalEdge(edge);
+      const edgeId = await causalGraph.addCausalEdge(edge);
 
       expect(edgeId).toBeGreaterThan(0);
     });
   });
 
   describe('Performance', () => {
-    it('should add 100 causal edges efficiently', () => {
+    it('should add 100 causal edges efficiently', async () => {
       const startTime = Date.now();
 
       for (let i = 0; i < 100; i++) {
-        causalGraph.addCausalEdge({
+        await causalGraph.addCausalEdge({
           fromMemoryId: i,
           fromMemoryType: 'episode',
           toMemoryId: i + 1,
@@ -473,13 +523,15 @@ describe('CausalMemoryGraph', () => {
 
       const duration = Date.now() - startTime;
 
-      expect(duration).toBeLessThan(1000); // Should complete in less than 1 second
+      // Postgres-substrate budget — round-trip cost is higher than
+      // SQLite's in-process .prepare().run(). 5 s is a generous ceiling
+      // for 100 sequential INSERTs on pglite.
+      expect(duration).toBeLessThan(5000);
     });
 
-    it('should query causal effects efficiently', () => {
-      // Add test data
+    it('should query causal effects efficiently', async () => {
       for (let i = 0; i < 50; i++) {
-        causalGraph.addCausalEdge({
+        await causalGraph.addCausalEdge({
           fromMemoryId: 1,
           fromMemoryType: 'episode',
           toMemoryId: i + 2,
@@ -492,7 +544,7 @@ describe('CausalMemoryGraph', () => {
 
       const startTime = Date.now();
 
-      const effects = causalGraph.queryCausalEffects({
+      const effects = await causalGraph.queryCausalEffects({
         interventionMemoryId: 1,
         interventionMemoryType: 'episode',
         minConfidence: 0.7,
@@ -501,7 +553,9 @@ describe('CausalMemoryGraph', () => {
       const duration = Date.now() - startTime;
 
       expect(effects.length).toBeGreaterThan(0);
-      expect(duration).toBeLessThan(100); // Should complete in less than 100ms
+      // Single index-backed SELECT — pglite typically completes in
+      // single-digit ms; budget is conservative.
+      expect(duration).toBeLessThan(500);
     });
   });
 });

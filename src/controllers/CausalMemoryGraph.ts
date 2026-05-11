@@ -9,17 +9,30 @@
  * - Uplift modeling from A/B testing
  * - Instrumental variable methods
  *
- * v2.0.0-alpha.3 Features:
- * - HyperbolicAttention for tree-structured causal chain retrieval
- * - Poincaré embeddings for hierarchical relationships
- * - Feature flag: ENABLE_HYPERBOLIC_ATTENTION (default: false)
- * - 100% backward compatible with fallback to standard retrieval
+ * ADR-0170 Phase B.7 port (2026-05-11):
+ *   - PostgreSQL substrate via PostgresBackend (pglite embedded or postgres://server)
+ *   - WITH RECURSIVE 5-hop chain traversal hardened for postgres dialect:
+ *     SQLite `MIN(a,b)` row-wise → postgres `LEAST(a,b)`; explicit `::TEXT` /
+ *     `::BIGINT` casts in the recursive UNION ALL so column types match
+ *     between anchor and recursive arms; `UNION ALL` retained for path
+ *     enumeration (paths are distinct by construction); cycle prevention
+ *     via the existing manual `path NOT LIKE '%...%'` check (no
+ *     postgres-native CYCLE clause — keeps the query portable to pglite
+ *     which targets postgres 15).
+ *   - `@ruvector/graph-node` Cypher branch retired per resolution-J
+ *     (zero in-fork consumers; Cypher WHERE evaluator incomplete; every
+ *     in-use query reduces cleanly to SQL).
+ *   - SQLite-shaped CREATE TABLE bootstrap removed — schema lives in
+ *     `schemas/frontier-schema.sql` and is loaded by AgentDB init against
+ *     PostgresBackend.exec().
+ *
+ * v2.0.0-alpha.3 Features (retained):
+ *   - HyperbolicAttention for tree-structured causal chain retrieval
+ *   - Poincaré embeddings for hierarchical relationships
+ *   - Feature flag: ENABLE_HYPERBOLIC_ATTENTION (default: false)
  */
 
-import type { IDatabaseConnection, DatabaseRows } from '../types/database.types.js';
-import { normalizeRowId } from '../types/database.types.js';
-import type { GraphDatabaseAdapter, CausalEdge as GraphCausalEdge } from '../backends/graph/GraphDatabaseAdapter.js';
-import { NodeIdMapper } from '../utils/NodeIdMapper.js';
+import type { PostgresBackend } from '../backends/postgres/PostgresBackend.js';
 import { AttentionService, type HyperbolicAttentionConfig } from '../utils/LegacyAttentionAdapter.js';
 import { EmbeddingService } from './EmbeddingService.js';
 import type { VectorBackend } from '../backends/VectorBackend.js';
@@ -106,30 +119,31 @@ let _singleton: InstanceType<typeof CausalMemoryGraph> | null = null;
 
 export class CausalMemoryGraph {
   // ADR-0076 A4: definite-assignment due to _singleton early-return pattern in ctor
-  private db!: IDatabaseConnection;
-  private graphBackend?: any; // GraphBackend or GraphDatabaseAdapter
+  private db!: PostgresBackend;
   private attentionService?: AttentionService;
   private embedder?: EmbeddingService;
   private vectorBackend?: VectorBackend;
   private config!: CausalMemoryGraphConfig;
 
   /**
-   * Constructor supports both v1 (legacy) and v2 (with attention) modes
-   *
-   * v1 mode: new CausalMemoryGraph(db)
-   * v2 mode: new CausalMemoryGraph(db, graphBackend, embedder, config, vectorBackend)
-   *
-   * @param db - Database connection
-   * @param graphBackend - Optional graph database adapter
-   * @param embedder - Optional embedding service for generating embeddings
-   * @param config - Optional configuration for hyperbolic attention
-   * @param vectorBackend - Optional vector backend for optimized similarity search (150x faster than SQLite)
+   * Reset the dual-instance singleton guard. Used by tests.
    */
   static _resetSingleton(): void { _singleton = null; }
 
+  /**
+   * Construct CausalMemoryGraph against a postgres-backed substrate.
+   *
+   * Phase B.7 signature (was: db, graphBackend, embedder, config, vectorBackend, attentionService).
+   * The `graphBackend` parameter is removed — graph-node Cypher path retires under postgres.
+   *
+   * @param db - PostgresBackend handle (pglite embedded or postgres://server)
+   * @param embedder - Optional embedding service for mechanism embeddings
+   * @param config - Optional configuration for hyperbolic attention
+   * @param vectorBackend - Optional vector backend for similarity search
+   * @param attentionService - Optional shared AttentionService singleton
+   */
   constructor(
-    db: IDatabaseConnection,
-    graphBackend?: any,
+    db: PostgresBackend,
     embedder?: EmbeddingService,
     config?: CausalMemoryGraphConfig,
     vectorBackend?: VectorBackend,
@@ -143,7 +157,6 @@ export class CausalMemoryGraph {
     }
     _singleton = this;
     this.db = db;
-    this.graphBackend = graphBackend;
     this.embedder = embedder;
     this.vectorBackend = vectorBackend;
     this.config = {
@@ -151,52 +164,17 @@ export class CausalMemoryGraph {
       ...config,
     };
 
-    // ADR-0090 B5 fix (W2-I3): initialize SQLite schema on construction.
-    // Previously only the standalone agentdb-mcp-server boot path ran the
-    // frontier-schema.sql DDL (line 14-49). When the fork's memory-router
-    // instantiated CausalMemoryGraph via ControllerRegistry the
-    // `causal_edges` table did not exist, so every downstream caller
-    // (CausalRecall.search, CausalRecall.getStats, NightlyLearner.
-    // discoverCausalEdges, ExplainableRecall.recall) threw SqliteError
-    // "no such table: causal_edges". This mirrors the ReflexionMemory fix
-    // in commit 7a977f1 and the class-level pattern used by ReasoningBank
-    // / LearningSystem / HierarchicalMemory / MemoryConsolidation /
-    // AttestationLog / SkillLibrary. Schema lifted verbatim from
-    // schemas/frontier-schema.sql lines 14-49 — idempotent, safe across
-    // restarts, and reflects the upstream source of truth.
-    if (this.db && typeof (this.db as any).exec === 'function') {
-      (this.db as any).exec(`
-        CREATE TABLE IF NOT EXISTS causal_edges (
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          from_memory_id INTEGER NOT NULL,
-          from_memory_type TEXT NOT NULL,
-          to_memory_id INTEGER NOT NULL,
-          to_memory_type TEXT NOT NULL,
-          similarity REAL NOT NULL DEFAULT 0.0,
-          uplift REAL,
-          confidence REAL DEFAULT 0.5,
-          sample_size INTEGER,
-          evidence_ids TEXT,
-          experiment_ids TEXT,
-          confounder_score REAL,
-          mechanism TEXT,
-          created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
-          updated_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
-          last_validated_at INTEGER,
-          metadata JSON
-        );
-        CREATE INDEX IF NOT EXISTS idx_causal_edges_from ON causal_edges(from_memory_id, from_memory_type);
-        CREATE INDEX IF NOT EXISTS idx_causal_edges_to ON causal_edges(to_memory_id, to_memory_type);
-        CREATE INDEX IF NOT EXISTS idx_causal_edges_uplift ON causal_edges(uplift DESC);
-        CREATE INDEX IF NOT EXISTS idx_causal_edges_confidence ON causal_edges(confidence DESC);
-      `);
-    }
+    // Schema is owned by `schemas/frontier-schema.sql` and applied at
+    // AgentDB init time. The Phase A.5 schemas use BIGSERIAL /
+    // EXTRACT(EPOCH FROM NOW()) / JSONB / BOOLEAN — postgres dialect.
+    // No per-controller DDL bootstrap (ADR-0170 Phase B.7).
 
-    // Use injected AttentionService if provided, else create one when needed
     if (attentionService) {
       this.attentionService = attentionService;
     } else if (embedder && this.config.ENABLE_HYPERBOLIC_ATTENTION) {
-      this.attentionService = new AttentionService(db, {
+      // AttentionService doesn't reach into the SQL substrate; the db
+      // handle is forwarded as-is.
+      this.attentionService = new AttentionService(db as any, {
         hyperbolic: {
           enabled: true,
           ...this.config.hyperbolicConfig,
@@ -206,87 +184,47 @@ export class CausalMemoryGraph {
   }
 
   /**
-   * Add a causal edge between memories
+   * Add a causal edge between memories.
    *
-   * When vectorBackend is available, stores the edge embedding for fast similarity search.
-   * This enables finding similar causal patterns across the memory graph.
+   * When vectorBackend is available, also stores the mechanism embedding
+   * for fast similarity search across the causal graph.
    */
   async addCausalEdge(edge: CausalEdge): Promise<number> {
-    // Create embedding for causal mechanism if embedder is available
     const mechanismText = edge.mechanism || `${edge.fromMemoryType}-${edge.toMemoryType} causal link`;
     let embedding: Float32Array;
 
     if (this.embedder) {
       embedding = await this.embedder.embed(mechanismText);
     } else {
-      // Fallback to zero embedding if no embedder available
       embedding = new Float32Array(getEmbeddingConfig().dimension).fill(0);
     }
 
-    // Use GraphDatabaseAdapter if available (AgentDB v2)
-    if (this.graphBackend && 'createCausalEdge' in this.graphBackend) {
-      const graphAdapter = this.graphBackend as any as GraphDatabaseAdapter;
-
-      // Convert episode IDs to string format expected by graph database
-      // Use NodeIdMapper to get full node IDs from numeric IDs
-      const mapper = NodeIdMapper.getInstance();
-
-      const fromNodeId = typeof edge.fromMemoryId === 'string'
-        ? edge.fromMemoryId
-        : (mapper.getNodeId(edge.fromMemoryId) || `${edge.fromMemoryType}-${edge.fromMemoryId}`);
-
-      const toNodeId = typeof edge.toMemoryId === 'string'
-        ? edge.toMemoryId
-        : (mapper.getNodeId(edge.toMemoryId) || `${edge.toMemoryType}-${edge.toMemoryId}`);
-
-      const graphEdge: GraphCausalEdge = {
-        from: fromNodeId,
-        to: toNodeId,
-        mechanism: mechanismText,
-        uplift: edge.uplift || 0,
-        confidence: edge.confidence,
-        sampleSize: edge.sampleSize || 0
-      };
-
-      const edgeId = await graphAdapter.createCausalEdge(graphEdge, embedding);
-      // Convert string ID to numeric ID for compatibility
-      // Extract numeric ID from string format "type-number" or return hash
-      if (typeof edgeId === 'number') {
-        return edgeId;
-      }
-      // Parse numeric ID from string format like "edge-123"
-      const numMatch = String(edgeId).match(/(\d+)$/);
-      return numMatch ? parseInt(numMatch[1], 10) : Math.abs(this.hashString(String(edgeId)));
-    }
-
-    // Fallback to SQLite
-    const stmt = this.db.prepare(`
-      INSERT INTO causal_edges (
-        from_memory_id, from_memory_type, to_memory_id, to_memory_type,
-        similarity, uplift, confidence, sample_size,
-        evidence_ids, confounder_score,
-        mechanism, metadata
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `);
-
-    const result = stmt.run(
-      edge.fromMemoryId,
-      edge.fromMemoryType,
-      edge.toMemoryId,
-      edge.toMemoryType,
-      edge.similarity,
-      edge.uplift || null,
-      edge.confidence,
-      edge.sampleSize || null,
-      edge.evidenceIds ? JSON.stringify(edge.evidenceIds) : null,
-      edge.confounderScore || null,
-      edge.mechanism || null,
-      edge.metadata ? JSON.stringify(edge.metadata) : null
+    const result = await this.db.query(
+      `INSERT INTO causal_edges (
+         from_memory_id, from_memory_type, to_memory_id, to_memory_type,
+         similarity, uplift, confidence, sample_size,
+         evidence_ids, confounder_score,
+         mechanism, metadata
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+       RETURNING id`,
+      [
+        edge.fromMemoryId,
+        edge.fromMemoryType,
+        edge.toMemoryId,
+        edge.toMemoryType,
+        edge.similarity,
+        edge.uplift ?? null,
+        edge.confidence,
+        edge.sampleSize ?? null,
+        edge.evidenceIds ? JSON.stringify(edge.evidenceIds) : null,
+        edge.confounderScore ?? null,
+        edge.mechanism ?? null,
+        edge.metadata ? JSON.stringify(edge.metadata) : null,
+      ],
     );
 
-    const edgeId = normalizeRowId(result.lastInsertRowid);
+    const edgeId = Number((result.rows[0] as any).id);
 
-    // Store embedding in VectorBackend for fast similarity search
     if (this.vectorBackend && embedding) {
       this.vectorBackend.insert(`causal-edge:${edgeId}`, embedding, {
         fromMemoryId: edge.fromMemoryId,
@@ -305,130 +243,117 @@ export class CausalMemoryGraph {
   /**
    * Create a causal experiment (A/B test)
    */
-  createExperiment(experiment: CausalExperiment): number {
-    const stmt = this.db.prepare(`
-      INSERT INTO causal_experiments (
-        name, hypothesis, treatment_id, treatment_type, control_id,
-        start_time, sample_size, status, metadata
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `);
-
-    const result = stmt.run(
-      experiment.name,
-      experiment.hypothesis,
-      experiment.treatmentId,
-      experiment.treatmentType,
-      experiment.controlId || null,
-      experiment.startTime,
-      experiment.sampleSize,
-      experiment.status,
-      experiment.metadata ? JSON.stringify(experiment.metadata) : null
+  async createExperiment(experiment: CausalExperiment): Promise<number> {
+    const result = await this.db.query(
+      `INSERT INTO causal_experiments (
+         name, hypothesis, treatment_id, treatment_type, control_id,
+         start_time, sample_size, status, metadata
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+       RETURNING id`,
+      [
+        experiment.name,
+        experiment.hypothesis,
+        experiment.treatmentId,
+        experiment.treatmentType,
+        experiment.controlId ?? null,
+        experiment.startTime,
+        experiment.sampleSize,
+        experiment.status,
+        experiment.metadata ? JSON.stringify(experiment.metadata) : null,
+      ],
     );
 
-    return normalizeRowId(result.lastInsertRowid);
+    return Number((result.rows[0] as any).id);
   }
 
   /**
    * Record an observation in an experiment
    */
-  recordObservation(observation: CausalObservation): void {
-    const stmt = this.db.prepare(`
-      INSERT INTO causal_observations (
-        experiment_id, episode_id, is_treatment, outcome_value, outcome_type, context
-      ) VALUES (?, ?, ?, ?, ?, ?)
-    `);
-
-    stmt.run(
-      observation.experimentId,
-      observation.episodeId,
-      observation.isTreatment ? 1 : 0,
-      observation.outcomeValue,
-      observation.outcomeType,
-      observation.context ? JSON.stringify(observation.context) : null
+  async recordObservation(observation: CausalObservation): Promise<void> {
+    await this.db.query(
+      `INSERT INTO causal_observations (
+         experiment_id, episode_id, is_treatment, outcome_value, outcome_type, context
+       ) VALUES ($1, $2, $3, $4, $5, $6)`,
+      [
+        observation.experimentId,
+        observation.episodeId,
+        observation.isTreatment,
+        observation.outcomeValue,
+        observation.outcomeType,
+        observation.context ? JSON.stringify(observation.context) : null,
+      ],
     );
 
-    // Update sample size
-    this.db.prepare(`
-      UPDATE causal_experiments
-      SET sample_size = sample_size + 1
-      WHERE id = ?
-    `).run(observation.experimentId);
+    await this.db.query(
+      `UPDATE causal_experiments
+         SET sample_size = sample_size + 1
+       WHERE id = $1`,
+      [observation.experimentId],
+    );
   }
 
   /**
-   * Calculate uplift for an experiment
+   * Calculate uplift for an experiment.
+   *
+   * Postgres-substrate note: `is_treatment` is a BOOLEAN column under
+   * postgres (was 0/1 INTEGER under SQLite). Filter on `=== true` /
+   * `=== false` after the rows come back.
    */
-  calculateUplift(experimentId: number): {
+  async calculateUplift(experimentId: number): Promise<{
     uplift: number;
     pValue: number;
     confidenceInterval: [number, number];
-  } {
-    interface ObservationRow {
-      is_treatment: number;
-      outcome_value: number;
-    }
-
-    // Get treatment and control observations
-    const observations = this.db.prepare<ObservationRow>(`
-      SELECT is_treatment, outcome_value
-      FROM causal_observations
-      WHERE experiment_id = ?
-    `).all(experimentId);
+  }> {
+    const observationsResult = await this.db.query(
+      `SELECT is_treatment, outcome_value
+         FROM causal_observations
+        WHERE experiment_id = $1`,
+      [experimentId],
+    );
+    const observations = observationsResult.rows as Array<{ is_treatment: boolean; outcome_value: number }>;
 
     const treatmentValues = observations
-      .filter(o => o.is_treatment === 1)
+      .filter(o => o.is_treatment === true)
       .map(o => o.outcome_value);
 
     const controlValues = observations
-      .filter(o => o.is_treatment === 0)
+      .filter(o => o.is_treatment === false)
       .map(o => o.outcome_value);
 
     if (treatmentValues.length === 0 || controlValues.length === 0) {
       return { uplift: 0, pValue: 1.0, confidenceInterval: [0, 0] };
     }
 
-    // Calculate means
     const treatmentMean = this.mean(treatmentValues);
     const controlMean = this.mean(controlValues);
     const uplift = treatmentMean - controlMean;
 
-    // Calculate standard errors
     const treatmentSE = this.standardError(treatmentValues);
     const controlSE = this.standardError(controlValues);
     const pooledSE = Math.sqrt(treatmentSE ** 2 + controlSE ** 2);
 
-    // t-statistic and p-value (two-tailed)
     const tStat = uplift / pooledSE;
     const df = treatmentValues.length + controlValues.length - 2;
     const pValue = 2 * (1 - this.tCDF(Math.abs(tStat), df));
 
-    // 95% confidence interval
     const tCritical = this.tInverse(0.025, df);
     const marginOfError = tCritical * pooledSE;
     const confidenceInterval: [number, number] = [
       uplift - marginOfError,
-      uplift + marginOfError
+      uplift + marginOfError,
     ];
 
-    // Update experiment with results
-    this.db.prepare(`
-      UPDATE causal_experiments
-      SET treatment_mean = ?,
-          control_mean = ?,
-          uplift = ?,
-          p_value = ?,
-          confidence_interval_low = ?,
-          confidence_interval_high = ?,
-          status = 'completed'
-      WHERE id = ?
-    `).run(
-      treatmentMean,
-      controlMean,
-      uplift,
-      pValue,
-      confidenceInterval[0],
-      confidenceInterval[1],
-      experimentId
+    await this.db.query(
+      `UPDATE causal_experiments
+          SET treatment_mean = $1,
+              control_mean = $2,
+              uplift = $3,
+              p_value = $4,
+              confidence_interval_low = $5,
+              confidence_interval_high = $6,
+              status = 'completed'
+        WHERE id = $7`,
+      [treatmentMean, controlMean, uplift, pValue, confidenceInterval[0], confidenceInterval[1], experimentId],
     );
 
     return { uplift, pValue, confidenceInterval };
@@ -437,92 +362,85 @@ export class CausalMemoryGraph {
   /**
    * Query causal effects
    */
-  queryCausalEffects(query: CausalQuery): CausalEdge[] {
+  async queryCausalEffects(query: CausalQuery): Promise<CausalEdge[]> {
     const {
       interventionMemoryId,
       interventionMemoryType,
       outcomeMemoryId,
       minConfidence = 0.5,
-      minUplift = 0.0
+      minUplift = 0.0,
     } = query;
 
     let sql = `
       SELECT * FROM causal_edges
-      WHERE from_memory_id = ?
-        AND from_memory_type = ?
-        AND confidence >= ?
-        AND ABS(uplift) >= ?
+       WHERE from_memory_id = $1
+         AND from_memory_type = $2
+         AND confidence >= $3
+         AND ABS(COALESCE(uplift, 0)) >= $4
     `;
-
-    const params: any[] = [
+    const params: unknown[] = [
       interventionMemoryId,
       interventionMemoryType,
       minConfidence,
-      minUplift
+      minUplift,
     ];
 
-    if (outcomeMemoryId) {
-      sql += ' AND to_memory_id = ?';
+    if (outcomeMemoryId !== undefined) {
       params.push(outcomeMemoryId);
+      sql += ` AND to_memory_id = $${params.length}`;
     }
 
-    sql += ' ORDER BY ABS(uplift) * confidence DESC';
+    sql += ' ORDER BY ABS(COALESCE(uplift, 0)) * confidence DESC';
 
-    const rows = this.db.prepare<DatabaseRows.CausalEdge>(sql).all(...params);
-
-    return rows.map(row => this.rowToCausalEdge(row));
+    const result = await this.db.query(sql, params);
+    return (result.rows as any[]).map(row => this.rowToCausalEdge(row));
   }
 
   /**
-   * Find similar causal patterns using vector similarity search
+   * Find similar causal patterns using vector similarity search.
    *
-   * Uses vectorBackend for fast similarity search (150x faster than SQLite).
-   * This enables discovering analogous causal relationships across different
-   * domains or contexts.
+   * Postgres-substrate note: the k-NN search still routes through the
+   * injected VectorBackend (RuVector/RVF) in Phase B. Phase C lights up
+   * pgvector and lets the planner do the search natively.
    *
    * @param mechanism - The causal mechanism description to search for
    * @param k - Number of similar patterns to return (default: 10)
    * @param minConfidence - Minimum confidence threshold (default: 0.5)
-   * @returns Similar causal edges with similarity scores
    */
   async findSimilarCausalPatterns(
     mechanism: string,
     k: number = 10,
-    minConfidence: number = 0.5
+    minConfidence: number = 0.5,
   ): Promise<Array<CausalEdge & { similarity: number }>> {
-    // If no embedder or vectorBackend, return empty array
     if (!this.embedder || !this.vectorBackend) {
       return [];
     }
 
-    // Generate embedding for the query mechanism
     const queryEmbedding = await this.embedder.embed(mechanism);
+    const results = this.vectorBackend.search(queryEmbedding, k * 2);
 
-    // Search for similar causal edges using vectorBackend
-    const results = this.vectorBackend.search(queryEmbedding, k * 2); // Get more to filter by confidence
-
-    // Filter results to only causal-edge entries and by confidence
     const filteredResults = results.filter(result => {
       if (!result.id.startsWith('causal-edge:')) return false;
       const confidence = result.metadata?.confidence as number | undefined;
       return confidence === undefined || confidence >= minConfidence;
     });
 
-    // Get full edge data from database
     const edges: Array<CausalEdge & { similarity: number }> = [];
 
     for (const result of filteredResults.slice(0, k)) {
       const edgeId = parseInt(result.id.replace('causal-edge:', ''), 10);
       if (isNaN(edgeId)) continue;
 
-      const row = this.db.prepare<DatabaseRows.CausalEdge>(
-        'SELECT * FROM causal_edges WHERE id = ?'
-      ).get(edgeId);
+      const rowResult = await this.db.query(
+        'SELECT * FROM causal_edges WHERE id = $1',
+        [edgeId],
+      );
+      const row = rowResult.rows[0];
 
       if (row) {
         edges.push({
-          ...this.rowToCausalEdge(row),
-          similarity: result.similarity
+          ...this.rowToCausalEdge(row as any),
+          similarity: result.similarity,
         });
       }
     }
@@ -531,10 +449,21 @@ export class CausalMemoryGraph {
   }
 
   /**
-   * Get causal chain (multi-hop reasoning)
+   * Get causal chain (multi-hop reasoning).
    *
-   * v2: Uses HyperbolicAttention if enabled for tree-structured retrieval
-   * v1: Falls back to recursive CTE with standard scoring
+   * Phase B.7 — postgres dialect details for the 5-hop WITH RECURSIVE:
+   *   - `MIN(chain.min_confidence, ce.confidence)` (SQLite row-wise) is
+   *     rewritten as `LEAST(chain.min_confidence, ce.confidence)` — postgres
+   *     `MIN` is the aggregate, `LEAST` is the row-level minimum.
+   *   - BIGINT id columns are cast to TEXT explicitly when concatenated
+   *     into the chain path so the recursive CTE's column types line up
+   *     between anchor and recursive arms (postgres is strict; SQLite
+   *     was lenient).
+   *   - `COALESCE(uplift, 0)` guards against NULL uplift breaking the
+   *     `total_uplift + ce.uplift` arithmetic (postgres makes NULL+REAL=NULL,
+   *     which would propagate up the entire chain).
+   *   - Cycle prevention is the same manual `path NOT LIKE '%...%'`
+   *     pattern with an explicit `::TEXT` cast on the BIGINT id.
    *
    * @param fromMemoryId - Starting memory node
    * @param toMemoryId - Target memory node
@@ -550,85 +479,64 @@ export class CausalMemoryGraph {
       computeTimeMs: number;
     };
   }[]> {
-    // v2: Use HyperbolicAttention if enabled
     if (this.attentionService && this.embedder) {
       return this.getCausalChainWithAttention(fromMemoryId, toMemoryId, maxDepth);
     }
 
-    interface ChainRow {
-      path: string;
-      total_uplift: number;
-      min_confidence: number;
-    }
+    const result = await this.db.query(
+      `WITH RECURSIVE chain(from_id, to_id, depth, path, total_uplift, min_confidence) AS (
+         SELECT
+           from_memory_id,
+           to_memory_id,
+           1,
+           from_memory_id::TEXT || '->' || to_memory_id::TEXT,
+           COALESCE(uplift, 0)::REAL,
+           confidence
+         FROM causal_edges
+         WHERE from_memory_id = $1 AND confidence >= 0.5
 
-    // v1: Legacy recursive CTE
-    const chains = this.db.prepare<ChainRow>(`
-      WITH RECURSIVE chain(from_id, to_id, depth, path, total_uplift, min_confidence) AS (
-        SELECT
-          from_memory_id,
-          to_memory_id,
-          1,
-          from_memory_id || '->' || to_memory_id,
-          uplift,
-          confidence
-        FROM causal_edges
-        WHERE from_memory_id = ? AND confidence >= 0.5
+         UNION ALL
 
-        UNION ALL
+         SELECT
+           chain.from_id,
+           ce.to_memory_id,
+           chain.depth + 1,
+           chain.path || '->' || ce.to_memory_id::TEXT,
+           chain.total_uplift + COALESCE(ce.uplift, 0)::REAL,
+           LEAST(chain.min_confidence, ce.confidence)
+         FROM chain
+         JOIN causal_edges ce ON chain.to_id = ce.from_memory_id
+         WHERE chain.depth < $2
+           AND ce.confidence >= 0.5
+           AND chain.path NOT LIKE '%' || ce.to_memory_id::TEXT || '%'
+       )
+       SELECT path, total_uplift, min_confidence
+         FROM chain
+        WHERE to_id = $3
+        ORDER BY total_uplift DESC
+        LIMIT 10`,
+      [fromMemoryId, maxDepth, toMemoryId],
+    );
 
-        SELECT
-          chain.from_id,
-          ce.to_memory_id,
-          chain.depth + 1,
-          chain.path || '->' || ce.to_memory_id,
-          chain.total_uplift + ce.uplift,
-          MIN(chain.min_confidence, ce.confidence)
-        FROM chain
-        JOIN causal_edges ce ON chain.to_id = ce.from_memory_id
-        WHERE chain.depth < ?
-          AND ce.confidence >= 0.5
-          AND chain.path NOT LIKE '%' || ce.to_memory_id || '%'
-      )
-      SELECT path, total_uplift, min_confidence
-      FROM chain
-      WHERE to_id = ?
-      ORDER BY total_uplift DESC
-      LIMIT 10
-    `).all(fromMemoryId, maxDepth, toMemoryId);
+    const chains = result.rows as Array<{ path: string; total_uplift: number; min_confidence: number }>;
 
     return chains.map(row => ({
       path: row.path.split('->').map(Number),
       totalUplift: row.total_uplift,
-      confidence: row.min_confidence
+      confidence: row.min_confidence,
     }));
   }
 
   /**
-   * Hash a string to a positive integer
-   * Used for converting string IDs to numeric IDs for backward compatibility
-   */
-  private hashString(str: string): number {
-    let hash = 0;
-    for (let i = 0; i < str.length; i++) {
-      const char = str.charCodeAt(i);
-      hash = ((hash << 5) - hash) + char;
-      hash = hash & hash; // Convert to 32bit integer
-    }
-    return Math.abs(hash);
-  }
-
-  /**
-   * Get causal chain with HyperbolicAttention (v2 feature)
+   * Get causal chain with HyperbolicAttention (v2 feature).
    *
-   * Uses Poincaré embeddings to model hierarchical causal relationships.
-   * Retrieves chains based on hyperbolic distance in embedding space.
-   *
-   * @private
+   * Same WITH RECURSIVE port rules as v1; attention re-ranking is pure
+   * compute over the row set the query returns.
    */
   private async getCausalChainWithAttention(
     fromMemoryId: number,
     toMemoryId: number,
-    maxDepth: number
+    maxDepth: number,
   ): Promise<{
     path: number[];
     totalUplift: number;
@@ -638,52 +546,55 @@ export class CausalMemoryGraph {
       computeTimeMs: number;
     };
   }[]> {
-    // Get all candidate chains using CTE
-    const candidateChains = this.db.prepare(`
-      WITH RECURSIVE chain(from_id, to_id, depth, path, total_uplift, min_confidence) AS (
-        SELECT
-          from_memory_id,
-          to_memory_id,
-          1,
-          from_memory_id || '->' || to_memory_id,
-          uplift,
-          confidence
-        FROM causal_edges
-        WHERE from_memory_id = ? AND confidence >= 0.5
+    const candidatesResult = await this.db.query(
+      `WITH RECURSIVE chain(from_id, to_id, depth, path, total_uplift, min_confidence) AS (
+         SELECT
+           from_memory_id,
+           to_memory_id,
+           1,
+           from_memory_id::TEXT || '->' || to_memory_id::TEXT,
+           COALESCE(uplift, 0)::REAL,
+           confidence
+         FROM causal_edges
+         WHERE from_memory_id = $1 AND confidence >= 0.5
 
-        UNION ALL
+         UNION ALL
 
-        SELECT
-          chain.from_id,
-          ce.to_memory_id,
-          chain.depth + 1,
-          chain.path || '->' || ce.to_memory_id,
-          chain.total_uplift + ce.uplift,
-          MIN(chain.min_confidence, ce.confidence)
-        FROM chain
-        JOIN causal_edges ce ON chain.to_id = ce.from_memory_id
-        WHERE chain.depth < ?
-          AND ce.confidence >= 0.5
-          AND chain.path NOT LIKE '%' || ce.to_memory_id || '%'
-      )
-      SELECT path, total_uplift, min_confidence
-      FROM chain
-      WHERE to_id = ?
-      LIMIT 50
-    `).all(fromMemoryId, maxDepth, toMemoryId) as any[];
+         SELECT
+           chain.from_id,
+           ce.to_memory_id,
+           chain.depth + 1,
+           chain.path || '->' || ce.to_memory_id::TEXT,
+           chain.total_uplift + COALESCE(ce.uplift, 0)::REAL,
+           LEAST(chain.min_confidence, ce.confidence)
+         FROM chain
+         JOIN causal_edges ce ON chain.to_id = ce.from_memory_id
+         WHERE chain.depth < $2
+           AND ce.confidence >= 0.5
+           AND chain.path NOT LIKE '%' || ce.to_memory_id::TEXT || '%'
+       )
+       SELECT path, total_uplift, min_confidence
+         FROM chain
+        WHERE to_id = $3
+        LIMIT 50`,
+      [fromMemoryId, maxDepth, toMemoryId],
+    );
+    const candidateChains = candidatesResult.rows as Array<{ path: string; total_uplift: number; min_confidence: number }>;
 
     if (candidateChains.length === 0) {
       return [];
     }
 
-    // Get embeddings for query (from node)
-    const fromEpisode = this.db.prepare('SELECT task, output FROM episodes WHERE id = ?').get(fromMemoryId) as any;
+    const fromEpisodeResult = await this.db.query(
+      'SELECT task, output FROM episodes WHERE id = $1',
+      [fromMemoryId],
+    );
+    const fromEpisode = fromEpisodeResult.rows[0] as { task: string; output: string } | undefined;
     const queryText = fromEpisode ? `${fromEpisode.task}: ${fromEpisode.output}` : '';
     const queryEmbedding = await this.embedder!.embed(queryText);
 
-    // Get embeddings and hierarchy levels for all chain nodes
     const allNodeIds = new Set<number>();
-    candidateChains.forEach((chain: any) => {
+    candidateChains.forEach(chain => {
       const path = chain.path.split('->').map(Number);
       path.forEach(id => allNodeIds.add(id));
     });
@@ -692,16 +603,19 @@ export class CausalMemoryGraph {
     const hierarchyLevels = new Map<number, number>();
 
     for (const nodeId of allNodeIds) {
-      const episode = this.db.prepare('SELECT task, output FROM episodes WHERE id = ?').get(nodeId) as any;
+      const episodeResult = await this.db.query(
+        'SELECT task, output FROM episodes WHERE id = $1',
+        [nodeId],
+      );
+      const episode = episodeResult.rows[0] as { task: string; output: string } | undefined;
       if (episode) {
         const text = `${episode.task}: ${episode.output}`;
         const embedding = await this.embedder!.embed(text);
         nodeEmbeddings.set(nodeId, embedding);
 
-        // Calculate hierarchy level (depth from root)
         const level = candidateChains
-          .filter((chain: any) => chain.path.includes(String(nodeId)))
-          .reduce((minDepth: number, chain: any) => {
+          .filter(chain => chain.path.includes(String(nodeId)))
+          .reduce((minDepth: number, chain) => {
             const path = chain.path.split('->').map(Number);
             const idx = path.indexOf(nodeId);
             return Math.min(minDepth, idx);
@@ -711,7 +625,6 @@ export class CausalMemoryGraph {
       }
     }
 
-    // Prepare keys, values, and hierarchy for attention
     const dim = getEmbeddingConfig().dimension;
     const nodeList = Array.from(allNodeIds);
     const keys = new Float32Array(nodeList.length * dim);
@@ -725,7 +638,6 @@ export class CausalMemoryGraph {
       hierarchyArray.push(hierarchyLevels.get(nodeId) || 0);
     });
 
-    // Apply HyperbolicAttention
     const queries = new Float32Array(dim);
     queries.set(queryEmbedding);
 
@@ -733,15 +645,13 @@ export class CausalMemoryGraph {
       queries,
       keys,
       values,
-      hierarchyArray
+      hierarchyArray,
     );
 
-    // Re-rank chains by attention weights
     const rankedChains = candidateChains
-      .map((chain: any) => {
+      .map(chain => {
         const path = chain.path.split('->').map(Number);
 
-        // Calculate average attention weight for nodes in path
         const avgWeight = path.reduce((sum: number, nodeId: number) => {
           const idx = nodeList.indexOf(nodeId);
           return sum + (idx >= 0 ? attentionResult.weights[idx] : 0);
@@ -750,7 +660,7 @@ export class CausalMemoryGraph {
         return {
           path,
           totalUplift: chain.total_uplift,
-          confidence: chain.min_confidence * avgWeight, // Boost confidence by attention
+          confidence: chain.min_confidence * avgWeight,
           attentionMetrics: {
             hyperbolicDistance: attentionResult.distances,
             computeTimeMs: attentionResult.metrics.computeTimeMs,
@@ -764,109 +674,138 @@ export class CausalMemoryGraph {
   }
 
   /**
-   * Calculate causal gain: E[outcome|do(treatment)] - E[outcome]
+   * Calculate causal gain: E[outcome|do(treatment)] - E[outcome].
+   *
+   * Postgres-substrate note: `success` is a BOOLEAN column under postgres
+   * (was 0/1 INTEGER under SQLite). The outcome-type CASE arms cast
+   * BOOLEAN to numeric explicitly so AVG() returns a comparable REAL
+   * regardless of which outcome metric the caller selects.
    */
-  calculateCausalGain(treatmentId: number, outcomeType: 'reward' | 'success' | 'latency'): {
+  async calculateCausalGain(treatmentId: number, outcomeType: 'reward' | 'success' | 'latency'): Promise<{
     causalGain: number;
     confidence: number;
     mechanism: string;
-  } {
-    // Get episodes where treatment was applied
-    const withTreatment = this.db.prepare(`
-      SELECT AVG(CASE WHEN ? = 'reward' THEN reward
-                     WHEN ? = 'success' THEN success
-                     WHEN ? = 'latency' THEN latency_ms
-                END) as avg_outcome
-      FROM episodes
-      WHERE id IN (
-        SELECT to_memory_id FROM causal_edges
-        WHERE from_memory_id = ? AND confidence >= 0.6
-      )
-    `).get(outcomeType, outcomeType, outcomeType, treatmentId) as any;
+  }> {
+    const withTreatmentResult = await this.db.query(
+      `SELECT AVG(
+                CASE
+                  WHEN $1 = 'reward'  THEN reward
+                  WHEN $2 = 'success' THEN (CASE WHEN success THEN 1.0 ELSE 0.0 END)
+                  WHEN $3 = 'latency' THEN latency_ms
+                END
+              ) AS avg_outcome
+         FROM episodes
+        WHERE id IN (
+          SELECT to_memory_id FROM causal_edges
+           WHERE from_memory_id = $4 AND confidence >= 0.6
+        )`,
+      [outcomeType, outcomeType, outcomeType, treatmentId],
+    );
+    const withTreatment = withTreatmentResult.rows[0] as { avg_outcome: number | null } | undefined;
 
-    // Get baseline (no treatment)
-    const baseline = this.db.prepare(`
-      SELECT AVG(CASE WHEN ? = 'reward' THEN reward
-                     WHEN ? = 'success' THEN success
-                     WHEN ? = 'latency' THEN latency_ms
-                END) as avg_outcome
-      FROM episodes
-      WHERE id NOT IN (
-        SELECT to_memory_id FROM causal_edges
-        WHERE from_memory_id = ?
-      )
-    `).get(outcomeType, outcomeType, outcomeType, treatmentId) as any;
+    const baselineResult = await this.db.query(
+      `SELECT AVG(
+                CASE
+                  WHEN $1 = 'reward'  THEN reward
+                  WHEN $2 = 'success' THEN (CASE WHEN success THEN 1.0 ELSE 0.0 END)
+                  WHEN $3 = 'latency' THEN latency_ms
+                END
+              ) AS avg_outcome
+         FROM episodes
+        WHERE id NOT IN (
+          SELECT to_memory_id FROM causal_edges
+           WHERE from_memory_id = $4
+        )`,
+      [outcomeType, outcomeType, outcomeType, treatmentId],
+    );
+    const baseline = baselineResult.rows[0] as { avg_outcome: number | null } | undefined;
 
     const causalGain = (withTreatment?.avg_outcome || 0) - (baseline?.avg_outcome || 0);
 
-    // Get most confident edge for mechanism
-    const edge = this.db.prepare(`
-      SELECT mechanism, confidence
-      FROM causal_edges
-      WHERE from_memory_id = ?
-      ORDER BY confidence DESC
-      LIMIT 1
-    `).get(treatmentId) as any;
+    const edgeResult = await this.db.query(
+      `SELECT mechanism, confidence
+         FROM causal_edges
+        WHERE from_memory_id = $1
+        ORDER BY confidence DESC
+        LIMIT 1`,
+      [treatmentId],
+    );
+    const edge = edgeResult.rows[0] as { mechanism: string | null; confidence: number } | undefined;
 
     return {
       causalGain,
       confidence: edge?.confidence || 0,
-      mechanism: edge?.mechanism || 'unknown'
+      mechanism: edge?.mechanism || 'unknown',
     };
   }
 
   /**
-   * Detect confounders using correlation analysis
+   * Detect confounders using correlation analysis.
+   *
+   * This is a simplified, fork-internal correlation approximation — same
+   * algorithm as the pre-port version; only the SQL substrate moved.
    */
-  detectConfounders(edgeId: number): {
+  async detectConfounders(edgeId: number): Promise<{
     confounders: Array<{
       memoryId: number;
       correlationWithTreatment: number;
       correlationWithOutcome: number;
       confounderScore: number;
     }>;
-  } {
-    const edge = this.db.prepare('SELECT * FROM causal_edges WHERE id = ?').get(edgeId) as any;
+  }> {
+    const edgeResult = await this.db.query(
+      'SELECT * FROM causal_edges WHERE id = $1',
+      [edgeId],
+    );
+    const edge = edgeResult.rows[0] as any;
 
     if (!edge) {
       return { confounders: [] };
     }
 
-    // Find memories correlated with both treatment and outcome
-    // This is a simplified version - production would use proper statistical tests
-    const potentialConfounders = this.db.prepare(`
-      SELECT DISTINCT e.id, e.task
-      FROM episodes e
-      WHERE e.id != ? AND e.id != ?
-        AND e.session_id IN (
-          SELECT session_id FROM episodes WHERE id = ?
-          UNION
-          SELECT session_id FROM episodes WHERE id = ?
-        )
-    `).all(edge.from_memory_id, edge.to_memory_id, edge.from_memory_id, edge.to_memory_id) as any[];
+    const potentialResult = await this.db.query(
+      `SELECT DISTINCT e.id, e.task
+         FROM episodes e
+        WHERE e.id != $1 AND e.id != $2
+          AND e.session_id IN (
+            SELECT session_id FROM episodes WHERE id = $3
+            UNION
+            SELECT session_id FROM episodes WHERE id = $4
+          )`,
+      [edge.from_memory_id, edge.to_memory_id, edge.from_memory_id, edge.to_memory_id],
+    );
+    const potentialConfounders = potentialResult.rows as Array<{ id: number; task: string }>;
 
-    const confounders = potentialConfounders.map((conf: any) => {
-      // Calculate correlation scores (simplified)
-      const treatmentCorr = this.calculateCorrelation(conf.id, edge.from_memory_id);
-      const outcomeCorr = this.calculateCorrelation(conf.id, edge.to_memory_id);
+    const confounders: Array<{
+      memoryId: number;
+      correlationWithTreatment: number;
+      correlationWithOutcome: number;
+      confounderScore: number;
+    }> = [];
+
+    for (const conf of potentialConfounders) {
+      const treatmentCorr = await this.calculateCorrelation(conf.id, edge.from_memory_id);
+      const outcomeCorr = await this.calculateCorrelation(conf.id, edge.to_memory_id);
       const confounderScore = Math.sqrt(treatmentCorr ** 2 * outcomeCorr ** 2);
 
-      return {
-        memoryId: conf.id,
-        correlationWithTreatment: treatmentCorr,
-        correlationWithOutcome: outcomeCorr,
-        confounderScore
-      };
-    }).filter(c => c.confounderScore > 0.3);
+      if (confounderScore > 0.3) {
+        confounders.push({
+          memoryId: conf.id,
+          correlationWithTreatment: treatmentCorr,
+          correlationWithOutcome: outcomeCorr,
+          confounderScore,
+        });
+      }
+    }
 
-    // Update edge with confounder score
     if (confounders.length > 0) {
       const maxConfounderScore = Math.max(...confounders.map(c => c.confounderScore));
-      this.db.prepare(`
-        UPDATE causal_edges
-        SET confounder_score = ?
-        WHERE id = ?
-      `).run(maxConfounderScore, edgeId);
+      await this.db.query(
+        `UPDATE causal_edges
+            SET confounder_score = $1
+          WHERE id = $2`,
+        [maxConfounderScore, edgeId],
+      );
     }
 
     return { confounders };
@@ -876,22 +815,55 @@ export class CausalMemoryGraph {
   // Private Helper Methods
   // ========================================================================
 
-  private rowToCausalEdge(row: DatabaseRows.CausalEdge): CausalEdge {
+  private rowToCausalEdge(row: {
+    id: number | string;
+    from_memory_id: number | string;
+    from_memory_type: string;
+    to_memory_id: number | string;
+    to_memory_type: string;
+    similarity: number;
+    uplift: number | null;
+    confidence: number;
+    sample_size: number | string | null;
+    evidence_ids: string | string[] | null;
+    confounder_score: number | null;
+    mechanism: string | null;
+    metadata: string | Record<string, any> | null;
+  }): CausalEdge {
+    // pglite returns JSONB columns as parsed objects; postgres TEXT-typed
+    // JSON columns come back as strings. Handle both shapes.
+    const parseMaybeJson = (val: unknown): Record<string, any> | undefined => {
+      if (val == null) return undefined;
+      if (typeof val === 'object') return val as Record<string, any>;
+      if (typeof val === 'string') {
+        try { return JSON.parse(val); } catch { return undefined; }
+      }
+      return undefined;
+    };
+
+    const evidenceIds = row.evidence_ids == null
+      ? undefined
+      : Array.isArray(row.evidence_ids)
+        ? row.evidence_ids
+        : typeof row.evidence_ids === 'string'
+          ? (() => { try { return JSON.parse(row.evidence_ids as string); } catch { return undefined; } })()
+          : undefined;
+
     return {
-      id: row.id,
-      fromMemoryId: row.from_memory_id,
+      id: Number(row.id),
+      fromMemoryId: Number(row.from_memory_id),
       fromMemoryType: row.from_memory_type as 'episode' | 'skill' | 'note' | 'fact',
-      toMemoryId: row.to_memory_id,
+      toMemoryId: Number(row.to_memory_id),
       toMemoryType: row.to_memory_type as 'episode' | 'skill' | 'note' | 'fact',
       similarity: row.similarity,
       uplift: row.uplift ?? undefined,
       confidence: row.confidence,
-      sampleSize: row.sample_size ?? undefined,
-      evidenceIds: row.evidence_ids ? JSON.parse(row.evidence_ids) : undefined,
-      experimentIds: undefined, // Not in DatabaseRows.CausalEdge
+      sampleSize: row.sample_size == null ? undefined : Number(row.sample_size),
+      evidenceIds,
+      experimentIds: undefined,
       confounderScore: row.confounder_score ?? undefined,
       mechanism: row.mechanism ?? undefined,
-      metadata: row.metadata ? JSON.parse(row.metadata) : undefined
+      metadata: parseMaybeJson(row.metadata),
     };
   }
 
@@ -909,27 +881,23 @@ export class CausalMemoryGraph {
   }
 
   private tCDF(t: number, df: number): number {
-    // Simplified t-distribution CDF (use proper stats library in production)
-    // This is an approximation
     return 0.5 + 0.5 * Math.sign(t) * (1 - Math.pow(1 + t * t / df, -df / 2));
   }
 
-  private tInverse(p: number, df: number): number {
-    // Simplified inverse t-distribution (use proper stats library)
-    // Approximation for 95% CI
-    return 1.96; // Standard normal approximation
+  private tInverse(_p: number, _df: number): number {
+    return 1.96;
   }
 
-  private calculateCorrelation(id1: number, id2: number): number {
-    // Simplified correlation calculation
-    // In production, use proper correlation metrics
-    const sharedSessions = this.db.prepare(`
-      SELECT COUNT(DISTINCT e1.session_id) as shared
-      FROM episodes e1
-      JOIN episodes e2 ON e1.session_id = e2.session_id
-      WHERE e1.id = ? AND e2.id = ?
-    `).get(id1, id2) as any;
-
-    return Math.min(sharedSessions?.shared || 0, 1.0);
+  private async calculateCorrelation(id1: number, id2: number): Promise<number> {
+    const result = await this.db.query(
+      `SELECT COUNT(DISTINCT e1.session_id) AS shared
+         FROM episodes e1
+         JOIN episodes e2 ON e1.session_id = e2.session_id
+        WHERE e1.id = $1 AND e2.id = $2`,
+      [id1, id2],
+    );
+    const row = result.rows[0] as { shared: number | string } | undefined;
+    const shared = row ? Number(row.shared) : 0;
+    return Math.min(shared, 1.0);
   }
 }

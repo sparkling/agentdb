@@ -1,6 +1,6 @@
 {
   "name": "agentdb",
-  "version": "3.0.0-alpha.14-patch.48",
+  "version": "3.0.0-alpha.14-patch.49",
   "description": "Self-learning vector memory for AI agents — single-file .rvf cognitive container with HNSW search, episodic Reflexion memory, causal graph + Cypher, 9 RL algorithms, Thompson Sampling bandit, 41 MCP tools, hybrid (BM25 + dense) retrieval, GNN attention. 150x faster than SQLite. Up to +36% search quality from feedback. Runs in Node, browsers (WASM), edge, offline. Backs the agentic-flow / ruflo / Claude Code memory layer.",
   "type": "module",
   "main": "dist/src/index.js",
@@ -162,7 +162,7 @@
     "@modelcontextprotocol/sdk": "^1.20.1",
     "@opentelemetry/api": "^1.9.0",
     "@ruvector/graph-transformer": "2.0.4-patch.73",
-    "@ruvector/postgres-cli": "^0.2.8",
+    "@ruvector/postgres-cli": "0.2.7-patch.51",
     "ajv": "^8.18.0",
     "jsonwebtoken": "^9.0.2",
     "pg": "^8.11.0",
@@ -216,7 +216,7 @@
     "commander": "^12.1.0",
     "hnswlib-node": "^3.0.0",
     "inquirer": "^9.3.8",
-    "ruvector": "0.1.2-patch.531",
+    "ruvector": "0.1.2-patch.532",
     "ruvector-attention-wasm": "^0.1.32",
     "ruvector-graph-transformer-wasm": "^2.0.4",
     "sqlite-vec": "^0.1.6"

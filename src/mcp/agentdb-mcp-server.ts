@@ -1636,7 +1636,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           };
         }
 
-        const stats = reasoningBank.getPatternStats();
+        const stats = await reasoningBank.getPatternStats();
 
         const output = `📊 Reasoning Pattern Statistics\n\n` +
           `📈 Overview:\n` +

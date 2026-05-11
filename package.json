@@ -158,11 +158,14 @@
   },
   "homepage": "https://github.com/ruvnet/agentdb#readme",
   "dependencies": {
+    "@electric-sql/pglite": "^0.4.5",
     "@modelcontextprotocol/sdk": "^1.20.1",
     "@opentelemetry/api": "^1.9.0",
     "@ruvector/graph-transformer": "2.0.4-patch.73",
+    "@ruvector/postgres-cli": "^0.2.8",
     "ajv": "^8.18.0",
     "jsonwebtoken": "^9.0.2",
+    "pg": "^8.11.0",
     "sql.js": "^1.13.0"
   },
   "devDependencies": {

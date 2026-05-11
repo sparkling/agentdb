@@ -576,7 +576,12 @@ export class NightlyLearner {
 
   private async pruneEdges(): Promise<number> {
     const maxAgeMs = this.config.edgeMaxAgeDays * 24 * 60 * 60 * 1000;
-    const cutoffTime = Date.now() / 1000 - maxAgeMs / 1000;
+    // ADR-0170 Phase B (2026-05-12): cutoffTime is bound to a BIGINT column
+    // (causal_edges.created_at). `Date.now() / 1000` returns a fractional
+    // second (e.g. 1770767409.552); pglite/postgres rejects it with
+    // "invalid input syntax for type bigint". Floor to an integer to match
+    // the column type before binding.
+    const cutoffTime = Math.floor(Date.now() / 1000 - maxAgeMs / 1000);
 
     const result = await this.db.query(
       `DELETE FROM causal_edges

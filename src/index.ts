@@ -38,6 +38,8 @@ export { ReflexionMemory } from './controllers/ReflexionMemory.js';
 export { SkillLibrary } from './controllers/SkillLibrary.js';
 export { LearningSystem } from './controllers/LearningSystem.js';
 export { ReasoningBank } from './controllers/ReasoningBank.js';
+// HierarchicalMemory: fork-only controller from ADR-066 (3-tier working/episodic/semantic). Restored 2026-05-12 from archive/pre-adr-0177-reset-2026-05-12 (commit bd760f2, pre-ADR-0170 RVF/sqlite-vec era; postgres-backed evolution explicitly skipped per ADR-0177).
+export { HierarchicalMemory } from './controllers/HierarchicalMemory.js';
 
 // Embedding services
 export { EmbeddingService } from './controllers/EmbeddingService.js';

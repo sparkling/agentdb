@@ -25,12 +25,23 @@
  *   beyond the constructor type. The 1 read in applyFilters() is an existence
  *   guard against the `pattern_embeddings` table owned by ReasoningBank
  *   (ported Wave 1a, B.4 — postgres BIGINT pattern_id + BYTEA embedding).
+ *
+ * ADR-0170 Phase C.1 (2026-05-12):
+ * - `pattern_embeddings.embedding` is now pgvector `vector(768)`. The
+ *   buildIndex() row-read uses vectorToEmbedding() to handle either the
+ *   text-literal form (pglite default) or Float32Array (custom parser).
+ * - This controller's hnswlib-backed in-memory index continues to exist
+ *   for code paths that prefer to manage their own ANN graph; the
+ *   pgvector HNSW index on the same column serves the canonical k-NN.
+ *   Phase D will retire this controller once we confirm no in-tree
+ *   consumer depends on the legacy interface.
  */
 
 import * as fs from 'fs';
 import * as path from 'path';
 import { deriveHNSWParams, getEmbeddingConfig } from '../config/embedding-config.js';
 import type { PostgresBackend } from '../backends/postgres/PostgresBackend.js';
+import { vectorToEmbedding } from '../backends/postgres/PostgresBackend.js';
 
 // Lazy-loaded hnswlib-node to avoid import failures on systems without build tools
 let HierarchicalNSW: any = null;
@@ -79,10 +90,9 @@ export async function isHnswlibAvailable(): Promise<boolean> {
   }
 }
 
-// Postgres returns BYTEA as Node Buffer; coerce to Float32Array.
-function bufferToFloat32(buf: Buffer): Float32Array {
-  return new Float32Array(buf.buffer, buf.byteOffset, buf.byteLength / 4);
-}
+// ADR-0170 Phase C.1: pattern_embeddings.embedding is pgvector
+// vector(768). vectorToEmbedding() handles both shapes pglite/pg can
+// surface (text literal `[v1,v2,…]` or Float32Array).
 
 export interface HNSWConfig {
   /** Maximum number of connections per layer (default: 16) */
@@ -218,7 +228,7 @@ export class HNSWIndex {
       const result = await this.db.query(
         `SELECT pattern_id, embedding FROM ${tableName}`
       );
-      const rows = result.rows as Array<{ pattern_id: number | bigint | string; embedding: Buffer }>;
+      const rows = result.rows as Array<{ pattern_id: number | bigint | string; embedding: unknown }>;
 
       if (rows.length === 0) {
         console.warn('[HNSWIndex] No vectors found in database');
@@ -246,7 +256,7 @@ export class HNSWIndex {
       for (const row of rows) {
         const rawId = row.pattern_id;
         const id = typeof rawId === 'number' ? rawId : Number(rawId);
-        const embedding = bufferToFloat32(row.embedding);
+        const embedding = vectorToEmbedding(row.embedding);
 
         // Add to index with label (convert Float32Array to number[])
         const label = this.nextLabel++;

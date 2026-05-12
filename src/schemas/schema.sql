@@ -12,15 +12,28 @@
 -- ADR-0170 Phase A.5 — ported from SQLite to PostgreSQL:
 --   - INTEGER PRIMARY KEY AUTOINCREMENT      → BIGSERIAL PRIMARY KEY
 --   - INTEGER NOT NULL DEFAULT (strftime…)   → BIGINT NOT NULL DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT
---   - BLOB                                   → BYTEA
+--   - BLOB                                   → BYTEA → vector(768) (Phase C.1)
 --   - PRAGMA foreign_keys = ON               → removed (postgres FKs on by default)
 --   - INSERT OR IGNORE / INSERT OR REPLACE   → INSERT ... ON CONFLICT ... (controller-level)
 --   - FTS5 virtual tables                    → tsvector + GIN indexes (only used where FTS is actually exercised — Phase B per-controller port)
+--
+-- ADR-0170 Phase C.1 — pgvector integration:
+--   - BYTEA embedding columns                → vector(768) (all-mpnet-base-v2 canonical dim per memory reference-embedding-model)
+--   - HNSW indexes on each vector column     → m=23, ef_construction=100 (per reference-embedding-model)
+--   - Controllers retire `vectorBackend.insert(...)` parallel writes — vectors live in-row, indexed by pgvector HNSW.
+--   - k-NN queries become `ORDER BY embedding <-> $1 LIMIT $k` (single plan, no JS-side cosine).
 --
 -- This file is the BOOTSTRAP schema only — controllers may issue their own
 -- DDL/DML in postgres dialect during Phase B. Schema versions and migration
 -- bookkeeping are owned by the agentdb migrate CLI (Phase D).
 -- ============================================================================
+
+-- pgvector extension. PostgresBackend.enableVectorExtension() already runs
+-- this idempotently at initialize() time so the agentdb schema can rely on
+-- `vector(N)` column types existing. Repeated here for completeness when
+-- the schema file is applied against a fresh cluster outside the backend
+-- bootstrap path (e.g. the migration CLI).
+CREATE EXTENSION IF NOT EXISTS vector;
 
 -- ============================================================================
 -- Pattern 1: Reflexion-Style Episodic Replay
@@ -50,14 +63,21 @@ CREATE INDEX IF NOT EXISTS idx_episodes_session ON episodes(session_id);
 CREATE INDEX IF NOT EXISTS idx_episodes_reward ON episodes(reward DESC);
 CREATE INDEX IF NOT EXISTS idx_episodes_task ON episodes(task);
 
--- Vector embeddings for episodes (768-dim default for nomic-embed-text-v1.5)
--- Phase C will replace the BYTEA blob with a pgvector `vector(N)` column.
+-- Vector embeddings for episodes (768-dim canonical for all-mpnet-base-v2)
+-- ADR-0170 Phase C.1: pgvector vector(768) column + HNSW index. Replaces
+-- the Phase A/B BYTEA bootstrap. Controllers no longer mirror writes into
+-- vectorBackend — k-NN queries hit the HNSW index directly.
 CREATE TABLE IF NOT EXISTS episode_embeddings (
   episode_id BIGINT PRIMARY KEY,
-  embedding BYTEA NOT NULL, -- Float32Array as BYTEA (Phase A bootstrap; Phase C → vector)
-  embedding_model TEXT DEFAULT 'all-MiniLM-L6-v2',
+  embedding vector(768) NOT NULL,
+  embedding_model TEXT DEFAULT 'Xenova/all-mpnet-base-v2',
   FOREIGN KEY(episode_id) REFERENCES episodes(id) ON DELETE CASCADE
 );
+
+CREATE INDEX IF NOT EXISTS idx_episode_embeddings_hnsw
+  ON episode_embeddings
+  USING hnsw (embedding vector_cosine_ops)
+  WITH (m = 23, ef_construction = 100);
 
 -- ============================================================================
 -- Pattern 2: Skill Library from Trajectories
@@ -102,13 +122,18 @@ CREATE TABLE IF NOT EXISTS skill_links (
 CREATE INDEX IF NOT EXISTS idx_skill_links_parent ON skill_links(parent_skill_id);
 CREATE INDEX IF NOT EXISTS idx_skill_links_child ON skill_links(child_skill_id);
 
--- Skill embeddings for semantic search (Phase A bootstrap; Phase C → vector)
+-- Skill embeddings for semantic search (ADR-0170 Phase C.1: pgvector)
 CREATE TABLE IF NOT EXISTS skill_embeddings (
   skill_id BIGINT PRIMARY KEY,
-  embedding BYTEA NOT NULL,
-  embedding_model TEXT DEFAULT 'all-MiniLM-L6-v2',
+  embedding vector(768) NOT NULL,
+  embedding_model TEXT DEFAULT 'Xenova/all-mpnet-base-v2',
   FOREIGN KEY(skill_id) REFERENCES skills(id) ON DELETE CASCADE
 );
+
+CREATE INDEX IF NOT EXISTS idx_skill_embeddings_hnsw
+  ON skill_embeddings
+  USING hnsw (embedding vector_cosine_ops)
+  WITH (m = 23, ef_construction = 100);
 
 -- ============================================================================
 -- Pattern 3: Structured Mixed Memory (Facts + Summaries)
@@ -162,13 +187,18 @@ CREATE INDEX IF NOT EXISTS idx_notes_fts
   ON notes
   USING GIN (to_tsvector('english', COALESCE(title, '') || ' ' || COALESCE(text, '') || ' ' || COALESCE(summary, '')));
 
--- Note embeddings (only for summaries to reduce storage) — Phase A bootstrap
+-- Note embeddings (only for summaries to reduce storage) — ADR-0170 Phase C.1: pgvector
 CREATE TABLE IF NOT EXISTS note_embeddings (
   note_id BIGINT PRIMARY KEY,
-  embedding BYTEA NOT NULL,
-  embedding_model TEXT DEFAULT 'all-MiniLM-L6-v2',
+  embedding vector(768) NOT NULL,
+  embedding_model TEXT DEFAULT 'Xenova/all-mpnet-base-v2',
   FOREIGN KEY(note_id) REFERENCES notes(id) ON DELETE CASCADE
 );
+
+CREATE INDEX IF NOT EXISTS idx_note_embeddings_hnsw
+  ON note_embeddings
+  USING hnsw (embedding vector_cosine_ops)
+  WITH (m = 23, ef_construction = 100);
 
 -- ============================================================================
 -- Pattern 4: Episodic Segmentation and Consolidation
@@ -249,13 +279,18 @@ CREATE INDEX IF NOT EXISTS idx_exp_edges_src ON exp_edges(src_node_id);
 CREATE INDEX IF NOT EXISTS idx_exp_edges_dst ON exp_edges(dst_node_id);
 CREATE INDEX IF NOT EXISTS idx_exp_edges_rel ON exp_edges(relationship);
 
--- Node embeddings for graph-augmented retrieval (Phase A bootstrap)
+-- Node embeddings for graph-augmented retrieval (ADR-0170 Phase C.1: pgvector)
 CREATE TABLE IF NOT EXISTS exp_node_embeddings (
   node_id BIGINT PRIMARY KEY,
-  embedding BYTEA NOT NULL,
-  embedding_model TEXT DEFAULT 'all-MiniLM-L6-v2',
+  embedding vector(768) NOT NULL,
+  embedding_model TEXT DEFAULT 'Xenova/all-mpnet-base-v2',
   FOREIGN KEY(node_id) REFERENCES exp_nodes(id) ON DELETE CASCADE
 );
+
+CREATE INDEX IF NOT EXISTS idx_exp_node_embeddings_hnsw
+  ON exp_node_embeddings
+  USING hnsw (embedding vector_cosine_ops)
+  WITH (m = 23, ef_construction = 100);
 
 -- ============================================================================
 -- Memory Management and Scoring
@@ -427,9 +462,9 @@ FOR EACH ROW EXECUTE FUNCTION trg_note_timestamp();
 -- ============================================================================
 -- Initialization Complete
 -- ============================================================================
--- Schema version: 2.0.0 (ADR-0170 postgres dialect)
--- Compatible with: PostgreSQL 15+ (pglite or server)
--- pgvector integration: Phase C (replaces BYTEA embedding columns with vector(N))
+-- Schema version: 2.1.0 (ADR-0170 Phase C.1 — pgvector integrated)
+-- Compatible with: PostgreSQL 15+ with pgvector (pglite ships it bundled)
+-- Vector substrate: pgvector vector(768) + HNSW (vector_cosine_ops, m=23, ef_construction=100)
 --
 -- Performance Optimization:
 -- For production deployments, apply composite index migration for 30-50% query speedup:

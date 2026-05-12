@@ -11,7 +11,17 @@
 -- recursion syntax which is broadly the same as SQLite but the path
 -- concatenation uses `||` consistently (postgres has no TEXT vs TEXT
 -- coercion issues that SQLite sometimes has).
+--
+-- ADR-0170 Phase C.1 (2026-05-12) — pgvector integration:
+-- `causal_edges` now carries an inline `embedding vector(768)` column
+-- (the mechanism's embedding) so findSimilarCausalPatterns() can use
+-- the HNSW index instead of an external vectorBackend. The column is
+-- nullable to remain backward-compatible with edges added without an
+-- embedder. pgvector extension is loaded by PostgresBackend at
+-- initialize() time; the CREATE EXTENSION here is idempotent.
 -- ============================================================================
+
+CREATE EXTENSION IF NOT EXISTS vector;
 
 -- ============================================================================
 -- FEATURE 1: Causal Memory Graph
@@ -40,6 +50,7 @@ CREATE TABLE IF NOT EXISTS causal_edges (
 
   -- Metadata
   mechanism TEXT, -- Hypothesized causal mechanism
+  embedding vector(768), -- ADR-0170 Phase C.1: mechanism embedding for findSimilarCausalPatterns()
   created_at BIGINT NOT NULL DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT,
   updated_at BIGINT NOT NULL DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT,
   last_validated_at BIGINT,
@@ -54,6 +65,10 @@ CREATE INDEX IF NOT EXISTS idx_causal_edges_from ON causal_edges(from_memory_id,
 CREATE INDEX IF NOT EXISTS idx_causal_edges_to ON causal_edges(to_memory_id, to_memory_type);
 CREATE INDEX IF NOT EXISTS idx_causal_edges_uplift ON causal_edges(uplift DESC);
 CREATE INDEX IF NOT EXISTS idx_causal_edges_confidence ON causal_edges(confidence DESC);
+CREATE INDEX IF NOT EXISTS idx_causal_edges_embedding_hnsw
+  ON causal_edges
+  USING hnsw (embedding vector_cosine_ops)
+  WITH (m = 23, ef_construction = 100);
 
 -- Causal experiments (A/B tests for uplift estimation)
 CREATE TABLE IF NOT EXISTS causal_experiments (

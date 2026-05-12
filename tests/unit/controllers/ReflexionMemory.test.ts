@@ -26,6 +26,23 @@ class FakePostgresBackend {
     // bootstrapSchema is a no-op in the fake
   }
 
+  // Used by the pgvector fake: caller's last query text, so the fake's
+  // similarity simulation has something to compare stored tasks against.
+  // ReflexionMemory's prepareQueryEmbedding() runs `embedder.embed(query)`
+  // before the SQL call; the fake snoops on calls to a sibling helper.
+  private _lastQueryText: string | null = null;
+  setLastQueryText(text: string): void {
+    this._lastQueryText = text;
+  }
+  private _matchesQueryText(taskOrCritique: string): boolean {
+    if (!this._lastQueryText) return true;
+    const q = this._lastQueryText.toLowerCase();
+    const t = (taskOrCritique || '').toLowerCase();
+    // Simple token-overlap heuristic — any shared word means "similar".
+    const qTokens = new Set(q.split(/\W+/).filter(Boolean));
+    return Array.from(qTokens).some((tok) => tok.length > 2 && t.includes(tok));
+  }
+
   async query(sql: string, params: any[] = []): Promise<{ rows: any[]; rowCount?: number }> {
     const norm = sql.replace(/\s+/g, ' ').trim();
 
@@ -76,23 +93,29 @@ class FakePostgresBackend {
       return { rows: [], rowCount: before - this.embeddings.length };
     }
 
-    if (norm.startsWith('SELECT e.*, ee.embedding') || norm.includes('FROM episodes e JOIN episode_embeddings')) {
-      // SQL fallback retrieval — return all episodes joined with embeddings,
-      // applying any filters baked into the SQL via the param list.
+    if (norm.includes('FROM episodes e JOIN episode_embeddings')) {
+      // ADR-0170 Phase C.1: pgvector k-NN. `$1::vector` is the query
+      // embedding; subsequent params are filter values. The fake doesn't
+      // run pgvector arithmetic — it filters rows by task-text overlap
+      // with the last embed() input, simulating "similarity-driven"
+      // selection. Rows that share no tokens with the query are excluded
+      // (distance ≈ 1, well below the 0.5 controller threshold). Rows
+      // that do share tokens get distance 0 for full-credit similarity.
       let rows = this.episodes
         .map((e) => {
           const emb = this.embeddings.find((x) => x.episode_id === e.id);
           if (!emb) return null;
-          return { ...e, embedding: emb.embedding };
+          const matches = this._matchesQueryText(`${e.task} ${e.critique ?? ''}`);
+          if (!matches) return null;
+          return { ...e, distance: 0 };
         })
         .filter((r): r is Row => r !== null);
 
-      // Apply minReward filter (first $N parameter when filters.minReward)
-      // We can't reliably introspect the param order from SQL text without
-      // a real parser, but the controller's tests only exercise simple
-      // filter combinations. Apply the trivially-extractable ones:
+      // Apply minReward / success filters. Param index $1 is always the
+      // query vector; subsequent $N depend on which filters appeared.
+      let pi = 1;
       if (norm.includes('e.reward >=')) {
-        const minReward = params[0];
+        const minReward = params[pi++];
         rows = rows.filter((r) => r.reward >= minReward);
       }
       if (norm.includes('e.success = FALSE')) {
@@ -102,8 +125,6 @@ class FakePostgresBackend {
         rows = rows.filter((r) => r.success === true);
       }
 
-      // Apply ORDER BY e.reward DESC
-      rows.sort((a, b) => b.reward - a.reward);
       return { rows, rowCount: rows.length };
     }
 
@@ -151,14 +172,14 @@ class FakePostgresBackend {
     }
 
     if (norm.includes('FROM episode_embeddings ee JOIN episodes e')) {
-      // GNN enhance neighbor fetch
-      const idSet = new Set(params);
-      const rows = this.embeddings
-        .filter((e) => idSet.has(e.episode_id))
-        .map((e) => {
-          const ep = this.episodes.find((x) => x.id === e.episode_id);
-          return { embedding: e.embedding, reward: ep?.reward ?? 0 };
-        });
+      // ADR-0170 Phase C.1: GNN enhance neighbor fetch via pgvector
+      // ORDER BY ee.embedding <=> $1::vector LIMIT $2. The fake returns
+      // all stored embeddings in insertion order; the real controller's
+      // assertions only care that we hand back (embedding, reward) pairs.
+      const rows = this.embeddings.map((e) => {
+        const ep = this.episodes.find((x) => x.id === e.episode_id);
+        return { embedding: e.embedding, reward: ep?.reward ?? 0 };
+      });
       return { rows, rowCount: rows.length };
     }
 
@@ -184,6 +205,16 @@ describe('ReflexionMemory', () => {
       provider: 'local',
     });
     await embedder.initialize();
+
+    // ADR-0170 Phase C.1: pgvector moves cosine ranking into postgres,
+    // so the fake can't compute similarity from the BYTEA blob anymore.
+    // Wrap the embedder to record the last query text so the fake's
+    // task-overlap filter can simulate similarity-driven row selection.
+    const realEmbed = embedder.embed.bind(embedder);
+    embedder.embed = async (text: string) => {
+      db.setLastQueryText(text);
+      return realEmbed(text);
+    };
 
     reflexion = new ReflexionMemory(db as any, embedder);
   });
@@ -245,10 +276,14 @@ describe('ReflexionMemory', () => {
 
       const episodeId = await reflexion.storeEpisode(episode);
 
-      // Verify embedding was stored (postgres BYTEA surfaces as Buffer)
+      // ADR-0170 Phase C.1: embedding is stored as pgvector text-literal
+      // `[v1,v2,…]` (passed through to the database via $2::vector cast).
+      // The fake captures the raw string parameter; assert shape.
       const embRow = db.embeddings.find((e) => e.episode_id === episodeId);
       expect(embRow).toBeDefined();
-      expect(Buffer.isBuffer(embRow!.embedding)).toBe(true);
+      expect(typeof embRow!.embedding).toBe('string');
+      expect((embRow!.embedding as string).startsWith('[')).toBe(true);
+      expect((embRow!.embedding as string).endsWith(']')).toBe(true);
     });
   });
 

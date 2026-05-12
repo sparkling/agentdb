@@ -20,13 +20,23 @@
  *     `retrieveFromGraphAdapter`/`retrieveFromGenericGraph` strategies
  *     removed, the Cypher queries in `getEpisodeRelationships` and prior-
  *     failures lookups replaced with SQL.
+ *
+ * ADR-0170 Phase C.1 (2026-05-12):
+ *   - `episode_embeddings.embedding` is now `vector(768)` (was BYTEA).
+ *   - HNSW index `idx_episode_embeddings_hnsw` accelerates k-NN.
+ *   - `vectorBackend.insert(...)` parallel-write path retired; SQL row +
+ *     pgvector HNSW index are the index of record.
+ *   - `retrieveFromSQLFallback` rewritten as `retrieveViaPgvector` —
+ *     `ORDER BY embedding <=> $1::vector LIMIT $k`, no JS-side cosine.
+ *   - GNN enhancement helper switched to a SELECT against pgvector +
+ *     learning backend; no more in-memory accelerator path.
  */
 
 import { EmbeddingService } from './EmbeddingService.js';
 import type { VectorBackend } from '../backends/VectorBackend.js';
 import type { LearningBackend } from '../backends/LearningBackend.js';
 import type { PostgresBackend } from '../backends/postgres/PostgresBackend.js';
-import { cosineSimilarity } from '../utils/vector-math.js';
+import { embeddingToVector, vectorToEmbedding } from '../backends/postgres/PostgresBackend.js';
 import { QueryCache, type QueryCacheConfig } from '../core/QueryCache.js';
 
 export interface Episode {
@@ -118,6 +128,9 @@ export class ReflexionMemory {
   }
 
   private async bootstrapSchema(): Promise<void> {
+    // ADR-0170 Phase C.1: episode_embeddings.embedding is `vector(768)`
+    // (was BYTEA in Phase B). HNSW index uses cosine ops at m=23,
+    // ef_construction=100 per memory `reference-embedding-model`.
     await this.db.exec(`
       CREATE TABLE IF NOT EXISTS episodes (
         id BIGSERIAL PRIMARY KEY,
@@ -141,10 +154,14 @@ export class ReflexionMemory {
       CREATE INDEX IF NOT EXISTS idx_episodes_task ON episodes(task);
       CREATE TABLE IF NOT EXISTS episode_embeddings (
         episode_id BIGINT PRIMARY KEY,
-        embedding BYTEA NOT NULL,
-        embedding_model TEXT DEFAULT 'all-MiniLM-L6-v2',
+        embedding vector(768) NOT NULL,
+        embedding_model TEXT DEFAULT 'Xenova/all-mpnet-base-v2',
         FOREIGN KEY(episode_id) REFERENCES episodes(id) ON DELETE CASCADE
       );
+      CREATE INDEX IF NOT EXISTS idx_episode_embeddings_hnsw
+        ON episode_embeddings
+        USING hnsw (embedding vector_cosine_ops)
+        WITH (m = 23, ef_construction = 100);
     `);
   }
 
@@ -188,14 +205,9 @@ export class ReflexionMemory {
     const text = this.buildEpisodeText(episode);
     const embedding = await this.embedder.embed(text);
 
-    // Hand to vector backend if present (Phase A: in-memory accelerator;
-    // Phase C replaces with pgvector and removes this parallel write).
-    if (this.vectorBackend) {
-      try {
-        this.vectorBackend.insert(episodeId.toString(), embedding);
-      } catch { /* in-memory accelerator failed — SQL row is durable */ }
-    }
-
+    // ADR-0170 Phase C.1: pgvector column is the index of record. No
+    // parallel `vectorBackend.insert(...)` — the HNSW index on
+    // episode_embeddings.embedding handles k-NN.
     await this.storeEmbedding(episodeId, embedding);
 
     // Feed learning backend if wired
@@ -246,19 +258,10 @@ export class ReflexionMemory {
 
     const queryEmbedding = await this.prepareQueryEmbedding(task, currentState, k);
 
-    let episodes: EpisodeWithEmbedding[];
-    if (this.vectorBackend) {
-      episodes = await this.retrieveFromVectorBackend(queryEmbedding, query);
-      // ADR-0094 Phase 13.2: vectorBackend is an in-memory accelerator;
-      // postgres episode_embeddings are durable. If the accelerator came
-      // back empty, fall through to the SQL similarity search before
-      // declaring "no matches" (ADR-0082).
-      if (episodes.length === 0) {
-        episodes = await this.retrieveFromSQLFallback(queryEmbedding, query);
-      }
-    } else {
-      episodes = await this.retrieveFromSQLFallback(queryEmbedding, query);
-    }
+    // ADR-0170 Phase C.1: pgvector HNSW is the only k-NN path. The
+    // legacy in-memory accelerator dichotomy is retired — there's no
+    // separate "vectorBackend" or "SQL fallback" branch.
+    const episodes = await this.retrieveViaPgvector(queryEmbedding, query);
 
     this.queryCache.set(cacheKey, episodes);
     return episodes;
@@ -283,60 +286,26 @@ export class ReflexionMemory {
   }
 
   /**
-   * Retrieve episodes using VectorBackend (150x faster) + SQL hydration.
-   */
-  private async retrieveFromVectorBackend(
-    queryEmbedding: Float32Array,
-    query: ReflexionQuery
-  ): Promise<EpisodeWithEmbedding[]> {
-    const { k = 5, minReward, onlyFailures, onlySuccesses, timeWindowDays } = query;
-
-    const searchResults = this.vectorBackend!.search(queryEmbedding, k * 3, {
-      threshold: 0.0,
-    });
-
-    const episodeIds = searchResults.map((r) => parseInt(r.id)).filter((n) => Number.isFinite(n));
-    if (episodeIds.length === 0) {
-      return [];
-    }
-
-    const rows = await this.fetchEpisodesByIds(episodeIds);
-    const episodeMap = new Map(rows.map((r) => [toNumber(r.id).toString(), r]));
-
-    const episodes: EpisodeWithEmbedding[] = [];
-    for (const result of searchResults) {
-      const row = episodeMap.get(result.id);
-      if (!row) continue;
-
-      if (
-        !this.passesEpisodeFilters(row, { minReward, onlyFailures, onlySuccesses, timeWindowDays })
-      ) {
-        continue;
-      }
-
-      episodes.push(this.convertDatabaseEpisode(row, result.similarity));
-      if (episodes.length >= k) break;
-    }
-
-    return episodes;
-  }
-
-  /**
-   * Retrieve episodes using SQL-based similarity search (durable path).
+   * Retrieve episodes via pgvector HNSW k-NN.
    *
-   * Phase C will replace this with pgvector `ORDER BY embedding <-> $1`.
-   * In Phase A/B the embeddings are BYTEA blobs; cosine similarity is
-   * computed in JS after a filtered SQL fetch.
+   * ADR-0170 Phase C.1: replaces both `retrieveFromVectorBackend` and
+   * `retrieveFromSQLFallback`. Postgres picks the HNSW index automatically
+   * when ORDER BY uses the `<=>` operator on a pgvector column.
+   *
+   * Cosine distance via `<=>`: 0 = identical, 2 = opposite. We convert to
+   * similarity = 1 - distance.
    */
-  private async retrieveFromSQLFallback(
+  private async retrieveViaPgvector(
     queryEmbedding: Float32Array,
     query: ReflexionQuery
   ): Promise<EpisodeWithEmbedding[]> {
     const { k = 5, minReward, onlyFailures, onlySuccesses, timeWindowDays } = query;
 
+    // Filters go in WHERE; the ORDER BY is the k-NN driver. $1 is the
+    // query vector, $2..$N are filter values.
     const filters: string[] = [];
-    const params: any[] = [];
-    let nextParam = 1;
+    const params: unknown[] = [embeddingToVector(queryEmbedding)];
+    let nextParam = 2;
 
     if (minReward !== undefined) {
       filters.push(`e.reward >= $${nextParam++}`);
@@ -348,61 +317,26 @@ export class ReflexionMemory {
       filters.push(`e.ts > EXTRACT(EPOCH FROM NOW())::BIGINT - $${nextParam++}`);
       params.push(timeWindowDays * 86400);
     }
-    const whereClause = filters.length > 0 ? `WHERE ${filters.join(' AND ')}` : '';
+    params.push(k);
+    const limitParam = nextParam;
+    const whereClause = filters.length > 0 ? `AND ${filters.join(' AND ')}` : '';
 
     const result = await this.db.query(
-      `SELECT e.*, ee.embedding
+      `SELECT e.*,
+              ee.embedding <=> $1::vector AS distance
        FROM episodes e
        JOIN episode_embeddings ee ON e.id = ee.episode_id
-       ${whereClause}
-       ORDER BY e.reward DESC`,
+       WHERE ee.embedding IS NOT NULL ${whereClause}
+       ORDER BY ee.embedding <=> $1::vector
+       LIMIT $${limitParam}`,
       params
     );
 
-    const rows = result.rows as Array<EpisodeRow & { embedding: Buffer | Uint8Array }>;
-
-    const episodes: EpisodeWithEmbedding[] = rows.map((row) => {
-      const embedding = this.deserializeEmbedding(row.embedding);
-      const similarity = cosineSimilarity(queryEmbedding, embedding);
-      return this.convertDatabaseEpisode(row, similarity, embedding);
+    const rows = result.rows as Array<EpisodeRow & { distance: number }>;
+    return rows.map((row) => {
+      const similarity = 1 - Number(row.distance);
+      return this.convertDatabaseEpisode(row, similarity);
     });
-
-    episodes.sort((a, b) => (b.similarity || 0) - (a.similarity || 0));
-    return episodes.slice(0, k);
-  }
-
-  /**
-   * Check if database row passes episode filters
-   */
-  private passesEpisodeFilters(
-    row: EpisodeRow,
-    filters: {
-      minReward?: number;
-      onlyFailures?: boolean;
-      onlySuccesses?: boolean;
-      timeWindowDays?: number;
-    }
-  ): boolean {
-    if (filters.minReward !== undefined && row.reward < filters.minReward) return false;
-    if (filters.onlyFailures && row.success === true) return false;
-    if (filters.onlySuccesses && row.success === false) return false;
-    if (filters.timeWindowDays) {
-      const ts = toNumber(row.ts);
-      if (ts < Date.now() / 1000 - filters.timeWindowDays * 86400) return false;
-    }
-    return true;
-  }
-
-  /**
-   * Fetch episodes by IDs from database
-   */
-  private async fetchEpisodesByIds(episodeIds: number[]): Promise<EpisodeRow[]> {
-    const placeholders = episodeIds.map((_, i) => `$${i + 1}`).join(',');
-    const result = await this.db.query(
-      `SELECT * FROM episodes WHERE id IN (${placeholders})`,
-      episodeIds
-    );
-    return result.rows as EpisodeRow[];
   }
 
   /**
@@ -673,27 +607,20 @@ export class ReflexionMemory {
     return parts.join('\n');
   }
 
+  /**
+   * Store an episode's embedding as a pgvector value.
+   *
+   * ADR-0170 Phase C.1: column is `vector(768)`; we pass the text
+   * literal `[v1,v2,…]` cast to `vector`. Both pglite and node-postgres
+   * accept this format transparently.
+   */
   private async storeEmbedding(episodeId: number, embedding: Float32Array): Promise<void> {
-    const blob = this.serializeEmbedding(embedding);
     await this.db.query(
       `INSERT INTO episode_embeddings (episode_id, embedding)
-       VALUES ($1, $2)
+       VALUES ($1, $2::vector)
        ON CONFLICT (episode_id) DO UPDATE SET embedding = EXCLUDED.embedding`,
-      [episodeId, blob]
+      [episodeId, embeddingToVector(embedding)]
     );
-  }
-
-  private serializeEmbedding(embedding: Float32Array): Buffer {
-    if (!embedding || !embedding.buffer) {
-      return Buffer.alloc(0);
-    }
-    return Buffer.from(embedding.buffer, embedding.byteOffset, embedding.byteLength);
-  }
-
-  private deserializeEmbedding(blob: Buffer | Uint8Array): Float32Array {
-    // postgres BYTEA may surface as Buffer (pg) or Uint8Array (pglite).
-    const buf = Buffer.isBuffer(blob) ? blob : Buffer.from(blob);
-    return new Float32Array(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength));
   }
 
   // ========================================================================
@@ -702,45 +629,39 @@ export class ReflexionMemory {
 
   /**
    * Enhance query embedding using GNN attention mechanism.
-   * Uses the vector backend (in-memory accelerator) + a SQL fetch of the
-   * matched embeddings — no graph backend involved.
+   *
+   * ADR-0170 Phase C.1: pgvector HNSW finds the neighbors directly; the
+   * in-memory accelerator path is retired. We pull both the embedding
+   * column (now `vector(768)`) and the reward in one query and feed
+   * neighbor embeddings to the learning backend's enhance() method.
    */
   private async enhanceQueryWithGNN(
     queryEmbedding: Float32Array,
     k: number
   ): Promise<Float32Array> {
-    if (!this.learningBackend || !this.vectorBackend) {
+    if (!this.learningBackend) {
       return queryEmbedding;
     }
 
     try {
-      const initialResults = this.vectorBackend.search(queryEmbedding, k * 2, {
-        threshold: 0.0,
-      });
-
-      if (initialResults.length === 0) {
-        return queryEmbedding;
-      }
-
-      const episodeIds = initialResults.map((r) => parseInt(r.id)).filter((n) => Number.isFinite(n));
-      if (episodeIds.length === 0) return queryEmbedding;
-      const placeholders = episodeIds.map((_, i) => `$${i + 1}`).join(',');
-
       const result = await this.db.query(
         `SELECT ee.embedding, e.reward
          FROM episode_embeddings ee
          JOIN episodes e ON e.id = ee.episode_id
-         WHERE ee.episode_id IN (${placeholders})`,
-        episodeIds
+         WHERE ee.embedding IS NOT NULL
+         ORDER BY ee.embedding <=> $1::vector
+         LIMIT $2`,
+        [embeddingToVector(queryEmbedding), k * 2]
       );
 
       const neighborEmbeddings: Float32Array[] = [];
       const weights: number[] = [];
-      for (const ep of result.rows as Array<{ embedding: Buffer | Uint8Array; reward: number }>) {
-        neighborEmbeddings.push(this.deserializeEmbedding(ep.embedding));
+      for (const ep of result.rows as Array<{ embedding: unknown; reward: number }>) {
+        neighborEmbeddings.push(vectorToEmbedding(ep.embedding));
         weights.push(Math.max(0.1, ep.reward));
       }
 
+      if (neighborEmbeddings.length === 0) return queryEmbedding;
       return this.learningBackend.enhance(queryEmbedding, neighborEmbeddings, weights);
     } catch (error) {
       console.warn('[ReflexionMemory] GNN enhancement failed:', error);
@@ -879,16 +800,10 @@ export class ReflexionMemory {
 
     let removed = false;
 
-    if (this.vectorBackend && typeof (this.vectorBackend as any).delete === 'function') {
-      try {
-        const r = await (this.vectorBackend as any).delete(String(numericId));
-        if (r === true) removed = true;
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        console.warn(`[ReflexionMemory] deleteEpisode: vector backend delete failed: ${msg}`);
-      }
-    }
-
+    // ADR-0170 Phase C.1: no separate vector index — DELETE removes the
+    // pgvector HNSW entry along with the row. ON DELETE CASCADE on
+    // episode_embeddings handles the embedding row too, but we issue
+    // both deletes for defence-in-depth across drivers.
     if (Number.isFinite(numericId)) {
       try {
         await this.db.query(`DELETE FROM episode_embeddings WHERE episode_id = $1`, [numericId]);
@@ -905,17 +820,22 @@ export class ReflexionMemory {
   }
 
   /**
-   * Rebuild the in-memory vector index from the postgres `episodes` /
-   * `episode_embeddings` tables. Used as a recovery path after the
-   * accelerator's in-memory state was lost across a process restart.
+   * Rebuild the pgvector index for episodes from scratch.
    *
-   * Returns the number of episodes re-indexed. No-ops when the SQL
-   * tables are empty.
+   * ADR-0170 Phase C.1: the pgvector HNSW index is part of the table —
+   * it doesn't need rebuilding the way an in-memory index did. This
+   * method now exists for backward compatibility (callers that expected
+   * to repopulate an accelerator) and performs a no-op count of
+   * already-indexed embeddings, optionally filtered by `fromTimestamp`.
+   *
+   * Embeddings for rows that lack one (legacy data from before pgvector
+   * shipped) are generated and INSERT'd so the row participates in the
+   * HNSW index.
    */
   async rebuildIndex(options: { fromTimestamp?: number } = {}): Promise<number> {
     await this.ready;
 
-    const params: any[] = [];
+    const params: unknown[] = [];
     let where = '';
     if (options.fromTimestamp !== undefined) {
       where = 'WHERE e.ts >= $1';
@@ -933,10 +853,17 @@ export class ReflexionMemory {
        ORDER BY e.id ASC`,
       params
     );
-    const rows = result.rows as Array<EpisodeRow & { embedding: Buffer | Uint8Array | null }>;
+    const rows = result.rows as Array<EpisodeRow & { embedding: unknown | null }>;
 
     let reindexed = 0;
     for (const row of rows) {
+      if (row.embedding) {
+        reindexed++;
+        continue;
+      }
+
+      // Legacy row without embedding — generate one and INSERT so the
+      // row participates in the pgvector index.
       const episode: Episode = {
         id: toNumber(row.id),
         ts: toNumber(row.ts),
@@ -952,28 +879,8 @@ export class ReflexionMemory {
         tags: row.tags ? JSON.parse(row.tags) : undefined,
         metadata: row.metadata ? (typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata) : undefined,
       };
-
-      let embedding: Float32Array;
-      if (row.embedding) {
-        embedding = this.deserializeEmbedding(row.embedding);
-      } else {
-        embedding = await this.embedder.embed(this.buildEpisodeText(episode));
-      }
-
-      if (this.vectorBackend) {
-        try {
-          this.vectorBackend.insert(String(toNumber(row.id)), embedding, {
-            type: 'episode',
-            sessionId: episode.sessionId,
-            reward: episode.reward,
-            success: episode.success,
-          });
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          console.warn(`[ReflexionMemory] rebuildIndex: vector insert failed for ${toNumber(row.id)}: ${msg}`);
-        }
-      }
-
+      const embedding = await this.embedder.embed(this.buildEpisodeText(episode));
+      await this.storeEmbedding(toNumber(row.id), embedding);
       reindexed++;
     }
 

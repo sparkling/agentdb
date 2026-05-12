@@ -23,15 +23,19 @@
  * ADR-0170 Phase B.1 (2026-05-11): ported from SQLite (better-sqlite3) to
  * PostgreSQL via PostgresBackend. The SQLite code path and the Option F
  * `hmem_vec` mirror writes were dead-stripped atomically with this commit.
- * Native vector ops now live alongside the relational row (Phase C
- * pgvector integration); the legacy `vectorBackend.insert(...)` parallel
- * write path remains for the in-memory index until pgvector lands.
+ *
+ * ADR-0170 Phase C.1 (2026-05-12): vectors now live as a `vector(768)`
+ * column on `hierarchical_memory` itself, indexed by pgvector HNSW. The
+ * legacy `vectorBackend.insert(...)` parallel-write path is retired — k-NN
+ * search routes through `ORDER BY embedding <-> $1 LIMIT $k` instead.
+ * `vectorBackend` constructor arg accepted but unused (kept for API
+ * compat; Phase D removes the param).
  */
 
 import type { PostgresBackend } from '../backends/postgres/PostgresBackend.js';
-import type { VectorBackend, SearchResult } from '../backends/VectorBackend.js';
+import { embeddingToVector } from '../backends/postgres/PostgresBackend.js';
+import type { VectorBackend } from '../backends/VectorBackend.js';
 import { EmbeddingService } from './EmbeddingService.js';
-import { cosineSimilarity } from '../utils/vector-math.js';
 
 /** Memory tier in the hierarchy */
 export type MemoryTier = 'working' | 'episodic' | 'semantic';
@@ -213,6 +217,9 @@ export class HierarchicalMemory {
    */
   private async initializeDatabase(): Promise<void> {
     await this.backend.initialize();
+    // ADR-0170 Phase C.1: `embedding vector(768)` column lives in the row
+    // alongside the relational metadata. HNSW index uses cosine ops with
+    // m=23, ef_construction=100 per memory `reference-embedding-model`.
     await this.backend.exec(`
       CREATE TABLE IF NOT EXISTS hierarchical_memory (
         id TEXT PRIMARY KEY,
@@ -226,13 +233,18 @@ export class HierarchicalMemory {
         consolidated_at BIGINT,
         tags TEXT,
         context TEXT,
-        metadata TEXT
+        metadata TEXT,
+        embedding vector(768)
       );
 
       CREATE INDEX IF NOT EXISTS idx_hierarchical_tier ON hierarchical_memory(tier);
       CREATE INDEX IF NOT EXISTS idx_hierarchical_importance ON hierarchical_memory(importance);
       CREATE INDEX IF NOT EXISTS idx_hierarchical_access ON hierarchical_memory(access_count);
       CREATE INDEX IF NOT EXISTS idx_hierarchical_created ON hierarchical_memory(created_at);
+      CREATE INDEX IF NOT EXISTS idx_hierarchical_memory_embedding_hnsw
+        ON hierarchical_memory
+        USING hnsw (embedding vector_cosine_ops)
+        WITH (m = 23, ef_construction = 100);
     `);
   }
 
@@ -271,11 +283,14 @@ export class HierarchicalMemory {
       metadata: options?.metadata,
     };
 
+    // ADR-0170 Phase C.1: embedding writes directly into the row as
+    // pgvector. No more parallel `vectorBackend.insert(...)` — the HNSW
+    // index on `hierarchical_memory.embedding` is the index of record.
     await this.backend.query(
       `INSERT INTO hierarchical_memory (
         id, tier, content, importance, access_count,
-        created_at, last_accessed_at, tags, context, metadata
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+        created_at, last_accessed_at, tags, context, metadata, embedding
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::vector)`,
       [
         id,
         tier,
@@ -287,18 +302,9 @@ export class HierarchicalMemory {
         options?.tags ? JSON.stringify(options.tags) : null,
         options?.context ? JSON.stringify(options.context) : null,
         options?.metadata ? JSON.stringify(options.metadata) : null,
+        embeddingToVector(embedding),
       ],
     );
-
-    // Add to vector backend if available
-    if (this.vectorBackend) {
-      this.vectorBackend.insert(id, embedding, {
-        tier,
-        importance,
-        createdAt: now,
-        ...options?.metadata,
-      });
-    }
 
     // Cache in appropriate tier
     if (tier === 'working') {
@@ -337,39 +343,15 @@ export class HierarchicalMemory {
     const k = query.k || 10;
     const threshold = query.threshold || 0.5;
 
-    let results: MemoryItem[] = [];
-
-    // Search vector backend if available (faster)
-    if (this.vectorBackend) {
-      const searchResults: SearchResult[] = [];
-
-      for (const tier of tiers) {
-        const tierResults = await this.vectorBackend.search(queryEmbedding, k, {
-          threshold,
-          filter: { tier },
-        });
-        searchResults.push(...tierResults);
-      }
-
-      // Convert to MemoryItems
-      results = await Promise.all(
-        searchResults.map(async (result) => {
-          const item = await this.getMemoryById(result.id);
-          if (item) {
-            item.metadata = { ...item.metadata, similarity: result.similarity };
-          }
-          return item;
-        }),
-      ).then((items) => items.filter((item): item is MemoryItem => item !== null));
-    } else {
-      // Fallback: manual search
-      results = await this.manualSearch(
-        queryEmbedding,
-        ['working', 'episodic', 'semantic'] as MemoryTier[],
-        k,
-        threshold,
-      );
-    }
+    // ADR-0170 Phase C.1: pgvector k-NN through the HNSW index. The
+    // `<=>` operator is cosine distance (0 = identical, 2 = opposite);
+    // similarity = 1 - distance for cosine ops.
+    let results: MemoryItem[] = await this.pgvectorSearch(
+      queryEmbedding,
+      tiers as MemoryTier[],
+      k,
+      threshold,
+    );
 
     // Apply forgetting curve if not including decayed
     if (!query.includeDecayed) {
@@ -620,13 +602,8 @@ export class HierarchicalMemory {
       }
     }
 
-    // Update vector backend metadata
-    if (this.vectorBackend && item?.embedding) {
-      this.vectorBackend.insert(memoryId, item.embedding, {
-        tier: newTier,
-        consolidated: newTier === 'semantic',
-      });
-    }
+    // ADR-0170 Phase C.1: tier update is a single UPDATE; pgvector index
+    // tracks the row directly — no separate index to update.
   }
 
   /**
@@ -635,15 +612,13 @@ export class HierarchicalMemory {
   private async forget(memoryId: string): Promise<void> {
     await this.schemaReady;
 
+    // ADR-0170 Phase C.1: DELETE removes the row + its embedding +
+    // pgvector HNSW index entry atomically. No separate accelerator
+    // cleanup needed.
     await this.backend.query(`DELETE FROM hierarchical_memory WHERE id = $1`, [memoryId]);
     this.workingMemoryCache.delete(memoryId);
     this.episodicMemoryIndex.delete(memoryId);
     this.stats.forgotten++;
-
-    // Remove from vector backend
-    if (this.vectorBackend) {
-      this.vectorBackend.remove(memoryId);
-    }
   }
 
   /**
@@ -686,9 +661,17 @@ export class HierarchicalMemory {
   }
 
   /**
-   * Manual search without vector backend
+   * pgvector-backed k-NN search.
+   *
+   * ADR-0170 Phase C.1: replaces the prior in-memory `manualSearch` that
+   * re-embedded every row from `content`. Now the embedding lives in
+   * `hierarchical_memory.embedding` and is HNSW-indexed; postgres picks
+   * the index automatically when the ORDER BY uses the `<=>` operator.
+   *
+   * Cosine distance via `<=>`: 0 = identical, 2 = opposite. Similarity is
+   * `1 - distance` (clamped to [0, 1] for typical inputs).
    */
-  private async manualSearch(
+  private async pgvectorSearch(
     queryEmbedding: Float32Array,
     tiers: MemoryTier[],
     k: number,
@@ -697,32 +680,30 @@ export class HierarchicalMemory {
     await this.schemaReady;
 
     // postgres accepts an array bind for IN-list via `= ANY($1::TEXT[])`.
+    // $2 is the query vector; $3 is the LIMIT. NULL embedding columns
+    // (legacy rows from a non-pgvector cluster — should never exist after
+    // Phase C.1, but defensive) are filtered out by `embedding IS NOT NULL`.
     const res = await this.backend.query(
-      `SELECT * FROM hierarchical_memory
+      `SELECT *,
+              embedding <=> $2::vector AS distance
+       FROM hierarchical_memory
        WHERE tier = ANY($1::TEXT[])
-       ORDER BY importance DESC
-       LIMIT $2`,
-      [tiers, k * 2],
+         AND embedding IS NOT NULL
+       ORDER BY embedding <=> $2::vector
+       LIMIT $3`,
+      [tiers, embeddingToVector(queryEmbedding), k],
     );
-    const rows = res.rows as HierarchicalMemoryRow[];
+    const rows = res.rows as Array<HierarchicalMemoryRow & { distance: number }>;
 
-    const results: Array<MemoryItem & { similarity: number }> = [];
-
+    const results: MemoryItem[] = [];
     for (const row of rows) {
-      const embedding = await this.embedder.embed(row.content);
-      const similarity = cosineSimilarity(queryEmbedding, embedding);
-
-      if (similarity >= threshold) {
-        const item = this.hydrateRow(row);
-        results.push({
-          ...item,
-          embedding,
-          similarity,
-        });
-      }
+      const similarity = 1 - Number(row.distance);
+      if (similarity < threshold) continue;
+      const item = this.hydrateRow(row);
+      item.metadata = { ...item.metadata, similarity };
+      results.push(item);
     }
-
-    return results.sort((a, b) => b.similarity - a.similarity).slice(0, k);
+    return results;
   }
 
   /**

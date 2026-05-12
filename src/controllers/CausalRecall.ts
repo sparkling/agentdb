@@ -34,8 +34,8 @@ import { CausalMemoryGraph, CausalEdge } from './CausalMemoryGraph.js';
 import { ExplainableRecall, RecallCertificate } from './ExplainableRecall.js';
 import { EmbeddingService } from './EmbeddingService.js';
 import type { PostgresBackend } from '../backends/postgres/PostgresBackend.js';
+import { embeddingToVector } from '../backends/postgres/PostgresBackend.js';
 import type { VectorBackend } from '../backends/VectorBackend.js';
-import { cosineSimilarity } from '../utils/vector-math.js';
 
 export interface RerankConfig {
   alpha: number; // Similarity weight (default: 0.7)
@@ -174,85 +174,38 @@ export class CausalRecall {
     queryEmbedding: Float32Array,
     k: number
   ): Promise<Array<{ id: string; type: string; content: string; similarity: number; latencyMs: number }>> {
-    // Use optimized vector backend if available (100x faster)
-    if (this.vectorBackend && typeof this.vectorBackend.search === 'function') {
-      const searchResults = this.vectorBackend.search(queryEmbedding, k, {
-        threshold: 0.0
-      });
-
-      if (searchResults.length === 0) {
-        return [];
-      }
-
-      const episodeIds = searchResults.map(r => r.id);
-      const placeholders = episodeIds.map((_, i) => `$${i + 1}`).join(',');
-      const episodesResult = await this.db.query(
-        `SELECT
-           id,
-           task || ' ' || COALESCE(output, '') AS content,
-           latency_ms
-         FROM episodes
-         WHERE id IN (${placeholders})`,
-        episodeIds,
-      );
-      const episodes = episodesResult.rows as Array<{
-        id: number | string;
-        content: string;
-        latency_ms: number | string | null;
-      }>;
-
-      const episodeMap = new Map(episodes.map(e => [String(e.id), e]));
-
-      return searchResults.map(result => {
-        const ep = episodeMap.get(String(result.id));
-        return {
-          id: String(result.id),
-          type: 'episode',
-          content: ep?.content || '',
-          similarity: result.similarity,
-          latencyMs: ep?.latency_ms == null ? 0 : Number(ep.latency_ms),
-        };
-      });
-    }
-
-    // Fallback path: SQL-based similarity search reading BYTEA embeddings.
+    // ADR-0170 Phase C.1: pgvector HNSW k-NN. The legacy vectorBackend
+    // branch is retired — single SQL plan, single index. `<=>` is cosine
+    // distance; similarity = 1 - distance.
     const episodesResult = await this.db.query(
       `SELECT
          e.id,
          'episode' AS type,
          e.task || ' ' || COALESCE(e.output, '') AS content,
-         ee.embedding,
-         e.latency_ms
+         e.latency_ms,
+         ee.embedding <=> $1::vector AS distance
        FROM episodes e
        JOIN episode_embeddings ee ON e.id = ee.episode_id
-       ORDER BY e.ts DESC
-       LIMIT $1`,
-      [k * 2],
+       WHERE ee.embedding IS NOT NULL
+       ORDER BY ee.embedding <=> $1::vector
+       LIMIT $2`,
+      [embeddingToVector(queryEmbedding), k],
     );
     const episodes = episodesResult.rows as Array<{
       id: number | string;
       type: string;
       content: string;
-      embedding: Buffer;
       latency_ms: number | string | null;
+      distance: number;
     }>;
 
-    const results: Array<{ id: string; type: string; content: string; similarity: number; latencyMs: number }> = [];
-    for (const ep of episodes) {
-      const embedding = this.deserializeEmbedding(ep.embedding);
-      const similarity = cosineSimilarity(queryEmbedding, embedding);
-      results.push({
-        id: String(ep.id),
-        type: ep.type,
-        content: ep.content,
-        similarity,
-        latencyMs: ep.latency_ms == null ? 0 : Number(ep.latency_ms),
-      });
-    }
-
-    return results
-      .sort((a, b) => b.similarity - a.similarity)
-      .slice(0, k);
+    return episodes.map((ep) => ({
+      id: String(ep.id),
+      type: ep.type,
+      content: ep.content,
+      similarity: 1 - Number(ep.distance),
+      latencyMs: ep.latency_ms == null ? 0 : Number(ep.latency_ms),
+    }));
   }
 
   /**
@@ -427,12 +380,8 @@ export class CausalRecall {
     return [...new Set(words)];
   }
 
-  /**
-   * Deserialize embedding from Buffer
-   */
-  private deserializeEmbedding(buffer: Buffer): Float32Array {
-    return new Float32Array(buffer.buffer, buffer.byteOffset, buffer.length / 4);
-  }
+  // ADR-0170 Phase C.1: deserializeEmbedding retired — vectors live as
+  // pgvector columns; reads go through vectorToEmbedding() when needed.
 
   /**
    * Batch recall for multiple queries

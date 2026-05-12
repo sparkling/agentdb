@@ -26,9 +26,14 @@
  * in an aggregate). Date-bucketed aggregates compute the bucket
  * expression verbatim in both SELECT and GROUP BY (postgres does not
  * resolve SELECT aliases inside GROUP BY without a subquery wrapper).
+ *
+ * ADR-0170 Phase C.1 (2026-05-12): `learning_state_embeddings.embedding`
+ * migrated from BYTEA to pgvector `vector(768)` with HNSW index. State
+ * embedding lookups now read pgvector directly via vectorToEmbedding().
  */
 
 import type { PostgresBackend } from '../backends/postgres/PostgresBackend.js';
+import { embeddingToVector, vectorToEmbedding } from '../backends/postgres/PostgresBackend.js';
 import { EmbeddingService } from './EmbeddingService.js';
 import { cosineSimilarity } from '../utils/vector-math.js';
 import { RuVectorLearning, LearningConfig as GNNConfig } from '../backends/ruvector/RuVectorLearning.js';
@@ -238,11 +243,15 @@ export class LearningSystem {
         id BIGSERIAL PRIMARY KEY,
         session_id TEXT NOT NULL,
         state TEXT NOT NULL,
-        embedding BYTEA NOT NULL,
+        embedding vector(768) NOT NULL,
         FOREIGN KEY (session_id) REFERENCES learning_sessions(id) ON DELETE CASCADE
       );
 
       CREATE INDEX IF NOT EXISTS idx_learning_state_embeddings_session ON learning_state_embeddings(session_id);
+      CREATE INDEX IF NOT EXISTS idx_learning_state_embeddings_hnsw
+        ON learning_state_embeddings
+        USING hnsw (embedding vector_cosine_ops)
+        WITH (m = 23, ef_construction = 100);
     `);
   }
 
@@ -548,29 +557,28 @@ export class LearningSystem {
    * Get or create state embedding
    */
   private async getStateEmbedding(sessionId: string, state: string): Promise<Float32Array> {
-    // Check if embedding exists
+    // ADR-0170 Phase C.1: `embedding` column is now `vector(768)`. pglite
+    // surfaces vector values as a text literal `[v1,v2,…]` unless a custom
+    // type parser is registered; vectorToEmbedding() handles both shapes.
     const existingResult = await this.backend.query(
       `SELECT embedding FROM learning_state_embeddings
        WHERE session_id = $1 AND state = $2`,
       [sessionId, state],
     );
-    const existing = existingResult.rows[0] as any;
+    const existing = existingResult.rows[0] as { embedding: unknown } | undefined;
 
     if (existing) {
-      // pglite/pg return BYTEA as a Node Buffer / Uint8Array; normalize.
-      const raw = existing.embedding;
-      const buf = raw instanceof Buffer ? raw : Buffer.from(raw);
-      return new Float32Array(buf.buffer, buf.byteOffset, buf.byteLength / 4);
+      return vectorToEmbedding(existing.embedding);
     }
 
     // Generate new embedding
     const embedding = await this.embedder.embed(state);
 
-    // Store embedding
+    // Store embedding (pgvector text literal cast to `vector`).
     await this.backend.query(
       `INSERT INTO learning_state_embeddings (session_id, state, embedding)
-       VALUES ($1, $2, $3)`,
-      [sessionId, state, Buffer.from(embedding.buffer)],
+       VALUES ($1, $2, $3::vector)`,
+      [sessionId, state, embeddingToVector(embedding)],
     );
 
     return embedding;

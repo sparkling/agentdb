@@ -58,7 +58,7 @@ describe('NightlyLearner', () => {
 
       CREATE TABLE IF NOT EXISTS episode_embeddings (
         episode_id BIGINT PRIMARY KEY,
-        embedding BYTEA NOT NULL
+        embedding vector(768) NOT NULL
       );
     `);
 

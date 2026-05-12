@@ -10,6 +10,12 @@
  * - Approximate nearest neighbors for large datasets
  * - Graceful fallback to JavaScript
  * - SIMD optimizations when available
+ *
+ * ADR-0170 Phase C.1 (2026-05-12): SQL path migrated to PostgresBackend +
+ * pgvector. `findKNN()` no longer fetches all rows and computes cosine
+ * in JS — it issues a single `ORDER BY embedding <=> $1 LIMIT $k` and
+ * lets pgvector's HNSW index drive the search. The WASM batch-similarity
+ * helper is kept for non-DB-backed Float32Array inputs.
  */
 
 import { cosineSimilarity as sharedCosineSimilarity } from '../utils/vector-math.js';
@@ -17,8 +23,11 @@ import type { AttentionService } from './AttentionService.js';
 import { resolve, dirname, join } from 'path';
 import { existsSync } from 'fs';
 import { fileURLToPath } from 'url';
+import { embeddingToVector } from '../backends/postgres/PostgresBackend.js';
 
-// Database type from db-fallback
+// Database type — duck-typed PostgresBackend handle. We only use `query(sql, params)`.
+// Kept as `any` for backward compatibility with the legacy SQLite-prepare/all
+// fake-Database shape passed by some tests (real consumers pass PostgresBackend).
 type Database = any;
 
 /**
@@ -233,7 +242,11 @@ export class WASMVectorSearch {
   }
 
   /**
-   * Find k-nearest neighbors using brute force search
+   * Find k-nearest neighbors using pgvector HNSW.
+   *
+   * ADR-0170 Phase C.1: Single SQL plan against the pgvector index, no
+   * JS-side cosine loop. `<=>` is cosine distance under
+   * `vector_cosine_ops`; similarity = 1 - distance.
    */
   async findKNN(
     query: Float32Array,
@@ -246,55 +259,40 @@ export class WASMVectorSearch {
   ): Promise<VectorSearchResult[]> {
     const threshold = options?.threshold ?? 0.0;
 
-    // Build WHERE clause for filters
-    const conditions: string[] = [];
-    const params: any[] = [];
+    // $1 is the query vector; $2+ are filter values; final $N is LIMIT.
+    const conditions: string[] = ['embedding IS NOT NULL'];
+    const params: unknown[] = [embeddingToVector(query)];
+    let p = 2;
 
     if (options?.filters) {
       Object.entries(options.filters).forEach(([key, value]) => {
-        conditions.push(`${key} = ?`);
+        conditions.push(`${key} = $${p++}`);
         params.push(value);
       });
     }
+    params.push(k);
+    const limitParam = p;
 
-    const whereClause = conditions.length > 0
-      ? `WHERE ${conditions.join(' AND ')}`
-      : '';
+    const result = await this.db.query(
+      `SELECT pattern_id AS id,
+              embedding <=> $1::vector AS distance
+       FROM ${tableName}
+       WHERE ${conditions.join(' AND ')}
+       ORDER BY embedding <=> $1::vector
+       LIMIT $${limitParam}`,
+      params,
+    );
 
-    // Retrieve all vectors
-    const stmt = this.db.prepare(`
-      SELECT pattern_id as id, embedding
-      FROM ${tableName}
-      ${whereClause}
-    `);
-
-    const rows = stmt.all(...params) as any[];
-
-    // Calculate similarities
-    const candidates = rows.map(row => {
-      const embedding = new Float32Array(
-        (row.embedding as Buffer).buffer,
-        (row.embedding as Buffer).byteOffset,
-        (row.embedding as Buffer).byteLength / 4
-      );
-
-      const similarity = this.cosineSimilarity(query, embedding);
-      const distance = 1 - similarity; // Convert to distance
-
+    const candidates = (result.rows as Array<{ id: number | string; distance: number }>).map((row) => {
+      const distance = Number(row.distance);
       return {
-        id: row.id,
+        id: typeof row.id === 'string' ? parseInt(row.id, 10) : Number(row.id),
         distance,
-        similarity,
+        similarity: 1 - distance,
       };
     });
 
-    // Filter by threshold and sort
-    const filtered = candidates
-      .filter(c => c.similarity >= threshold)
-      .sort((a, b) => b.similarity - a.similarity)
-      .slice(0, k);
-
-    return filtered;
+    return candidates.filter((c) => c.similarity >= threshold);
   }
 
   /**

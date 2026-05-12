@@ -33,6 +33,7 @@
  */
 
 import type { PostgresBackend } from '../backends/postgres/PostgresBackend.js';
+import { embeddingToVector } from '../backends/postgres/PostgresBackend.js';
 import { AttentionService, type HyperbolicAttentionConfig } from '../utils/LegacyAttentionAdapter.js';
 import { EmbeddingService } from './EmbeddingService.js';
 import type { VectorBackend } from '../backends/VectorBackend.js';
@@ -199,13 +200,17 @@ export class CausalMemoryGraph {
       embedding = new Float32Array(getEmbeddingConfig().dimension).fill(0);
     }
 
+    // ADR-0170 Phase C.1: embedding lives inline on the row as
+    // `vector(768)`. findSimilarCausalPatterns() uses the HNSW index on
+    // this column. The legacy `vectorBackend.insert(...)` parallel-write
+    // path is retired.
     const result = await this.db.query(
       `INSERT INTO causal_edges (
          from_memory_id, from_memory_type, to_memory_id, to_memory_type,
          similarity, uplift, confidence, sample_size,
          evidence_ids, confounder_score,
-         mechanism, metadata
-       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+         mechanism, embedding, metadata
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::vector, $13)
        RETURNING id`,
       [
         edge.fromMemoryId,
@@ -219,23 +224,12 @@ export class CausalMemoryGraph {
         edge.evidenceIds ? JSON.stringify(edge.evidenceIds) : null,
         edge.confounderScore ?? null,
         edge.mechanism ?? null,
+        embeddingToVector(embedding),
         edge.metadata ? JSON.stringify(edge.metadata) : null,
       ],
     );
 
     const edgeId = Number((result.rows[0] as any).id);
-
-    if (this.vectorBackend && embedding) {
-      this.vectorBackend.insert(`causal-edge:${edgeId}`, embedding, {
-        fromMemoryId: edge.fromMemoryId,
-        fromMemoryType: edge.fromMemoryType,
-        toMemoryId: edge.toMemoryId,
-        toMemoryType: edge.toMemoryType,
-        mechanism: mechanismText,
-        confidence: edge.confidence,
-        uplift: edge.uplift,
-      });
-    }
 
     return edgeId;
   }
@@ -399,9 +393,10 @@ export class CausalMemoryGraph {
   /**
    * Find similar causal patterns using vector similarity search.
    *
-   * Postgres-substrate note: the k-NN search still routes through the
-   * injected VectorBackend (RuVector/RVF) in Phase B. Phase C lights up
-   * pgvector and lets the planner do the search natively.
+   * ADR-0170 Phase C.1: pgvector HNSW on `causal_edges.embedding`.
+   * Single-plan k-NN against the mechanism embedding — no separate index
+   * or post-filter. Returns top-k by cosine similarity, filtered by
+   * minConfidence.
    *
    * @param mechanism - The causal mechanism description to search for
    * @param k - Number of similar patterns to return (default: 10)
@@ -412,40 +407,27 @@ export class CausalMemoryGraph {
     k: number = 10,
     minConfidence: number = 0.5,
   ): Promise<Array<CausalEdge & { similarity: number }>> {
-    if (!this.embedder || !this.vectorBackend) {
+    if (!this.embedder) {
       return [];
     }
 
     const queryEmbedding = await this.embedder.embed(mechanism);
-    const results = this.vectorBackend.search(queryEmbedding, k * 2);
 
-    const filteredResults = results.filter(result => {
-      if (!result.id.startsWith('causal-edge:')) return false;
-      const confidence = result.metadata?.confidence as number | undefined;
-      return confidence === undefined || confidence >= minConfidence;
-    });
+    const result = await this.db.query(
+      `SELECT *,
+              embedding <=> $1::vector AS distance
+       FROM causal_edges
+       WHERE embedding IS NOT NULL
+         AND confidence >= $2
+       ORDER BY embedding <=> $1::vector
+       LIMIT $3`,
+      [embeddingToVector(queryEmbedding), minConfidence, k],
+    );
 
-    const edges: Array<CausalEdge & { similarity: number }> = [];
-
-    for (const result of filteredResults.slice(0, k)) {
-      const edgeId = parseInt(result.id.replace('causal-edge:', ''), 10);
-      if (isNaN(edgeId)) continue;
-
-      const rowResult = await this.db.query(
-        'SELECT * FROM causal_edges WHERE id = $1',
-        [edgeId],
-      );
-      const row = rowResult.rows[0];
-
-      if (row) {
-        edges.push({
-          ...this.rowToCausalEdge(row as any),
-          similarity: result.similarity,
-        });
-      }
-    }
-
-    return edges;
+    return (result.rows as Array<Record<string, unknown> & { distance: number }>).map((row) => ({
+      ...this.rowToCausalEdge(row as any),
+      similarity: 1 - Number(row.distance),
+    }));
   }
 
   /**

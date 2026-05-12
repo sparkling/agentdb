@@ -473,6 +473,61 @@ export class HierarchicalMemory {
   }
 
   /**
+   * Query records by content path/glob pattern.
+   *
+   * Glob → SQL LIKE translation: `*` → `%`, `?` → `_`. SQL metacharacters
+   * `%` and `_` in the input are escaped first so they are matched literally.
+   *
+   * Per ADR-0176 Phase 3 (the read-side complement to `store()`'s write path).
+   * Distinct from `recall()`: this is path-pattern enumeration, not similarity search.
+   * Use `recall()` when you have a semantic query; use `query()` when you have a path.
+   */
+  async query(
+    pathPattern: string,
+    options?: { tier?: MemoryTier; limit?: number },
+  ): Promise<MemoryItem[]> {
+    // Escape SQL LIKE metacharacters, then translate glob wildcards
+    const likePattern = pathPattern
+      .replace(/\\/g, '\\\\')
+      .replace(/%/g, '\\%')
+      .replace(/_/g, '\\_')
+      .replace(/\*/g, '%')
+      .replace(/\?/g, '_');
+
+    const params: unknown[] = [likePattern];
+    let sql = `SELECT * FROM hierarchical_memory WHERE content LIKE ? ESCAPE '\\'`;
+
+    if (options?.tier) {
+      sql += ` AND tier = ?`;
+      params.push(options.tier);
+    }
+
+    sql += ` ORDER BY created_at DESC`;
+
+    if (options?.limit !== undefined && options.limit > 0) {
+      sql += ` LIMIT ?`;
+      params.push(options.limit);
+    }
+
+    const rows = this.db.prepare(sql).all(...params) as any[];
+
+    return rows.map((row): MemoryItem => ({
+      id: row.id,
+      tier: row.tier as MemoryTier,
+      content: row.content,
+      importance: row.importance,
+      accessCount: row.access_count,
+      createdAt: row.created_at,
+      lastAccessedAt: row.last_accessed_at,
+      lastRehearsedAt: row.last_rehearsed_at,
+      consolidatedAt: row.consolidated_at,
+      tags: row.tags ? JSON.parse(row.tags) : undefined,
+      context: row.context ? JSON.parse(row.context) : undefined,
+      metadata: row.metadata ? JSON.parse(row.metadata) : undefined,
+    }));
+  }
+
+  /**
    * Get memory statistics
    */
   async getStats(): Promise<MemoryStats> {

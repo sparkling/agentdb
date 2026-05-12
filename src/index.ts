@@ -46,6 +46,8 @@ export { MemoryConsolidation } from './controllers/MemoryConsolidation.js';
 // Embedding services
 export { EmbeddingService } from './controllers/EmbeddingService.js';
 export { EnhancedEmbeddingService } from './controllers/EnhancedEmbeddingService.js';
+// StreamingEmbeddingService: fork-only controller (ADR-065 P1-3). Restored 2026-05-12 from bd760f2 (pre-ADR-0170 RVF/sqlite-vec era). Streaming variant with chunk-by-chunk incremental embedding generation, progress callbacks, and AbortController-based cancellation. Zero in-tree consumers today; documented as orphan in ADR-0171; restored to preserve future-wiring optionality per ADR-0178 Follow-up #4.
+export { StreamingEmbeddingService } from './controllers/StreamingEmbeddingService.js';
 
 // Model cache (offline .rvf model loading)
 export { ModelCacheLoader } from './model/ModelCacheLoader.js';
@@ -71,6 +73,8 @@ export { createDatabase } from './db-fallback.js';
 // Optimizations
 export { BatchOperations } from './optimizations/BatchOperations.js';
 export { QueryOptimizer } from './optimizations/QueryOptimizer.js';
+// RVFOptimizer: fork-only optimization (ADR-062, ADR-065). Restored 2026-05-12 from bd760f2 (pre-ADR-0170 RVF/sqlite-vec era). Implements 4/8/16-bit quantization, dedup, pruning, batch embedding, LRU caching, adaptive + progressive compression. controller-registry.ts:1721 currently exposes a stats-only wrapper; the restored class is the real implementation behind the wrapper.
+export { RVFOptimizer } from './optimizations/RVFOptimizer.js';
 export { QueryCache } from './core/QueryCache.js';
 export type { QueryCacheConfig, CacheEntry, CacheStatistics } from './core/QueryCache.js';
 
@@ -158,3 +162,13 @@ export {
   type LLMConfig,
   type LLMResponse,
 } from './services/LLMRouter.js';
+
+// Fork-only services restored 2026-05-12 from bd760f2 (pre-ADR-0170 RVF era) per ADR-0178 Follow-up #4.
+// SonaTrajectoryService: SONA-based agent trajectory recording + prediction (@ruvector/sona wrapper with in-memory fallback). controller-registry.ts:1450 expects this export.
+export { SonaTrajectoryService } from './services/SonaTrajectoryService.js';
+// SemanticRouter: semantic intent routing via @ruvector/router with keyword-matching fallback (ADR-062). controller-registry.ts:1418 expects this export.
+export { SemanticRouter } from './services/SemanticRouter.js';
+// GNNService: Graph Neural Network service (@ruvector/gnn wrapper with JS fallback). Provides intent classification, skill recommendation, code pattern similarity (ADR-062). controller-registry.ts:1711 expects this export.
+export { GNNService } from './services/GNNService.js';
+// GraphTransformerService: 8-module graph attention service (@ruvector/graph-transformer wrapper) — sublinear/causal/Granger/Hamiltonian/spiking/game-theoretic attention + product manifold distance (ADR-060 Phase 3). controller-registry.ts:1534 case 'graphTransformer' routes through agentdb.getController which depends on this controller's registration.
+export { GraphTransformerService } from './services/GraphTransformerService.js';

@@ -11,12 +11,16 @@
  * - SQLite path dead-stripped (better-sqlite3/sql.js).
  * - skill_vec Option F mirror writes dead-stripped (Phase C uses pgvector).
  * - @ruvector/graph-node Cypher branches dead-stripped (per resolution-J).
+ *
+ * ADR-0170 Phase C.1 (2026-05-12): `skill_embeddings.embedding` migrated
+ * from BYTEA to pgvector `vector(768)` with HNSW index. The vectorBackend
+ * parallel-write path is retired; k-NN now uses `ORDER BY embedding <=> $1`.
  */
 
 import { EmbeddingService } from './EmbeddingService.js';
 import { VectorBackend } from '../backends/VectorBackend.js';
 import { PostgresBackend } from '../backends/postgres/PostgresBackend.js';
-import { cosineSimilarity } from '../utils/vector-math.js';
+import { embeddingToVector } from '../backends/postgres/PostgresBackend.js';
 import { QueryCache, type QueryCacheConfig } from '../core/QueryCache.js';
 
 export interface Skill {
@@ -144,10 +148,14 @@ export class SkillLibrary {
 
       CREATE TABLE IF NOT EXISTS skill_embeddings (
         skill_id BIGINT PRIMARY KEY,
-        embedding BYTEA NOT NULL,
-        embedding_model TEXT DEFAULT 'all-MiniLM-L6-v2',
+        embedding vector(768) NOT NULL,
+        embedding_model TEXT DEFAULT 'Xenova/all-mpnet-base-v2',
         FOREIGN KEY(skill_id) REFERENCES skills(id) ON DELETE CASCADE
       );
+      CREATE INDEX IF NOT EXISTS idx_skill_embeddings_hnsw
+        ON skill_embeddings
+        USING hnsw (embedding vector_cosine_ops)
+        WITH (m = 23, ef_construction = 100);
     `);
   }
 
@@ -196,29 +204,10 @@ export class SkillLibrary {
     const text = this.buildSkillText(skill);
     const embedding = await this.embedder.embed(text);
 
-    // ADR-0094 Phase 13.2 fix: ALWAYS persist embedding to skill_embeddings,
-    // regardless of whether a vectorBackend is wired. The relational table is
-    // the cross-process truth store; vectorBackend is an in-memory accelerator.
+    // ADR-0170 Phase C.1: pgvector is the sole vector index. The HNSW
+    // index on skill_embeddings.embedding handles k-NN; no parallel
+    // vectorBackend write path.
     await this.storeSkillEmbedding(skillId, embedding);
-
-    // Also populate the in-memory vectorBackend accelerator if available
-    if (this.vectorBackend) {
-      try {
-        this.vectorBackend.insert(
-          `skill:${skillId}`,
-          embedding,
-          {
-            name: skill.name,
-            description: skill.description,
-            successRate: skill.successRate,
-            avgReward: skill.avgReward
-          }
-        );
-      } catch {
-        // vectorBackend insert failed — skill_embeddings already has it, so
-        // retrieveSkillsLegacy will still find this skill on search.
-      }
-    }
 
     return skillId;
   }
@@ -275,182 +264,73 @@ export class SkillLibrary {
       return cached;
     }
 
-    // Generate query embedding
-    const queryEmbedding = await this.embedder.embed(task);
-
-    // Use VectorBackend for semantic search (if available)
-    if (this.vectorBackend) {
-      try {
-        const searchResults = this.vectorBackend.search(queryEmbedding, k * 3);
-
-        // ADR-0094 Phase 13.2 fix: when the vectorBackend is empty (e.g.
-        // fresh process, only postgres is persisted), fall through to the
-        // SQL-based retrieveSkillsLegacy instead of returning []. ADR-0082
-        // forbids silent-empty returns when a fallback path exists.
-        if (!searchResults || searchResults.length === 0) {
-          return this.retrieveSkillsLegacy(query);
-        }
-
-        // Map results back to skill IDs and fetch full skill data
-        const skillsWithSimilarity: (Skill & { similarity: number })[] = [];
-
-        for (const result of searchResults) {
-          // Extract skill ID from vector ID (format: "skill:123")
-          const skillId = parseInt(result.id.replace('skill:', ''));
-
-          // Fetch full skill data from database
-          const rowResult = await this.db.query(
-            'SELECT * FROM skills WHERE id = $1',
-            [skillId]
-          );
-          const row = rowResult.rows[0] as any;
-
-          if (!row) continue;
-
-          // Apply filters
-          if (row.success_rate < minSuccessRate) continue;
-
-          skillsWithSimilarity.push({
-            id: Number(row.id),
-            name: row.name,
-            description: row.description,
-            signature: this.parseJSON(row.signature),
-            code: row.code,
-            successRate: row.success_rate,
-            uses: Number(row.uses),
-            avgReward: row.avg_reward,
-            avgLatencyMs: Number(row.avg_latency_ms),
-            createdFromEpisode: row.created_from_episode != null ? Number(row.created_from_episode) : undefined,
-            metadata: row.metadata ? this.parseJSON(row.metadata) : undefined,
-            similarity: result.similarity
-          });
-        }
-
-        // ADR-0094 Phase 13.2 fix: vectorBackend returned candidates but
-        // none survived the SQL join (e.g. vectorBackend state is stale
-        // — ids in the in-memory index don't match rows in skills table).
-        // Fall through to SQL similarity search rather than return empty.
-        if (skillsWithSimilarity.length === 0) {
-          return this.retrieveSkillsLegacy(query);
-        }
-
-        // Compute composite scores
-        skillsWithSimilarity.sort((a, b) => {
-          const scoreA = this.computeSkillScore(a);
-          const scoreB = this.computeSkillScore(b);
-          return scoreB - scoreA;
-        });
-
-        return skillsWithSimilarity.slice(0, k);
-      } catch { /* vectorBackend search failed — fall through to SQL */ }
-    }
-
-    // Legacy: use SQL-based similarity search
-    return this.retrieveSkillsLegacy(query);
+    // ADR-0170 Phase C.1: pgvector HNSW k-NN. The legacy vectorBackend
+    // branch is retired — single SQL plan, single index.
+    return this.retrieveSkillsViaPgvector(query);
   }
 
   /**
-   * Legacy SQL-based skill retrieval (fallback when VectorBackend not available)
+   * pgvector-backed skill retrieval.
+   *
+   * ADR-0170 Phase C.1: replaces `retrieveSkillsLegacy`. The HNSW index
+   * on `skill_embeddings.embedding` is the only k-NN path. Skills without
+   * embedding rows are skipped (must run rebuildIndex / re-create the
+   * skill to populate). The skill score (success_rate, uses, avg_reward)
+   * is folded into the rank after the k-NN order.
    */
-  private async retrieveSkillsLegacy(query: SkillQuery): Promise<Skill[]> {
-    // v1 API compatibility: accept both 'query' and 'task'
+  private async retrieveSkillsViaPgvector(query: SkillQuery): Promise<Skill[]> {
     const task = query.task || query.query;
     if (!task) {
       throw new Error('SkillQuery must provide either task (v2) or query (v1)');
     }
-
     const { k = 5, minSuccessRate = 0.5 } = query;
     const queryEmbedding = await this.embedder.embed(task);
 
-    // Fetch all skills with embeddings
+    // Pull more candidates than k to leave room for the composite
+    // re-ranking. `<=>` is cosine distance; ORDER BY ascending = closest.
     const result = await this.db.query(
-      `SELECT s.*, e.embedding
+      `SELECT s.*,
+              e.embedding <=> $2::vector AS distance
        FROM skills s
-       LEFT JOIN skill_embeddings e ON s.id = e.skill_id
-       WHERE s.success_rate >= $1`,
-      [minSuccessRate]
+       JOIN skill_embeddings e ON s.id = e.skill_id
+       WHERE s.success_rate >= $1
+         AND e.embedding IS NOT NULL
+       ORDER BY e.embedding <=> $2::vector
+       LIMIT $3`,
+      [minSuccessRate, embeddingToVector(queryEmbedding), k * 3]
     );
-    const rows = result.rows as any[];
 
-    // Compute similarities
-    const skillsWithSimilarity: (Skill & { similarity: number })[] = [];
-    // ADR-0094 Phase 13.2 fix: pre-embedded legacy fixtures (and skills
-    // created before the embedding write-through fix shipped) have rows
-    // in `skills` but no corresponding `skill_embeddings` row. Previously
-    // we silently skipped them which returned [] for every query against
-    // such a fixture — an ADR-0082 silent-empty violation. Instead, when
-    // the embedding is missing, fall back to a substring match on
-    // name/description/code so the skill is still retrievable.
-    const taskLower = task.toLowerCase();
-    for (const row of rows) {
-      if (!row.embedding) {
-        // No embedding — use text-match similarity as a proxy
-        const haystack = [row.name, row.description ?? '', row.code ?? '']
-          .join('\n')
-          .toLowerCase();
-        const textMatch = haystack.includes(taskLower);
-        if (!textMatch) continue;
-        skillsWithSimilarity.push({
-          id: Number(row.id),
-          name: row.name,
-          description: row.description ?? undefined,
-          signature: this.parseJSON(row.signature),
-          code: row.code ?? undefined,
-          successRate: row.success_rate,
-          uses: Number(row.uses),
-          avgReward: row.avg_reward,
-          avgLatencyMs: Number(row.avg_latency_ms),
-          createdFromEpisode: row.created_from_episode != null ? Number(row.created_from_episode) : undefined,
-          metadata: row.metadata ? this.parseJSON(row.metadata) : undefined,
-          // Conservative similarity score: lower than a real vector match
-          // but above zero so the result is ranked and returned.
-          similarity: 0.5,
-        });
-        continue;
-      }
+    const rows = result.rows as Array<Record<string, unknown> & { distance: number }>;
 
-      const buf = Buffer.isBuffer(row.embedding)
-        ? row.embedding
-        : Buffer.from(row.embedding as Uint8Array);
-      const embedding = new Float32Array(buf.buffer, buf.byteOffset, buf.byteLength / 4);
-      const similarity = cosineSimilarity(queryEmbedding, embedding);
+    const skillsWithSimilarity: (Skill & { similarity: number })[] = rows.map((row) => ({
+      id: Number(row.id),
+      name: row.name as string,
+      description: (row.description as string | null) ?? undefined,
+      signature: this.parseJSON(row.signature as unknown as string | object),
+      code: (row.code as string | null) ?? undefined,
+      successRate: row.success_rate as number,
+      uses: Number(row.uses),
+      avgReward: row.avg_reward as number,
+      avgLatencyMs: Number(row.avg_latency_ms),
+      createdFromEpisode: row.created_from_episode != null ? Number(row.created_from_episode) : undefined,
+      metadata: row.metadata ? this.parseJSON(row.metadata as unknown as string | object) : undefined,
+      similarity: 1 - Number(row.distance),
+    }));
 
-      skillsWithSimilarity.push({
-        id: Number(row.id),
-        name: row.name,
-        description: row.description ?? undefined,
-        signature: this.parseJSON(row.signature),
-        code: row.code ?? undefined,
-        successRate: row.success_rate,
-        uses: Number(row.uses),
-        avgReward: row.avg_reward,
-        avgLatencyMs: Number(row.avg_latency_ms),
-        createdFromEpisode: row.created_from_episode != null ? Number(row.created_from_episode) : undefined,
-        metadata: row.metadata ? this.parseJSON(row.metadata) : undefined,
-        similarity,
-      });
-    }
-
-    // Sort by composite score
-    skillsWithSimilarity.sort((a, b) => {
-      const scoreA = this.computeSkillScore(a);
-      const scoreB = this.computeSkillScore(b);
-      return scoreB - scoreA;
-    });
-
+    // Apply composite score re-ranking (preserves Phase B behavior).
+    skillsWithSimilarity.sort((a, b) => this.computeSkillScore(b) - this.computeSkillScore(a));
     return skillsWithSimilarity.slice(0, k);
   }
 
   /**
-   * Store skill embedding via UPSERT (legacy fallback)
+   * Store skill embedding via UPSERT (ADR-0170 Phase C.1: pgvector).
    */
   private async storeSkillEmbedding(skillId: number, embedding: Float32Array): Promise<void> {
-    const buffer = Buffer.from(embedding.buffer, embedding.byteOffset, embedding.byteLength);
     await this.db.query(
       `INSERT INTO skill_embeddings (skill_id, embedding)
-       VALUES ($1, $2)
+       VALUES ($1, $2::vector)
        ON CONFLICT(skill_id) DO UPDATE SET embedding = EXCLUDED.embedding`,
-      [skillId, buffer]
+      [skillId, embeddingToVector(embedding)]
     );
   }
 

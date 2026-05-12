@@ -29,6 +29,7 @@ import type {
   VectorStats,
 } from '../VectorBackend.js';
 import { FilterBuilder, type RvfFilterExpr } from './FilterBuilder.js';
+import { getConfig } from '../../core/config-chain.js';
 import {
   validatePath,
   validateId,
@@ -115,7 +116,10 @@ export class RvfBackend implements VectorBackendAsync {
   };
 
   constructor(config: VectorConfig | RvfConfig) {
-    const dimension = config.dimension ?? config.dimensions;
+    // ADR-0177 Phase 1.6 (c): if caller did not specify dimension, fall back to
+    // the substrate-wide value from the config chain (.claude-flow/embeddings.json).
+    // Dimension is locked for the life of the RVF segment per ADR-0175.
+    const dimension = config.dimension ?? config.dimensions ?? getConfig().embedding.dimension;
     if (!dimension) {
       throw new Error('Vector dimension is required (use dimension or dimensions)');
     }

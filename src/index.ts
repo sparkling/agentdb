@@ -14,6 +14,21 @@ export { AgentDB } from './core/AgentDB.js';
 import { AgentDB as AgentDBClass } from './core/AgentDB.js';
 export default AgentDBClass;
 
+// ADR-0177 Phase 1.6: canonical config-chain accessor + typed errors.
+// `getEmbeddingConfig` lets `@claude-flow/memory/resolve-config.ts` layer its
+// overrides on top without importing memory back (which would be a cycle).
+export {
+  getConfig,
+  getEmbeddingConfig,
+  resetConfig,
+  isConfigOnDisk,
+  validateBoot,
+  ConfigChainValidationError,
+  EmbeddingDimensionMismatchError,
+  type ConfigChain,
+  type EmbeddingChainConfig,
+} from './core/config-chain.js';
+
 // Core controllers
 export { CausalMemoryGraph } from './controllers/CausalMemoryGraph.js';
 export { CausalRecall } from './controllers/CausalRecall.js';

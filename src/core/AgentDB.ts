@@ -13,6 +13,7 @@ import { EmbeddingService } from '../controllers/EmbeddingService.js';
 import { createBackend } from '../backends/factory.js';
 import type { VectorBackend } from '../backends/VectorBackend.js';
 import type { IDatabaseConnection } from '../types/database.types.js';
+import { getConfig, validateBoot } from './config-chain.js';
 import * as fs from 'fs';
 import * as path from 'path';
 import { fileURLToPath } from 'url';
@@ -50,8 +51,18 @@ export class AgentDB {
   async initialize(): Promise<void> {
     if (this.initialized) return;
 
+    // ADR-0177 Phase 1.6 (e): boot validation reads the substrate-wide config
+    // chain (.claude-flow/embeddings.json) and throws ConfigChainValidationError
+    // if embedding.model is missing or if a paid provider is configured without
+    // allowPaidProvider=true (feedback-no-api-keys). Per Amendment 2 (2026-05-12)
+    // does NOT validate @xenova availability.
+    validateBoot();
+    const chain = getConfig();
+
     const dbPath = this.config.dbPath || ':memory:';
-    const vectorDimension = this.config.vectorDimension || 384;
+    // Substrate-wide dim from config chain wins over hardcoded 384; explicit
+    // AgentDBConfig.vectorDimension still overrides (ADR-0175 dim-lock semantics).
+    const vectorDimension = this.config.vectorDimension || chain.embedding.dimension;
 
     // Initialize database with unified fallback system
     this.db = await this.initializeDatabase(dbPath);
@@ -59,11 +70,10 @@ export class AgentDB {
     // Load schemas
     await this.loadSchemas();
 
-    // Initialize embedder with default Xenova model
+    // Initialize embedder using config-chain defaults (model + provider).
+    // EmbeddingService constructor falls back to the chain when args omitted.
     this.embedder = new EmbeddingService({
-      model: 'Xenova/all-MiniLM-L6-v2',
       dimension: vectorDimension,
-      provider: 'transformers'
     });
     await this.embedder.initialize();
 

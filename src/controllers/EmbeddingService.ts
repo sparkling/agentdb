@@ -5,6 +5,8 @@
  * Supports both local (transformers.js) and remote (OpenAI, etc.) embeddings.
  */
 
+import { getConfig, EmbeddingDimensionMismatchError } from '../core/config-chain.js';
+
 export interface EmbeddingConfig {
   model: string;
   dimension: number;
@@ -18,8 +20,21 @@ export class EmbeddingService {
   private pipeline: any;
   private cache: Map<string, Float32Array>;
 
-  constructor(config: EmbeddingConfig) {
-    this.config = config;
+  constructor(config: Partial<EmbeddingConfig> = {}) {
+    // ADR-0177 Phase 1.6 (d): fill missing model/dimension/provider from the
+    // config chain (.claude-flow/embeddings.json). Explicit constructor args
+    // win when provided.
+    const chain = getConfig().embedding;
+    const provider = config.provider ??
+      // Map config-chain `onnx` back to EmbeddingService's `transformers` for
+      // backwards compatibility with existing callers passing the literal.
+      (chain.provider === 'onnx' ? 'transformers' : (chain.provider as EmbeddingConfig['provider']));
+    this.config = {
+      model: config.model ?? chain.model ?? 'Xenova/all-mpnet-base-v2',
+      dimension: config.dimension ?? chain.dimension,
+      provider,
+      apiKey: config.apiKey,
+    };
     this.cache = new Map();
   }
 
@@ -56,7 +71,23 @@ export class EmbeddingService {
 
         this.pipeline = await transformers.pipeline('feature-extraction', this.config.model);
         console.log(`Transformers.js loaded: ${this.config.model}`);
+
+        // ADR-0177 Phase 1.6 (d): verify pipeline output dim matches the
+        // substrate-configured dimension. A model/dimension mismatch would
+        // silently corrupt every RVF segment if not caught at boot.
+        const probe = await this.pipeline('ok', { pooling: 'mean', normalize: true });
+        const actualDim = probe?.data?.length;
+        if (typeof actualDim === 'number' && actualDim !== this.config.dimension) {
+          throw new EmbeddingDimensionMismatchError(
+            this.config.model,
+            this.config.dimension,
+            actualDim,
+          );
+        }
       } catch (error) {
+        // ADR-0177 Phase 1.6 (d) / feedback-best-effort-must-rethrow-fatals:
+        // dimension mismatch is fatal — it would corrupt every vector segment.
+        if (error instanceof EmbeddingDimensionMismatchError) throw error;
         const errorMessage = error instanceof Error ? error.message : String(error);
         console.warn(`Transformers.js initialization failed: ${errorMessage}`);
         console.warn('   Falling back to mock embeddings for testing');

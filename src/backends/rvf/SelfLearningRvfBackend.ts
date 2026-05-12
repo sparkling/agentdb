@@ -16,6 +16,7 @@ import type { ContrastiveTrainer, ContrastiveSample } from './ContrastiveTrainer
 import type { FederatedSessionManager, SessionHandle } from './FederatedSessionManager.js';
 import type { AgentDBSolver, SolverPolicyState, SolverAcceptanceManifest, SolverAcceptanceOptions } from './RvfSolver.js';
 import type { NativeAccelerator, AcceleratorStats, WitnessVerifyResult } from './NativeAccelerator.js';
+import { getConfig } from '../../core/config-chain.js';
 
 export interface SelfLearningConfig extends RvfConfig {
   learning?: boolean;
@@ -107,7 +108,10 @@ export class SelfLearningRvfBackend implements VectorBackendAsync {
   private constructor(backend: RvfBackend, config: SelfLearningConfig) {
     this.backend = backend;
     this.config = config;
-    this.dim = config.dimension ?? config.dimensions ?? 128;
+    // ADR-0177 Phase 1.6 (c): inherit substrate-wide dimension from config
+    // chain when caller did not specify. Tracks the same value RvfBackend
+    // resolved via getConfig() so the two stay in lockstep.
+    this.dim = config.dimension ?? config.dimensions ?? getConfig().embedding.dimension;
     this.learningEnabled = config.learning !== false;
   }
 

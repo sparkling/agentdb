@@ -67,9 +67,12 @@ export async function initCommand(options: InitOptions = {}): Promise<void> {
       process.exit(1);
     }
 
-    if (backend === 'hnswlib' && detection.backend !== 'hnswlib') {
-      console.error(`${colors.red}❌ Error: HNSWLib not available${colors.reset}`);
-      console.error(`   Install with: ${colors.cyan}npm install hnswlib-node${colors.reset}`);
+    if (backend === 'hnswlib') {
+      // ADR-0170 Phase D (2026-05-12): hnswlib backend retired. The
+      // hnswlib-node optionalDependency was removed; downstream should
+      // migrate to 'auto' (ruvector cascade) or 'postgres' (pgvector HNSW).
+      console.error(`${colors.red}❌ Error: backend 'hnswlib' is retired (ADR-0170 Phase D)${colors.reset}`);
+      console.error(`   Use ${colors.cyan}--backend auto${colors.reset} (ruvector) or ${colors.cyan}--backend postgres${colors.reset} (pgvector HNSW).`);
       process.exit(1);
     }
 

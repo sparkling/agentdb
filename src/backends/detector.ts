@@ -3,15 +3,24 @@
  *
  * Detection priority:
  * 1. RuVector (@ruvector/core) - preferred for performance
- * 2. HNSWLib (hnswlib-node) - stable fallback
  *
  * Additional features detected:
  * - @ruvector/gnn - GNN learning capabilities
- * - @ruvector/graph-node - Graph database capabilities
+ *
+ * ADR-0170 Phase D (2026-05-12):
+ *   HNSWLib + @ruvector/graph-node detection retired (deps removed). The
+ *   detector's HNSWLib fallback path is gone; `detectBackend` now throws
+ *   when ruvector is unavailable (no silent further fallback, per
+ *   feedback-no-fallbacks). The 'hnswlib' value of `BackendType` is
+ *   retained for legacy compat but never produced by `detectBackend()`.
+ *   `validateBackend('hnswlib', ...)` throws the Phase D retired-message.
  */
 
 /**
- * Backend type identifier
+ * Backend type identifier.
+ *
+ * `'hnswlib'` is retained for downstream-type compat; it can be requested
+ * via `validateBackend` (which throws) but is never returned by detection.
  */
 export type BackendType = 'ruvector' | 'hnswlib' | 'auto';
 
@@ -101,19 +110,14 @@ export async function detectBackend(): Promise<DetectionResult> {
     };
   }
 
-  // Fallback to HNSWLib
-  const hnswlibNative = await checkHnswlib();
-
-  return {
-    backend: 'hnswlib',
-    features: {
-      gnn: false,
-      graph: false,
-      compression: false,
-    },
-    platform,
-    native: hnswlibNative,
-  };
+  // ADR-0170 Phase D: HNSWLib fallback retired alongside hnswlib-node dep.
+  // Per feedback-no-fallbacks: throw loudly when ruvector is unavailable
+  // rather than silently routing somewhere else.
+  throw new Error(
+    `[AgentDB] No vector backend available. RuVector (@ruvector/core) is required ` +
+    `post-ADR-0170 Phase D. Install with: npm install ruvector. ` +
+    `The HNSWLib fallback was retired alongside the hnswlib-node optionalDependency.`
+  );
 }
 
 /**
@@ -139,14 +143,9 @@ async function checkRuVector(): Promise<RuVectorAvailability> {
       // GNN not available
     }
 
-    // Check for Graph support
-    let graph = false;
-    try {
-      await import('@ruvector/graph-node');
-      graph = true;
-    } catch {
-      // Graph not available
-    }
+    // ADR-0170 Phase D: @ruvector/graph-node retired (resolution-J). The
+    // graph feature flag stays false unconditionally.
+    const graph = false;
 
     return {
       available: true,
@@ -166,19 +165,8 @@ async function checkRuVector(): Promise<RuVectorAvailability> {
   }
 }
 
-/**
- * Check HNSWLib availability
- */
-async function checkHnswlib(): Promise<boolean> {
-  try {
-    // Try to import hnswlib-node
-    await import('hnswlib-node');
-    return true;
-  } catch (error) {
-    console.warn('[AgentDB] HNSWLib not available:', error);
-    return false;
-  }
-}
+// ADR-0170 Phase D: checkHnswlib() removed. The hnswlib-node
+// optionalDependency was retired; the detector's HNSWLib branch is gone.
 
 /**
  * Get platform information
@@ -215,10 +203,10 @@ export function validateBackend(
     );
   }
 
-  if (requested === 'hnswlib' && detected.backend !== 'hnswlib') {
+  if (requested === 'hnswlib') {
     throw new Error(
-      'HNSWLib backend requested but not available.\n' +
-        'Install with: npm install hnswlib-node'
+      `[AgentDB] backend 'hnswlib' is retired (ADR-0170 Phase D). ` +
+      `Use 'auto' (cascades through ruvector) or 'postgres' (pgvector HNSW).`
     );
   }
 }

@@ -62,25 +62,22 @@ export interface AgentDBConfig {
    */
   vectorBackend?: 'auto' | 'ruvector' | 'hnswlib';
   /**
-   * Vector-search index engine (ADR-0170 §Phase A item 4 widens the union).
+   * Vector-search index engine.
    *
    * Under ADR-0170 the valid values are:
-   *   - `'auto'` — runtime factory detection (cascades through available
-   *     backends; Phase C will prefer pgvector when it lands)
-   *   - `'pgvector'` — postgres-native HNSW/IVFFlat index (Phase C)
+   *   - `'auto'` — runtime factory detection (cascades through ruvector → rvf)
+   *   - `'pgvector'` — postgres-native HNSW/IVFFlat index
    *   - `'postgres-cli'` — higher-level @ruvector/postgres-cli surface
    *
-   * The legacy values `'ruvector'` and `'hnswlib'` are retired per
-   * ADR-0170 §"Implementation pre-flight item 1" — passing either throws
-   * a loud error at boot pointing users to `'pgvector'` or `'auto'`.
+   * The legacy values `'ruvector'`, `'hnswlib'`, and `'sqlite-vec'` are
+   * retired and loud-rejected at AgentDB.initialize() per ADR-0170 §"No-
+   * fallback policy". Phase D (2026-05-12) finalized the retirement —
+   * `'ruvector'`/`'hnswlib'` retired Phase A, `'sqlite-vec'` retired
+   * Phase D alongside the Option F dead-strip.
    *
-   * Phase A keeps the broader union for forward declaration; the
-   * loud-rejection of 'ruvector'/'hnswlib' is implemented in
-   * initialize() below (config-validation throw).
-   *
-   * `'sqlite-vec'` remains in the declared union for Phase A diff
-   * cleanliness (the existing tryLoadSqliteVec() path checks for it),
-   * but Phase D removes it alongside Option F dead-strip.
+   * The union still admits the retired strings for diagnostic clarity:
+   * passing them gets a typed error pointing to `'pgvector'` or `'auto'`,
+   * not a TypeScript compile error that obscures the migration intent.
    */
   vectorIndex?: 'auto' | 'ruvector' | 'hnswlib' | 'sqlite-vec' | 'pgvector' | 'postgres-cli';
   /**
@@ -125,7 +122,17 @@ export interface AgentDBConfig {
     journalMode?: string;    // default: 'WAL'
     synchronous?: string;    // default: 'NORMAL'
   };
-  /** Enable graph database adapter (creates .graph file). Default: false */
+  /**
+   * ADR-0170 Phase D (2026-05-12): retired field. The graph database
+   * adapter (@ruvector/graph-node) is retired per resolution-J; Cypher
+   * queries on causal/reflexion/skill tables route through postgres
+   * SQL (`WITH RECURSIVE`) instead. Passing this field throws a typed
+   * config-validation error at AgentDB.initialize() so the operator
+   * sees a clear migration message.
+   *
+   * @deprecated Kept in the interface so TS migration errors point to a
+   * field with explicit retirement docs; runtime throws if set true.
+   */
   enableGraph?: boolean;
 }
 
@@ -168,12 +175,10 @@ export class AgentDB {
   private initialized = false;
   private config: AgentDBConfig;
   private usingWasm = false;
-  // ADR-0166 Phase 3 (Option F): tracks whether the sqlite-vec extension
-  // is loaded on `this.db`. Controllers consult this flag to decide whether
-  // to route vector ops through the `<controller>_vec` virtual tables
-  // (Option F augmentation) or fall back to the pre-Option-F path
-  // (createGuardedBackend → RuVector/HNSWLib/sql.js-RVF).
-  private _sqliteVecLoaded = false;
+  // ADR-0170 Phase D (2026-05-12): _sqliteVecLoaded removed. sqlite-vec
+  // was retired as an optionalDep; pgvector on the PostgresBackend handles
+  // vector indexing natively. The `sqliteVecLoaded` getter retained on
+  // this class for legacy consumers returns false unconditionally.
 
   constructor(config: AgentDBConfig = {}) {
     this.config = config;
@@ -281,40 +286,34 @@ export class AgentDB {
       );
     }
 
-    // ADR-0170 Phase A.4 config validation: vectorIndex 'ruvector' and
-    // 'hnswlib' are retired (vectors become first-class column types under
-    // pgvector in Phase C). Reject them loudly per feedback-no-fallbacks.
+    // ADR-0170 Phase A.4 + Phase D config validation: vectorIndex
+    // 'ruvector', 'hnswlib', and 'sqlite-vec' are retired. Phase A
+    // retired ruvector/hnswlib (vectors → pgvector column types in Phase C).
+    // Phase D retired sqlite-vec alongside the Option F dead-strip.
+    // Reject loudly per feedback-no-fallbacks.
     const viRaw = (this.config as any).vectorIndex;
-    if (viRaw === 'ruvector' || viRaw === 'hnswlib') {
+    if (viRaw === 'ruvector' || viRaw === 'hnswlib' || viRaw === 'sqlite-vec') {
       throw new Error(
-        `[AgentDB] AgentDBConfig.vectorIndex='${viRaw}' is not supported. ` +
-        `ADR-0170 §"Implementation pre-flight item 1" retires the in-memory ` +
-        `vector-index axis selection — vectors become first-class column types ` +
-        `under pgvector in Phase C. Use vectorIndex='pgvector' or vectorIndex='auto' ` +
-        `instead.`
+        `[AgentDB] AgentDBConfig.vectorIndex='${viRaw}' is not supported (ADR-0170 Phase A/D). ` +
+        `In-memory and sqlite-only vector-index selections are retired — vectors are ` +
+        `first-class column types under pgvector. Use vectorIndex='pgvector' or vectorIndex='auto'.`
       );
     }
 
-    // ADR-0170 Phase B (Wave 1a end): sqlite-vec Option F is retired for
-    // ported controllers — vectors become first-class columns under
-    // pgvector in Phase C. The tryLoadSqliteVec() + createOptionFVirtualTables()
-    // methods remain in this file for the moment so the legacy
-    // sqliteVecLoaded getter still resolves to `false`; Phase D removes
-    // them outright. The flags below are pinned false so any consumer
-    // still reading them (none expected) sees the substrate-retired state.
-    this._sqliteVecLoaded = false;
+    // ADR-0170 Phase D (2026-05-12): tryLoadSqliteVec() +
+    // createOptionFVirtualTables() removed. sqlite-vec is retired as an
+    // optionalDep; pgvector on PostgresBackend handles HNSW natively.
 
     // Initialize proof-gated vector backend (ADR-060)
-    // ADR-0166 Phase 1: honor the resolved vectorIndex (was hard-coded 'auto').
-    // ADR-0166 Phase 3: when vectorIndex='sqlite-vec', the search axis runs via
-    // virtual tables (no in-memory backend needed); pass 'auto' to the factory
-    // so the in-memory backend still gets initialized (controllers fall back to
-    // it for ops not yet migrated to Option F).
     //
-    // ADR-0170 Phase A.4: 'pgvector' / 'postgres-cli' also route 'auto' to the
-    // factory in Phase A — pgvector tables don't exist yet (Phase C). The
-    // factory's vector-index auto-cascade picks the available in-memory
-    // backend until Phase C lights up pgvector.
+    // ADR-0170 Phase A/D: 'pgvector' / 'postgres-cli' route 'auto' to the
+    // factory — pgvector indexes live inside PostgresBackend rather than
+    // as an in-memory backend. The factory's auto-cascade picks the
+    // available ruvector backend for proof-gated mutation routing; the
+    // canonical vector-index axis is pgvector on the relational substrate.
+    //
+    // 'ruvector', 'hnswlib', 'sqlite-vec' are loud-rejected above (line
+    // 289) and never reach this branch.
     const factoryType: 'auto' | 'ruvector' | 'hnswlib' =
       resolvedVI === 'sqlite-vec' || resolvedVI === 'pgvector' || resolvedVI === 'postgres-cli'
         ? 'auto'
@@ -394,24 +393,19 @@ export class AgentDB {
       attentionArg,
     );
 
-    // Initialize optional graph database adapter (gated by enableGraph config)
+    // ADR-0170 Phase D (2026-05-12): enableGraph is loud-rejected. The
+    // @ruvector/graph-node optionalDep was retired per resolution-J;
+    // Cypher queries on causal/reflexion/skill tables route through
+    // postgres `WITH RECURSIVE` instead. Passing `enableGraph: true`
+    // raises a typed error pointing to the postgres replacement.
     if (this.config.enableGraph) {
-      try {
-        const { GraphDatabaseAdapter } = await import('../backends/graph/GraphDatabaseAdapter.js');
-        const storagePath = this.config.dbPath && this.config.dbPath !== ':memory:'
-          ? this.config.dbPath.replace(/\.db$/, '') + '.graph'
-          : null;
-
-        if (storagePath) {
-          this.graphAdapter = new GraphDatabaseAdapter(
-            { storagePath, dimensions: dim },
-            this.embedder
-          );
-          await this.graphAdapter.initialize();
-        }
-      } catch {
-        this.graphAdapter = null;
-      }
+      throw new Error(
+        `[AgentDB] AgentDBConfig.enableGraph is retired (ADR-0170 Phase D / resolution-J). ` +
+        `@ruvector/graph-node was removed as an optionalDependency. The graph features ` +
+        `(causal edges, hyperedges) now route through postgres SQL — typically ` +
+        `WITH RECURSIVE on causal_edges/skill_edges. See docs/adr/ADR-0170-agentdb-substrate-replacement-postgresql.md ` +
+        `§"Phase B" gap-J resolution for the migration shape.`
+      );
     }
 
     this.initialized = true;
@@ -641,110 +635,19 @@ export class AgentDB {
   }
 
   /**
-   * ADR-0166 Phase 3 (Option F): true when the sqlite-vec extension is loaded
-   * on `this.db` and per-controller virtual tables (`<controller>_vec`) are
-   * available for k-NN routing. Controllers consult this getter to pick between
-   * Option F (virtual-table path) and the pre-Option-F path.
+   * Legacy compat getter — always false post-ADR-0170 Phase D.
+   *
+   * The sqlite-vec Option F augmentation (ADR-0166 Phase 3) was retired
+   * alongside the SQLite substrate. Vector indexing on the agentdb_* axis
+   * now uses pgvector HNSW indexes on the PostgresBackend. Controllers no
+   * longer consult this flag; it remains only so external callers that
+   * read it see `false` rather than a TypeError.
    */
   get sqliteVecLoaded(): boolean {
-    return this._sqliteVecLoaded;
+    return false;
   }
 
-  /**
-   * ADR-0166 Phase 3 (Option F): load the sqlite-vec extension on `this.db`
-   * when running on better-sqlite3. Returns true when loaded, false when
-   * gracefully degraded (extension absent and user did NOT opt in).
-   *
-   * Loud-error per `feedback-no-fallbacks` when:
-   *  - vectorIndex='sqlite-vec' on WASM substrate (no extension loader exists)
-   *  - vectorIndex='sqlite-vec' on native substrate and load() throws
-   */
-  private async tryLoadSqliteVec(
-    resolvedVI: 'auto' | 'ruvector' | 'hnswlib' | 'sqlite-vec' | 'pgvector' | 'postgres-cli',
-  ): Promise<boolean> {
-    if (this.usingWasm) {
-      if (resolvedVI === 'sqlite-vec') {
-        throw new Error(
-          `[AgentDB] vectorIndex='sqlite-vec' requires native better-sqlite3 ` +
-          `extension loading; the sql.js WASM substrate cannot host sqlite-vec ` +
-          `virtual tables. Either install better-sqlite3 or pick a different ` +
-          `vectorIndex for WASM environments.`,
-        );
-      }
-      return false;
-    }
-    try {
-      // sqlite-vec ships no TypeScript declarations; opaque-import via `any`.
-      // @ts-ignore - sqlite-vec is an optionalDependency, present at runtime
-      const sqliteVec: any = await import('sqlite-vec');
-      // sqlite-vec exposes `load(db)` which calls db.loadExtension under the hood.
-      const loadFn = sqliteVec.load ?? sqliteVec.default?.load;
-      if (typeof loadFn !== 'function') {
-        throw new Error('sqlite-vec module loaded but `load(db)` function not found');
-      }
-      loadFn(this.db);
-      console.log('[AgentDB] sqlite-vec extension loaded (ADR-0166 Option F augmentation enabled)');
-      return true;
-    } catch (err) {
-      const message = (err as Error).message ?? String(err);
-      if (resolvedVI === 'sqlite-vec') {
-        throw new Error(
-          `[AgentDB] vectorIndex='sqlite-vec' requested but extension failed to load: ` +
-          `${message}. Install with: npm install sqlite-vec`,
-        );
-      }
-      // Degraded mode: pre-Option-F path remains valid. No silent fallback —
-      // controllers explicitly check `sqliteVecLoaded` before routing through
-      // virtual tables.
-      return false;
-    }
-  }
-
-  /**
-   * ADR-0166 Phase 3 (Option F): create the per-controller vec0 virtual tables.
-   * Called from initialize() after the schemas are loaded and sqlite-vec is
-   * available. Idempotent (IF NOT EXISTS).
-   *
-   * The 9 augmented controllers per ADR-0166 §"Phase 3 — controllers to augment":
-   *   TRIVIAL:  hmem_vec, consolidated_vec, (SyncCoordinator has no vector ops)
-   *   MODERATE: reflexion_episode_vec, skill_vec, reasoning_pattern_vec,
-   *             recall_vec, learning_vec, quic_vec (when QUICServer has ops)
-   *
-   * The 5 PERMANENT_SQLITE_CARVE_OUT controllers are intentionally absent:
-   *   CausalMemoryGraph, CausalRecall, NightlyLearner, LearningSystem
-   *   aggregations, ReasoningBank GROUP BY queries.
-   */
-  private createOptionFVirtualTables(dim: number): void {
-    if (!this._sqliteVecLoaded) return;
-    // sqlite-vec `+col TEXT` declares an auxiliary metadata column on the
-    // vec0 virtual table. We use TEXT uniformly for the join id even when
-    // the base table is INTEGER AUTOINCREMENT — sqlite-vec auxiliary INTEGER
-    // columns reject JS number bindings under better-sqlite3 with
-    // "auxiliary column id has type INTEGER, but FLOAT was provided"
-    // (regardless of Number.isInteger). TEXT bindings work universally and
-    // sqlite still indexes them efficiently for equality lookups. Controllers
-    // stringify their numeric ids when mirroring writes.
-    const ddl = [
-      // TRIVIAL bucket
-      `CREATE VIRTUAL TABLE IF NOT EXISTS hmem_vec USING vec0(+id TEXT, embedding float[${dim}]);`,
-      `CREATE VIRTUAL TABLE IF NOT EXISTS consolidated_vec USING vec0(+id TEXT, embedding float[${dim}]);`,
-      // MODERATE bucket
-      `CREATE VIRTUAL TABLE IF NOT EXISTS reflexion_episode_vec USING vec0(+id TEXT, embedding float[${dim}]);`,
-      `CREATE VIRTUAL TABLE IF NOT EXISTS skill_vec USING vec0(+id TEXT, embedding float[${dim}]);`,
-      `CREATE VIRTUAL TABLE IF NOT EXISTS reasoning_pattern_vec USING vec0(+id TEXT, embedding float[${dim}]);`,
-      `CREATE VIRTUAL TABLE IF NOT EXISTS recall_vec USING vec0(+id TEXT, embedding float[${dim}]);`,
-      `CREATE VIRTUAL TABLE IF NOT EXISTS learning_vec USING vec0(+id TEXT, embedding float[${dim}]);`,
-    ].join('\n');
-    try {
-      this.db.exec(ddl);
-    } catch (err) {
-      // sqlite-vec is loaded but vec0 module syntax was rejected. Loud-fail —
-      // this signals a sqlite-vec ABI break or version mismatch, not a graceful
-      // missing-feature situation.
-      throw new Error(
-        `[AgentDB] sqlite-vec extension loaded but vec0 virtual-table DDL failed: ` +
-        `${(err as Error).message}. Check sqlite-vec version compatibility.`,
-      );
-    }
-  }
+  // ADR-0170 Phase D (2026-05-12): tryLoadSqliteVec() and
+  // createOptionFVirtualTables() removed. sqlite-vec optionalDep was
+  // retired; vector indexing routes through pgvector on PostgresBackend.
 }

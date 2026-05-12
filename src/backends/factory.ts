@@ -2,19 +2,26 @@
  * Backend Factory - Automatic Backend Detection and Selection
  *
  * Detects available vector backends and creates appropriate instances.
- * Priority: RuVector (native/WASM) > RVF (native/WASM) > HNSWLib (Node.js)
+ * Priority: RuVector (native/WASM) > RVF (native/WASM)
  *
  * Features:
  * - Automatic detection of @ruvector and @ruvector/rvf packages
  * - Native vs WASM detection for RuVector and RVF
- * - GNN and Graph capabilities detection
- * - Graceful fallback chain: RuVector -> RVF -> HNSWLib
+ * - GNN capability detection
+ * - Graceful fallback chain: RuVector -> RVF
  * - Clear error messages for missing dependencies
+ *
+ * ADR-0170 Phase D (2026-05-12):
+ *   HNSWLibBackend was deleted alongside the `hnswlib-node` optionalDep.
+ *   The 'hnswlib' value of BackendType is retained as a loud-rejection
+ *   target (loud throw at boot) so calls passing 'hnswlib' get a clear
+ *   ADR-0170 marker instead of silently routing somewhere else. Same
+ *   pattern is applied to @ruvector/graph-node (retired alongside the
+ *   `enableGraph` config field — see Phase B resolution-J).
  */
 
 import type { VectorBackend, VectorConfig } from './VectorBackend.js';
 import { RuVectorBackend } from './ruvector/RuVectorBackend.js';
-import { HNSWLibBackend } from './hnswlib/HNSWLibBackend.js';
 import { GuardedVectorBackend, ProofDeniedError } from './ruvector/GuardedVectorBackend.js';
 import { MutationGuard } from '../security/MutationGuard.js';
 import { AttestationLog } from '../security/AttestationLog.js';
@@ -24,12 +31,16 @@ import {
   type PostgresBackendConfig,
 } from './postgres/PostgresBackend.js';
 
-// Note: HNSWLibBackend and RvfBackend are lazy-loaded to avoid import failures
-// on systems without build tools. The imports happen in helper functions.
+// Note: RvfBackend is lazy-loaded to avoid import failures when
+// @ruvector/rvf is not installed. ADR-0170 Phase D removed HNSWLibBackend
+// (orphaned alongside the hnswlib-node optionalDependency).
 
 // ADR-0170 Phase A.3: 'postgres' added to BackendType. The relational
 // substrate axis loses 'auto' (per ADR-0170 §Phase A item 3 — no auto-
 // cascade for primaryStorage); only vectorIndex retains 'auto' below.
+// Phase D: 'hnswlib' is retained as a name-validation target so the
+// loud-rejection error message is unambiguous; the actual backend was
+// deleted alongside the hnswlib-node dep.
 export type BackendType = 'auto' | 'ruvector' | 'rvf' | 'hnswlib' | 'postgres';
 
 export interface RvfDetection {
@@ -39,16 +50,22 @@ export interface RvfDetection {
 }
 
 export interface BackendDetection {
-  available: 'ruvector' | 'rvf' | 'hnswlib' | 'sqljsrvf' | 'none';
+  // ADR-0170 Phase D: 'hnswlib' and 'sqljsrvf' values retired but the
+  // union member names stay for downstream-type compat. detectBackends()
+  // never returns them post-Phase-D.
+  available: 'ruvector' | 'rvf' | 'none';
   ruvector: {
     core: boolean;
     gnn: boolean;
+    /** @deprecated ADR-0170 Phase D: graph-node retired; field always false. */
     graph: boolean;
     native: boolean;
     graphTransformer: boolean;
   };
   rvf: RvfDetection;
+  /** @deprecated ADR-0170 Phase D: hnswlib-node retired; field always false. */
   hnswlib: boolean;
+  /** @deprecated ADR-0170 Phase D: sql.js retired; field always false. */
   sqljsRvf: boolean;
 }
 
@@ -80,7 +97,6 @@ export async function detectBackends(): Promise<BackendDetection> {
     const ruvector = await import('ruvector');
     result.ruvector.core = true;
     result.ruvector.gnn = true; // Main package includes GNN
-    result.ruvector.graph = true; // Main package includes Graph
 
     // Check for native backend availability (0.1.99+ API)
     if (typeof (ruvector as any).isNative === 'function') {
@@ -116,12 +132,8 @@ export async function detectBackends(): Promise<BackendDetection> {
         // GNN not installed - this is optional
       }
 
-      try {
-        await import('@ruvector/graph-node');
-        result.ruvector.graph = true;
-      } catch {
-        // Graph not installed - this is optional
-      }
+      // ADR-0170 Phase D: @ruvector/graph-node retired per resolution J.
+      // result.ruvector.graph stays false unconditionally.
 
       try {
         await import('@ruvector/graph-transformer' as string);
@@ -130,7 +142,7 @@ export async function detectBackends(): Promise<BackendDetection> {
         // graph-transformer not installed - optional
       }
     } catch {
-      // RuVector not installed - will try RVF or HNSWLib fallback
+      // RuVector not installed - falls through to RVF detection.
     }
   }
 
@@ -150,38 +162,11 @@ export async function detectBackends(): Promise<BackendDetection> {
     }
   }
 
-  // Check HNSWLib
-  try {
-    await import('hnswlib-node');
-    result.hnswlib = true;
-
-    if (result.available === 'none') {
-      result.available = 'hnswlib';
-    }
-  } catch {
-    // HNSWLib not installed
-  }
-
-  // Check sql.js (always-available built-in RVF fallback)
-  try {
-    await import('sql.js');
-    result.sqljsRvf = true;
-    if (result.available === 'none') {
-      result.available = 'sqljsrvf';
-    }
-  } catch {
-    result.sqljsRvf = false;
-  }
+  // ADR-0170 Phase D: hnswlib-node and sql.js detection retired.
+  // The backends were deleted alongside their npm deps; `result.hnswlib`
+  // and `result.sqljsRvf` stay false unconditionally.
 
   return result;
-}
-
-/**
- * Lazy-load HNSWLibBackend to avoid import failures on systems without build tools
- */
-async function createHNSWLibBackend(config: VectorConfig): Promise<VectorBackend> {
-  const { HNSWLibBackend } = await import('./hnswlib/HNSWLibBackend.js');
-  return new HNSWLibBackend(config);
 }
 
 /**
@@ -192,14 +177,10 @@ async function createRvfBackend(config: VectorConfig): Promise<VectorBackend> {
   return new RvfBackend(config);
 }
 
-/**
- * Lazy-load SqlJsRvfBackend - built-in RVF persistence using sql.js WASM.
- * Always available since sql.js is a hard dependency.
- */
-async function createSqlJsRvfBackend(config: VectorConfig): Promise<VectorBackend> {
-  const { SqlJsRvfBackend } = await import('./rvf/SqlJsRvfBackend.js');
-  return new SqlJsRvfBackend(config);
-}
+// ADR-0170 Phase D: createHNSWLibBackend + createSqlJsRvfBackend removed.
+// HNSWLibBackend.ts deleted with hnswlib-node optionalDep; SqlJsRvfBackend
+// is unreachable post-Phase-D (sql.js removed as runtime dep). The
+// vector-index axis cascade no longer includes either backend.
 
 /**
  * Create vector backend with automatic detection
@@ -228,15 +209,13 @@ export async function createBackend(
     }
     backend = new RuVectorBackend(config);
   } else if (type === 'rvf') {
-    // Try native @ruvector/rvf first, fall back to sql.js-rvf
+    // ADR-0170 Phase D: sql.js RVF tier retired alongside the sql.js dep.
+    // Only the native @ruvector/rvf path remains.
     if (detection.rvf.sdk) {
       backend = await createRvfBackend(config);
       console.log(
         `[AgentDB] Using RVF backend (${detection.rvf.node ? 'N-API native' : 'WASM'})`
       );
-    } else if (detection.sqljsRvf) {
-      backend = await createSqlJsRvfBackend(config);
-      console.log('[AgentDB] Using sql.js RVF backend (built-in)');
     } else {
       throw new Error(
         'RVF backend not available.\n' +
@@ -246,13 +225,14 @@ export async function createBackend(
       );
     }
   } else if (type === 'hnswlib') {
-    if (!detection.hnswlib) {
-      throw new Error(
-        'HNSWLib not available.\n' +
-        'Install with: npm install hnswlib-node'
-      );
-    }
-    backend = await createHNSWLibBackend(config);
+    // ADR-0170 Phase D: HNSWLibBackend is retired. The hnswlib-node
+    // optionalDependency was removed; the in-memory HNSW search axis is
+    // replaced by pgvector HNSW indexes on the relational substrate.
+    throw new Error(
+      `[AgentDB] backend type 'hnswlib' is retired (ADR-0170 Phase D). ` +
+      `Use 'auto' (cascades to ruvector/rvf) or 'postgres' (pgvector HNSW). ` +
+      `See docs/adr/ADR-0170-agentdb-substrate-replacement-postgresql.md.`
+    );
   } else if (type === 'postgres') {
     // ADR-0170 Phase A.3: PostgreSQL substrate (pglite embedded or
     // postgres:// server). The factory creates the backend and the
@@ -273,7 +253,9 @@ export async function createBackend(
     // the preferred winner once pgvector tables exist; in Phase A the
     // cascade order remains ruvector > rvf > hnswlib > sqljsRvf.
     //
-    // Auto-detect best available backend (priority: ruvector > rvf > hnswlib)
+    // ADR-0170 Phase D: cascade pruned to ruvector > rvf. HNSWLib and
+    // sql.js RVF tiers removed alongside the hnswlib-node + sql.js deps.
+    // Auto-detect best available backend (priority: ruvector > rvf)
     if (detection.ruvector.core) {
       backend = new RuVectorBackend(config);
       const backendType = detection.ruvector.native ? 'native NAPI-RS' : 'WASM';
@@ -282,56 +264,37 @@ export async function createBackend(
         : '(no proof engine)';
       console.log(`[AgentDB] Using RuVector backend (${backendType}) ${proofStatus}`);
 
-      // Try to initialize RuVector, fallback to RVF then HNSWLib if it fails
+      // Try to initialize RuVector, fallback to RVF if it fails
       try {
         await (backend as unknown as { initialize(): Promise<void> }).initialize();
         return backend;
       } catch (error) {
         const errorMessage = (error as Error).message;
 
-        // Try RVF as first fallback
+        // Try RVF as fallback (final tier post-Phase-D cleanup)
         if (detection.rvf.sdk) {
           console.log('[AgentDB] RuVector initialization failed, trying RVF backend');
           console.log(`[AgentDB] Reason: ${errorMessage.split('\n')[0]}`);
-          try {
-            backend = await createRvfBackend(config);
-            await (backend as unknown as { initialize(): Promise<void> }).initialize();
-            console.log(`[AgentDB] Using RVF backend (${detection.rvf.node ? 'N-API' : 'WASM'} fallback)`);
-            return backend;
-          } catch {
-            // RVF also failed, try HNSWLib
-          }
+          backend = await createRvfBackend(config);
+          await (backend as unknown as { initialize(): Promise<void> }).initialize();
+          console.log(`[AgentDB] Using RVF backend (${detection.rvf.node ? 'N-API' : 'WASM'} fallback)`);
+          return backend;
         }
 
-        // Try HNSWLib as next fallback
-        if (detection.hnswlib) {
-          console.log('[AgentDB] Falling back to HNSWLib');
-          backend = await createHNSWLibBackend(config);
-          console.log('[AgentDB] Using HNSWLib backend (fallback)');
-        } else if (detection.sqljsRvf) {
-          console.log('[AgentDB] Falling back to sql.js RVF backend');
-          backend = await createSqlJsRvfBackend(config);
-          console.log('[AgentDB] Using sql.js RVF backend (built-in fallback)');
-        } else {
-          throw error;
-        }
+        // Per feedback-no-fallbacks: no silent further fallback. Re-throw
+        // the original ruvector init error so the operator sees it.
+        throw error;
       }
     } else if (detection.rvf.sdk) {
       backend = await createRvfBackend(config);
       console.log(`[AgentDB] Using RVF backend (${detection.rvf.node ? 'N-API native' : 'WASM'})`);
-    } else if (detection.hnswlib) {
-      backend = await createHNSWLibBackend(config);
-      console.log('[AgentDB] Using HNSWLib backend (fallback)');
-    } else if (detection.sqljsRvf) {
-      backend = await createSqlJsRvfBackend(config);
-      console.log('[AgentDB] Using sql.js RVF backend (built-in)');
     } else {
       throw new Error(
         'No vector backend available.\n' +
         'Install one of:\n' +
         '  - npm install ruvector@0.1.99+ (recommended, includes native NAPI-RS)\n' +
         '  - npm install @ruvector/core (alternative)\n' +
-        '  - npm install hnswlib-node (fallback)'
+        '  - npm install @ruvector/rvf (RVF tier — final fallback after Phase D)'
       );
     }
   }
@@ -349,7 +312,9 @@ export async function createBackend(
 }
 
 /**
- * Get recommended backend type based on environment
+ * Get recommended backend type based on environment.
+ *
+ * ADR-0170 Phase D: 'hnswlib' branch removed (backend retired).
  */
 export async function getRecommendedBackend(): Promise<BackendType> {
   const detection = await detectBackends();
@@ -358,15 +323,15 @@ export async function getRecommendedBackend(): Promise<BackendType> {
     return 'ruvector';
   } else if (detection.rvf.sdk) {
     return 'rvf';
-  } else if (detection.hnswlib) {
-    return 'hnswlib';
   } else {
     return 'auto';
   }
 }
 
 /**
- * Check if a specific backend is available
+ * Check if a specific backend is available.
+ *
+ * ADR-0170 Phase D: 'hnswlib' branch always returns false (backend retired).
  */
 export async function isBackendAvailable(backend: 'ruvector' | 'rvf' | 'hnswlib'): Promise<boolean> {
   const detection = await detectBackends();
@@ -377,17 +342,20 @@ export async function isBackendAvailable(backend: 'ruvector' | 'rvf' | 'hnswlib'
   if (backend === 'rvf') {
     return detection.rvf.sdk;
   }
-
-  return detection.hnswlib;
+  // 'hnswlib' — retired post-Phase-D.
+  return false;
 }
 
 /**
- * Get installation instructions for a backend
+ * Get installation instructions for a backend.
+ *
+ * ADR-0170 Phase D: 'hnswlib' branch returns a retired-message instead of
+ * a fictional install command.
  */
 export function getInstallCommand(backend: 'ruvector' | 'rvf' | 'hnswlib'): string {
   if (backend === 'ruvector') return 'npm install ruvector';
   if (backend === 'rvf') return 'npm install @ruvector/rvf @ruvector/rvf-node';
-  return 'npm install hnswlib-node';
+  return '# hnswlib backend retired in ADR-0170 Phase D — use ruvector or pgvector';
 }
 
 // Re-export proof-gated types (ADR-060)

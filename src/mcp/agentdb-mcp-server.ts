@@ -258,24 +258,13 @@ db.pragma('busy_timeout = 5000'); // ADR-0069 A1: required with WAL mode
 db.pragma('synchronous = NORMAL');
 db.pragma('cache_size = -64000');
 
-// ADR-0166 Phase 3 (Option F): try to load sqlite-vec for vec0 virtual tables.
-// Failure to load is non-fatal here (the MCP server stays usable without
-// Option F augmentation); SDK boot has its own strict load path that fails
-// loudly when the user opts in via `vectorIndex='sqlite-vec'`.
-let sqliteVecLoaded = false;
-try {
-  // sqlite-vec ships no TypeScript declarations; opaque-import via `any`.
-  // @ts-ignore - sqlite-vec is an optionalDependency, present at runtime
-  const sqliteVec: any = await import('sqlite-vec');
-  const loadFn = sqliteVec.load ?? sqliteVec.default?.load;
-  if (typeof loadFn === 'function') {
-    loadFn(db);
-    sqliteVecLoaded = true;
-    console.error('✅ sqlite-vec extension loaded (Option F augmentation enabled)');
-  }
-} catch {
-  console.error('ℹ️  sqlite-vec extension unavailable — Option F augmentation disabled');
-}
+// ADR-0170 Phase D (2026-05-12): sqlite-vec Option F bootstrap removed.
+// The sqlite-vec optionalDependency was retired; pgvector on
+// PostgresBackend handles HNSW natively under the new substrate. The
+// standalone MCP server's createDatabase() boot path here is a legacy
+// surface — production traffic routes through the ruflo CLI's
+// memory-router which calls into AgentDB/PostgresBackend directly.
+const sqliteVecLoaded = false;
 
 // Vector backend: auto-detect best available (RuVector > RVF > HNSWLib > brute-force)
 let vectorBackend: any = null;

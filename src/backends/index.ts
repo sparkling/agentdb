@@ -1,8 +1,14 @@
 /**
  * AgentDB Backends - Unified Vector Storage Interface
  *
- * Provides automatic backend selection between RuVector and HNSWLib
- * with graceful fallback and clear error messages.
+ * Provides automatic backend selection between RuVector (preferred) and
+ * RVF, with clear error messages and no silent fallback.
+ *
+ * ADR-0170 Phase D (2026-05-12):
+ *   HNSWLibBackend export removed alongside the deletion of
+ *   `backends/hnswlib/`. Downstream consumers that imported it must
+ *   migrate to RuVector (in-memory HNSW) or PostgresBackend + pgvector
+ *   (relational substrate with HNSW index integrated into the planner).
  */
 
 // Core interfaces
@@ -17,7 +23,6 @@ export type {
 // Backend implementations
 export { RuVectorBackend } from './ruvector/RuVectorBackend.js';
 export { RuVectorLearning } from './ruvector/RuVectorLearning.js';
-export { HNSWLibBackend } from './hnswlib/HNSWLibBackend.js';
 
 // Factory and detection
 export {

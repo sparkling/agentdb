@@ -1817,12 +1817,18 @@ async function main() {
   // Handle migrate command
   if (command === 'migrate') {
     const options: any = { optimize: true, dryRun: false, verbose: false };
+    let fromMode: string | undefined;
+    let toMode: string | undefined;
     for (let i = 1; i < args.length; i++) {
       const arg = args[i];
       if (arg === '--source' && i + 1 < args.length) {
         options.sourceDb = args[++i];
       } else if (arg === '--target' && i + 1 < args.length) {
         options.targetDb = args[++i];
+      } else if (arg === '--from' && i + 1 < args.length) {
+        fromMode = args[++i];
+      } else if (arg === '--to' && i + 1 < args.length) {
+        toMode = args[++i];
       } else if (arg === '--no-optimize') {
         options.optimize = false;
       } else if (arg === '--dry-run') {
@@ -1833,9 +1839,45 @@ async function main() {
         options.sourceDb = arg;
       }
     }
+
+    // ADR-0170 Phase D step 5: `--from sqlite --to pglite` opts into the
+    // new sqlite→pglite migration path. Any other --from / --to combo
+    // routes to the legacy migrate (v1→v2/v3/rvf) which is unchanged.
+    if (fromMode === 'sqlite' && toMode === 'pglite') {
+      const { migrateSqliteToPglite } = await import('./commands/migrate-sqlite-to-pglite.js');
+      if (!options.sourceDb) {
+        log.error('Source database path required (use --source <path>)');
+        console.log('Usage: agentdb migrate --from sqlite --to pglite --source <path> --target <pglite-dir> [--verbose]');
+        process.exit(1);
+      }
+      if (!options.targetDb) {
+        log.error('Target pglite directory required (use --target <dir>)');
+        console.log('Usage: agentdb migrate --from sqlite --to pglite --source <path> --target <pglite-dir> [--verbose]');
+        process.exit(1);
+      }
+      try {
+        await migrateSqliteToPglite({
+          sourceDb: options.sourceDb,
+          targetDir: options.targetDb,
+          verbose: options.verbose,
+        });
+      } catch (err) {
+        log.error((err as Error).message);
+        process.exit(1);
+      }
+      return;
+    }
+
+    if (fromMode || toMode) {
+      log.error(`Unsupported migration mode: --from ${fromMode ?? '(unset)'} --to ${toMode ?? '(unset)'}.`);
+      console.log('Supported: --from sqlite --to pglite (ADR-0170 Phase D step 5)');
+      process.exit(1);
+    }
+
     if (!options.sourceDb) {
       log.error('Source database path required');
       console.log('Usage: agentdb migrate <source-db> [--target <target-db>] [--no-optimize] [--dry-run] [--verbose]');
+      console.log('   or: agentdb migrate --from sqlite --to pglite --source <path> --target <pglite-dir>');
       process.exit(1);
     }
     await migrateCommand(options);

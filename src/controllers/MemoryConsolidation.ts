@@ -505,16 +505,12 @@ export class MemoryConsolidation {
       const retention = this.calculateRetention(memory);
 
       if (retention < this.config.forgettingThreshold) {
-        // Delete from database
+        // ADR-0170 Phase C.1: DELETE removes the row + pgvector index
+        // entry atomically. No separate vectorBackend cleanup.
         await this.backend.query(
           `DELETE FROM hierarchical_memory WHERE id = $1`,
           [memory.id],
         );
-
-        // Remove from vector backend
-        if (this.vectorBackend) {
-          this.vectorBackend.remove(memory.id);
-        }
 
         forgotten++;
       }

@@ -13,6 +13,7 @@
  */
 
 import type { VectorBackend, VectorConfig } from './VectorBackend.js';
+import type { SelfLearningConfig } from './rvf/SelfLearningRvfBackend.js';
 import { RuVectorBackend } from './ruvector/RuVectorBackend.js';
 
 // Note: HNSWLibBackend and RvfBackend are lazy-loaded to avoid import failures
@@ -159,11 +160,13 @@ async function createHNSWLibBackend(config: VectorConfig): Promise<VectorBackend
 }
 
 /**
- * Lazy-load RvfBackend to avoid import failures when @ruvector/rvf is not installed
+ * Lazy-load RVF backend wrapped in SelfLearningRvfBackend per upstream ADR-006
+ * (`learning?: boolean` default true). Fork ADR-0177 Phase 2 lands the wiring;
+ * upstream orphans the wrapper at this factory while ADR-006 sits "Proposed".
  */
 async function createRvfBackend(config: VectorConfig): Promise<VectorBackend> {
-  const { RvfBackend } = await import('./rvf/RvfBackend.js');
-  return new RvfBackend(config);
+  const { SelfLearningRvfBackend } = await import('./rvf/SelfLearningRvfBackend.js');
+  return SelfLearningRvfBackend.create(config as SelfLearningConfig);
 }
 
 /**

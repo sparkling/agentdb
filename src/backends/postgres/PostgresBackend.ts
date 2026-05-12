@@ -105,6 +105,58 @@ type PgServerClient = {
 };
 
 /**
+ * Convert a Float32Array embedding to pgvector's text literal format.
+ *
+ * pgvector accepts vector values as a text-format array literal:
+ *   '[0.1, 0.2, 0.3, …]'::vector
+ *
+ * Both pglite and node-postgres bind text-format values transparently when
+ * the column type is `vector(N)`, so passing the string through
+ * `query(sql, [embeddingToVector(emb)])` lands correctly without a cast.
+ *
+ * (ADR-0170 Phase C.1)
+ */
+export function embeddingToVector(embedding: Float32Array | number[]): string {
+  const arr = embedding instanceof Float32Array ? Array.from(embedding) : embedding;
+  // Postgres-side `vector` parser is strict about non-finite floats — reject
+  // NaN/Inf at the boundary to surface bugs early instead of at INSERT time.
+  for (let i = 0; i < arr.length; i++) {
+    if (!Number.isFinite(arr[i])) {
+      throw new Error(
+        `[PostgresBackend.embeddingToVector] non-finite value at index ${i}: ${arr[i]}`,
+      );
+    }
+  }
+  return `[${arr.join(',')}]`;
+}
+
+/**
+ * Parse a pgvector text-format value back to Float32Array.
+ *
+ * pglite/pg surface `vector` columns as a JS string ('[0.1,0.2,…]') unless
+ * a custom type parser is registered. This helper handles both shapes:
+ * already-an-array (custom parser registered) and raw text literal.
+ *
+ * (ADR-0170 Phase C.1)
+ */
+export function vectorToEmbedding(value: unknown): Float32Array {
+  if (value instanceof Float32Array) return value;
+  if (Array.isArray(value)) {
+    return Float32Array.from(value as number[]);
+  }
+  if (typeof value === 'string') {
+    // Strip the brackets, then split. Empty `[]` returns a 0-length array.
+    const trimmed = value.replace(/^\[/, '').replace(/\]$/, '').trim();
+    if (trimmed.length === 0) return new Float32Array(0);
+    const parts = trimmed.split(',').map((s) => Number(s.trim()));
+    return Float32Array.from(parts);
+  }
+  throw new Error(
+    `[PostgresBackend.vectorToEmbedding] unsupported value type ${typeof value}: ${String(value)}`,
+  );
+}
+
+/**
  * PostgresBackend — substrate-aware client for the agentdb_* axis.
  *
  * Currently implements the VectorBackend interface for factory
@@ -163,8 +215,15 @@ export class PostgresBackend implements VectorBackend {
   }
 
   /**
-   * Embedded mode: import pglite, ensure dataDir exists, construct PGlite,
-   * wait for `ready`. Fail loud on any import or construction error.
+   * Embedded mode: import pglite, ensure dataDir exists, construct PGlite
+   * **with the pgvector extension**, wait for `ready`. Fail loud on any
+   * import or construction error.
+   *
+   * ADR-0170 Phase C.1: pgvector loaded at construction time via the
+   * `extensions: { vector }` PGliteOptions field. After ready resolves,
+   * the cluster has the extension binary linked but the schema-level
+   * `CREATE EXTENSION vector` is run once in `enableVectorExtension()`
+   * before the first DDL touches a `vector(N)` column.
    */
   private async initEmbedded(): Promise<void> {
     if (!this.dataDir) {
@@ -187,7 +246,10 @@ export class PostgresBackend implements VectorBackend {
       );
     }
 
-    let PGlite: new (dataDir: string) => PgliteClient;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let PGlite: any;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let vectorExt: any;
     try {
       // pglite uses CommonJS/ESM hybrid; the constructor is on the
       // `PGlite` named export. We import via dynamic import to keep the
@@ -206,8 +268,30 @@ export class PostgresBackend implements VectorBackend {
       );
     }
 
+    // pgvector extension is shipped with @electric-sql/pglite as a
+    // subpath export. Fail-loud if the subpath is missing — we don't
+    // silently degrade to BYTEA columns.
     try {
-      const client = new PGlite(this.dataDir);
+      // The pglite vector subpath has no @types declaration shipped with
+      // the package; the runtime import works under both ESM and CJS.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      // @ts-ignore — subpath export, declared in package.json exports
+      const vmod: any = await import('@electric-sql/pglite/vector');
+      vectorExt = vmod.vector ?? vmod.default?.vector;
+      if (!vectorExt || typeof vectorExt !== 'object') {
+        throw new Error('pglite/vector module loaded but `vector` extension export not found');
+      }
+    } catch (err) {
+      throw new Error(
+        `Cannot initialize AgentDB pgvector extension: ${(err as Error).message}. ` +
+          `Make sure @electric-sql/pglite >=0.4 is installed (it ships pgvector as a subpath export).`,
+      );
+    }
+
+    try {
+      const client = new PGlite(this.dataDir, {
+        extensions: { vector: vectorExt },
+      });
       // pglite exposes a `ready` Promise that resolves when the cluster
       // is bootable (PG_VERSION exists, base/ tables present). Await it
       // before exposing `_client`.
@@ -219,6 +303,11 @@ export class PostgresBackend implements VectorBackend {
           `${(err as Error).message}`,
       );
     }
+
+    // Now that the client is up, run `CREATE EXTENSION IF NOT EXISTS
+    // vector` to register the extension at schema level. Idempotent — a
+    // no-op when the cluster has already been initialized with vector.
+    await this.enableVectorExtension();
   }
 
   /**
@@ -260,6 +349,55 @@ export class PostgresBackend implements VectorBackend {
     } catch (err) {
       throw new Error(
         `Cannot reach postgres at ${this.connectionString}: ${(err as Error).message}`,
+      );
+    }
+
+    // ADR-0170 Phase C.1: pgvector extension required for agentdb. In
+    // server mode CREATE EXTENSION requires SUPERUSER (or the user must
+    // have rds_superuser on RDS, equivalent on managed services). Surface
+    // a clear error on lack of privilege per `feedback-no-fallbacks`.
+    await this.enableVectorExtension();
+  }
+
+  /**
+   * Run `CREATE EXTENSION IF NOT EXISTS vector` once after the client
+   * connects. Idempotent — `IF NOT EXISTS` makes it a no-op when the
+   * extension is already registered at the schema level.
+   *
+   * For embedded mode, the extension binary is loaded into the WASM
+   * postgres at construction time (via PGliteOptions.extensions); this
+   * call just registers it in pg_extension.
+   *
+   * For server mode, the extension must be available on the server
+   * filesystem; pg_extension registration requires SUPERUSER. We surface
+   * a clear error on permission denied per ADR-0170 §"No-fallback policy".
+   *
+   * (ADR-0170 Phase C.1)
+   */
+  private async enableVectorExtension(): Promise<void> {
+    if (!this._client) {
+      throw new Error(
+        '[PostgresBackend.enableVectorExtension] called before client construction',
+      );
+    }
+    try {
+      // pglite's exec() is multi-statement-safe; pg's Client.query handles
+      // it identically. Use query() through the uniform `.query` surface.
+      await this._client.query('CREATE EXTENSION IF NOT EXISTS vector');
+    } catch (err) {
+      const msg = (err as Error).message ?? String(err);
+      // permission denied / privilege errors are loud and actionable; do
+      // not auto-fallback to BYTEA. The user must either grant the
+      // privilege or run an admin migration step.
+      throw new Error(
+        `[PostgresBackend] Cannot enable pgvector extension on the postgres cluster. ` +
+          `Underlying error: ${msg}. ` +
+          `In server mode the connection user must hold the privilege to ` +
+          `CREATE EXTENSION vector. On managed services (RDS, Cloud SQL, ` +
+          `Supabase) this typically requires the rds_superuser role or ` +
+          `equivalent. On self-hosted postgres run as a superuser. ` +
+          `In embedded mode this should not happen — pglite/vector is bundled ` +
+          `with @electric-sql/pglite; check that the package isn't shimmed out.`,
       );
     }
   }

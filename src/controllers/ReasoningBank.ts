@@ -18,16 +18,23 @@
  * - `reasoning_pattern_vec` Option F mirror retired (vec0 is sqlite-only)
  * - `pattern_embeddings.embedding` stays as BYTEA Float32Array (Phase C → pgvector)
  *
+ * ADR-0170 Phase C.1 (2026-05-12):
+ * - `pattern_embeddings.embedding` migrated to pgvector `vector(768)`.
+ * - HNSW index `idx_pattern_embeddings_hnsw` accelerates k-NN.
+ * - vectorBackend parallel-write path retired; `searchPatterns()` uses a
+ *   single SQL plan with `ORDER BY embedding <=> $1`.
+ * - GNN enhancement helper pulls neighbors via pgvector instead of the
+ *   in-memory accelerator + JS cosine loop.
+ *
  * AgentDB v2 (preserved):
- * - VectorBackend abstraction for 8x faster search (RuVector/hnswlib)
  * - Optional GNN enhancement via LearningBackend
  * - useGNN option, recordOutcome for learning
  */
 
 import { EmbeddingService } from './EmbeddingService.js';
-import type { VectorBackend, SearchResult } from '../backends/VectorBackend.js';
-import { cosineSimilarity } from '../utils/vector-math.js';
+import type { VectorBackend } from '../backends/VectorBackend.js';
 import type { PostgresBackend } from '../backends/postgres/PostgresBackend.js';
+import { embeddingToVector, vectorToEmbedding } from '../backends/postgres/PostgresBackend.js';
 
 export interface ReasoningPattern {
   id?: number;
@@ -95,10 +102,8 @@ export interface LearningBackend {
 // when both ControllerRegistry and AgentDBService create this controller
 let _singleton: InstanceType<typeof ReasoningBank> | null = null;
 
-// Postgres returns BYTEA as Node Buffer; coerce to Float32Array.
-function bufferToFloat32(buf: Buffer): Float32Array {
-  return new Float32Array(buf.buffer, buf.byteOffset, buf.byteLength / 4);
-}
+// ADR-0170 Phase C.1: pgvector returns embeddings via vectorToEmbedding();
+// the BYTEA Buffer helper is retired alongside the BYTEA column type.
 
 // Postgres returns JSONB as parsed object/array already; only string columns
 // holding stringified JSON need JSON.parse.
@@ -191,9 +196,13 @@ export class ReasoningBank {
 
       CREATE TABLE IF NOT EXISTS pattern_embeddings (
         pattern_id BIGINT PRIMARY KEY,
-        embedding BYTEA NOT NULL,
+        embedding vector(768) NOT NULL,
         FOREIGN KEY (pattern_id) REFERENCES reasoning_patterns(id) ON DELETE CASCADE
       );
+      CREATE INDEX IF NOT EXISTS idx_pattern_embeddings_hnsw
+        ON pattern_embeddings
+        USING hnsw (embedding vector_cosine_ops)
+        WITH (m = 23, ef_construction = 100);
     `);
   }
 
@@ -236,23 +245,10 @@ export class ReasoningBank {
     }
     const patternId = typeof idRow.id === 'string' ? parseInt(idRow.id, 10) : Number(idRow.id);
 
-    if (this.vectorBackend) {
-      try {
-        const vectorId = `pattern_${this.nextVectorId++}`;
-        this.idMapping.set(patternId, vectorId);
-
-        this.vectorBackend.insert(vectorId, embedding, {
-          patternId,
-          taskType: pattern.taskType,
-          successRate: pattern.successRate,
-        });
-      } catch {
-        // VectorBackend insert failed — fall back to SQL-side blob storage
-        await this.storePatternEmbedding(patternId, embedding);
-      }
-    } else {
-      await this.storePatternEmbedding(patternId, embedding);
-    }
+    // ADR-0170 Phase C.1: pgvector column is the index of record. No
+    // parallel vectorBackend.insert — the HNSW index on
+    // pattern_embeddings.embedding is the only k-NN path.
+    await this.storePatternEmbedding(patternId, embedding);
 
     this.cache.clear();
 
@@ -260,19 +256,17 @@ export class ReasoningBank {
   }
 
   /**
-   * Store pattern embedding as BYTEA Float32Array.
+   * Store pattern embedding as pgvector value.
    *
-   * Phase B.4: `INSERT OR REPLACE` → postgres `INSERT … ON CONFLICT … DO UPDATE`.
-   * Phase C will replace the BYTEA column with `vector(N)` (pgvector).
+   * ADR-0170 Phase C.1: column is `vector(768)`; UPSERT casts the text
+   * literal `[v1,v2,…]` to vector. The HNSW index updates atomically.
    */
   private async storePatternEmbedding(patternId: number, embedding: Float32Array): Promise<void> {
-    const blob = Buffer.from(embedding.buffer, embedding.byteOffset, embedding.byteLength);
-
     await this.db.query(
       `INSERT INTO pattern_embeddings (pattern_id, embedding)
-       VALUES ($1, $2)
+       VALUES ($1, $2::vector)
        ON CONFLICT (pattern_id) DO UPDATE SET embedding = EXCLUDED.embedding`,
-      [patternId, blob],
+      [patternId, embeddingToVector(embedding)],
     );
   }
 
@@ -296,91 +290,76 @@ export class ReasoningBank {
       taskEmbedding: queryEmbedding,
     };
 
-    if (this.vectorBackend) {
-      return this.searchPatternsV2(enrichedQuery);
-    }
-    return this.searchPatternsLegacy(enrichedQuery);
+    // ADR-0170 Phase C.1: pgvector HNSW is the sole search path.
+    return this.searchPatternsViaPgvector(enrichedQuery);
   }
 
   /**
-   * v2: Search using VectorBackend with optional GNN enhancement
+   * pgvector-backed pattern search.
+   *
+   * ADR-0170 Phase C.1: replaces the vectorBackend + SQL-blob legacy
+   * dichotomy. Filters fold into the WHERE; the ORDER BY uses `<=>`
+   * cosine distance to drive the HNSW index. GNN enhancement runs a
+   * preliminary k-NN to fetch neighbor embeddings, refines the query
+   * embedding, then re-runs the final k-NN against the refined vector.
    */
-  private async searchPatternsV2(query: PatternSearchQuery & { taskEmbedding: Float32Array }): Promise<ReasoningPattern[]> {
+  private async searchPatternsViaPgvector(
+    query: PatternSearchQuery & { taskEmbedding: Float32Array }
+  ): Promise<ReasoningPattern[]> {
     const k = query.k || 10;
     const threshold = query.threshold || 0.0;
     let queryEmbedding = query.taskEmbedding;
 
-    try {
-      if (query.useGNN && this.learningBackend) {
-        const candidates = this.vectorBackend!.search(queryEmbedding, k * 3, { threshold: 0.0 });
-
-        if (candidates.length > 0) {
-          const neighborEmbeddings = await this.getEmbeddingsForVectorIds(
-            candidates.map(c => c.id)
-          );
-          const weights = candidates.map(c => c.similarity);
-
-          queryEmbedding = this.learningBackend.enhance(queryEmbedding, neighborEmbeddings, weights);
-        }
+    if (query.useGNN && this.learningBackend) {
+      // Fetch neighbor embeddings + rewards for GNN-side enhancement.
+      const neighborsRes = await this.db.query(
+        `SELECT pe.embedding, rp.success_rate
+         FROM pattern_embeddings pe
+         JOIN reasoning_patterns rp ON rp.id = pe.pattern_id
+         WHERE pe.embedding IS NOT NULL
+         ORDER BY pe.embedding <=> $1::vector
+         LIMIT $2`,
+        [embeddingToVector(queryEmbedding), k * 3],
+      );
+      const neighborRows = neighborsRes.rows as Array<{ embedding: unknown; success_rate: number }>;
+      if (neighborRows.length > 0) {
+        const neighborEmbeddings = neighborRows.map((r) => vectorToEmbedding(r.embedding));
+        const weights = neighborRows.map((r) => Math.max(0.1, r.success_rate));
+        queryEmbedding = this.learningBackend.enhance(queryEmbedding, neighborEmbeddings, weights);
       }
-
-      const results = this.vectorBackend!.search(queryEmbedding, k, { threshold });
-
-      return await this.hydratePatterns(results);
-    } catch {
-      // VectorBackend search failed — fall back to SQL-blob cosine search
-      return this.searchPatternsLegacy(query);
     }
-  }
 
-  /**
-   * v1: SQL-blob cosine search (Phase C replaces with pgvector ORDER BY <-> $1).
-   */
-  private async searchPatternsLegacy(query: PatternSearchQuery & { taskEmbedding: Float32Array }): Promise<ReasoningPattern[]> {
-    const k = query.k || 10;
-    const threshold = query.threshold || 0.0;
-
-    const conditions: string[] = [];
-    const params: any[] = [];
-    let p = 1;
+    // Build filter clauses (taskType, minSuccessRate, tags). $1 is the
+    // query vector, additional $N for filter values, final $N for LIMIT.
+    const conditions: string[] = ['pe.embedding IS NOT NULL'];
+    const params: unknown[] = [embeddingToVector(queryEmbedding)];
+    let p = 2;
 
     if (query.filters?.taskType) {
       conditions.push(`rp.task_type = $${p++}`);
       params.push(query.filters.taskType);
     }
-
     if (query.filters?.minSuccessRate !== undefined) {
       conditions.push(`rp.success_rate >= $${p++}`);
       params.push(query.filters.minSuccessRate);
     }
-
     if (query.filters?.tags && query.filters.tags.length > 0) {
       const tagConditions = query.filters.tags.map(() => `rp.tags LIKE $${p++}`).join(' OR ');
       conditions.push(`(${tagConditions})`);
-      query.filters.tags.forEach(tag => {
-        params.push(`%"${tag}"%`);
-      });
+      query.filters.tags.forEach((tag) => params.push(`%"${tag}"%`));
     }
-
-    const whereClause = conditions.length > 0
-      ? `WHERE ${conditions.join(' AND ')}`
-      : '';
+    params.push(k * 3);
+    const limitParam = p;
 
     const result = await this.db.query(
-      `SELECT
-         rp.id,
-         rp.ts,
-         rp.task_type,
-         rp.approach,
-         rp.success_rate,
-         rp.uses,
-         rp.avg_reward,
-         rp.tags,
-         rp.metadata,
-         pe.embedding
+      `SELECT rp.id, rp.ts, rp.task_type, rp.approach, rp.success_rate,
+              rp.uses, rp.avg_reward, rp.tags, rp.metadata,
+              pe.embedding <=> $1::vector AS distance
        FROM reasoning_patterns rp
        JOIN pattern_embeddings pe ON rp.id = pe.pattern_id
-       ${whereClause}`,
+       WHERE ${conditions.join(' AND ')}
+       ORDER BY pe.embedding <=> $1::vector
+       LIMIT $${limitParam}`,
       params,
     );
 
@@ -394,102 +373,23 @@ export class ReasoningBank {
       avg_reward: number;
       tags: string | null;
       metadata: unknown;
-      embedding: Buffer;
+      distance: number;
     }>;
 
-    const candidates = rows.map(row => {
-      const embedding = bufferToFloat32(row.embedding);
-      const similarity = cosineSimilarity(query.taskEmbedding, embedding);
+    const candidates = rows.map((row) => ({
+      id: typeof row.id === 'string' ? parseInt(row.id, 10) : Number(row.id),
+      taskType: row.task_type,
+      approach: row.approach,
+      successRate: row.success_rate,
+      uses: typeof row.uses === 'string' ? parseInt(row.uses, 10) : Number(row.uses),
+      avgReward: row.avg_reward,
+      tags: row.tags ? JSON.parse(row.tags) : [],
+      metadata: parseJsonField(row.metadata) ?? {},
+      createdAt: typeof row.ts === 'string' ? parseInt(row.ts, 10) : Number(row.ts),
+      similarity: 1 - Number(row.distance),
+    }));
 
-      return {
-        id: typeof row.id === 'string' ? parseInt(row.id, 10) : Number(row.id),
-        taskType: row.task_type,
-        approach: row.approach,
-        successRate: row.success_rate,
-        uses: typeof row.uses === 'string' ? parseInt(row.uses, 10) : Number(row.uses),
-        avgReward: row.avg_reward,
-        tags: row.tags ? JSON.parse(row.tags) : [],
-        metadata: parseJsonField(row.metadata) ?? {},
-        createdAt: typeof row.ts === 'string' ? parseInt(row.ts, 10) : Number(row.ts),
-        embedding,
-        similarity,
-      };
-    });
-
-    const filtered = candidates
-      .filter(c => c.similarity >= threshold)
-      .sort((a, b) => b.similarity - a.similarity)
-      .slice(0, k);
-
-    return filtered;
-  }
-
-  /**
-   * Hydrate VectorBackend search results with row metadata (one SELECT per id).
-   */
-  private async hydratePatterns(results: SearchResult[]): Promise<ReasoningPattern[]> {
-    const hydrated: ReasoningPattern[] = [];
-
-    for (const result of results) {
-      const patternId = result.metadata?.patternId;
-      if (!patternId) {
-        throw new Error(`VectorBackend result missing patternId: ${result.id}`);
-      }
-
-      const rowResult = await this.db.query(
-        `SELECT * FROM reasoning_patterns WHERE id = $1`,
-        [patternId],
-      );
-      const row = rowResult.rows[0] as any;
-
-      if (!row) {
-        throw new Error(`Pattern ${patternId} not found in database`);
-      }
-
-      hydrated.push({
-        id: typeof row.id === 'string' ? parseInt(row.id, 10) : Number(row.id),
-        taskType: row.task_type,
-        approach: row.approach,
-        successRate: row.success_rate,
-        uses: typeof row.uses === 'string' ? parseInt(row.uses, 10) : Number(row.uses),
-        avgReward: row.avg_reward,
-        tags: row.tags ? JSON.parse(row.tags) : [],
-        metadata: parseJsonField(row.metadata) ?? {},
-        createdAt: typeof row.ts === 'string' ? parseInt(row.ts, 10) : Number(row.ts),
-        similarity: result.similarity,
-      });
-    }
-
-    return hydrated;
-  }
-
-  /**
-   * Get embeddings for vector IDs (for GNN)
-   */
-  private async getEmbeddingsForVectorIds(vectorIds: string[]): Promise<Float32Array[]> {
-    const embeddings: Float32Array[] = [];
-
-    for (const vectorId of vectorIds) {
-      let patternId: number | undefined;
-      for (const [pid, vid] of this.idMapping.entries()) {
-        if (vid === vectorId) {
-          patternId = pid;
-          break;
-        }
-      }
-
-      if (patternId) {
-        const pattern = await this.getPattern(patternId);
-        if (pattern?.approach) {
-          const embedding = await this.embedder.embed(
-            `${pattern.taskType}: ${pattern.approach}`
-          );
-          embeddings.push(embedding);
-        }
-      }
-    }
-
-    return embeddings;
+    return candidates.filter((c) => c.similarity >= threshold).slice(0, k);
   }
 
   /**
@@ -672,7 +572,7 @@ export class ReasoningBank {
       tags: row.tags ? JSON.parse(row.tags) : [],
       metadata: parseJsonField(row.metadata) ?? {},
       createdAt: typeof row.ts === 'string' ? parseInt(row.ts, 10) : Number(row.ts),
-      embedding: row.embedding ? bufferToFloat32(row.embedding) : undefined,
+      embedding: row.embedding != null ? vectorToEmbedding(row.embedding) : undefined,
     };
   }
 

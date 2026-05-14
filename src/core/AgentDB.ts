@@ -7,6 +7,7 @@
  * - Unified integration passing vector backend to all controllers
  */
 import { ReflexionMemory } from '../controllers/ReflexionMemory.js';
+import { ReasoningBank } from '../controllers/ReasoningBank.js';
 import { SkillLibrary } from '../controllers/SkillLibrary.js';
 import { CausalMemoryGraph } from '../controllers/CausalMemoryGraph.js';
 import { EmbeddingService } from '../controllers/EmbeddingService.js';
@@ -36,6 +37,7 @@ export interface AgentDBConfig {
 export class AgentDB {
   private db!: IDatabaseConnection;
   private reflexion!: ReflexionMemory;
+  private reasoningBank!: ReasoningBank;
   private skills!: SkillLibrary;
   private causalGraph!: CausalMemoryGraph;
   private embedder!: EmbeddingService;
@@ -86,6 +88,7 @@ export class AgentDB {
     // Initialize controllers WITH vector backend for optimized search
     // This enables 150x faster vector search via RuVector instead of SQLite brute-force
     this.reflexion = new ReflexionMemory(this.db, this.embedder, this.vectorBackend);
+    this.reasoningBank = new ReasoningBank(this.db, this.embedder, this.vectorBackend);
     this.skills = new SkillLibrary(this.db, this.embedder, this.vectorBackend);
     this.causalGraph = new CausalMemoryGraph(
       this.db,
@@ -161,6 +164,9 @@ export class AgentDB {
       case 'memory':
       case 'reflexion':
         return this.reflexion;
+      case 'reasoning':
+      case 'reasoningBank':
+        return this.reasoningBank;
       case 'skills':
         return this.skills;
       case 'causal':

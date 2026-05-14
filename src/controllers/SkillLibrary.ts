@@ -142,11 +142,20 @@ export class SkillLibrary {
 
     const skillId = normalizeRowId(result.lastInsertRowid);
 
-    // Generate and store embedding in VectorBackend
+    // Generate and store embedding.
     const text = this.buildSkillText(skill);
     const embedding = await this.embedder.embed(text);
 
-    // Store in VectorBackend with skill metadata (if available)
+    // Always persist the embedding to the skill_embeddings table — it is the
+    // durable SQLite-primary store for the agentdb_* axis. The VectorBackend
+    // is constructed in-memory (AgentDB.createBackend passes no file path),
+    // so a vectorBackend-only insert is lost when the process exits — a
+    // separate `agentdb_skill_search` invocation then sees an empty index.
+    // retrieveSkills() reads skill_embeddings as the cross-process fallback.
+    this.storeSkillEmbeddingLegacy(skillId, embedding);
+
+    // Additionally seed the in-memory VectorBackend for fast same-process
+    // semantic search (skips the per-row cosine scan in retrieveSkills).
     if (this.vectorBackend) {
       this.vectorBackend.insert(`skill:${skillId}`, embedding, {
         name: skill.name,
@@ -154,9 +163,6 @@ export class SkillLibrary {
         successRate: skill.successRate,
         avgReward: skill.avgReward,
       });
-    } else {
-      // Legacy: store in database
-      this.storeSkillEmbeddingLegacy(skillId, embedding);
     }
 
     return skillId;
@@ -304,6 +310,14 @@ export class SkillLibrary {
       });
 
       const results = skillsWithSimilarity.slice(0, k);
+
+      // The VectorBackend is in-memory (no persistence path) — a fresh
+      // process sees an empty index. When the in-memory search yields
+      // nothing, fall back to the durable skill_embeddings table so
+      // cross-process skill retrieval still works.
+      if (results.length === 0) {
+        return this.retrieveSkillsLegacy(query);
+      }
 
       // Cache the results
       this.queryCache.set(cacheKey, results);

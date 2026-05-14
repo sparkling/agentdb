@@ -99,7 +99,11 @@ export interface CausalQuery {
   minUplift?: number;
 }
 
+let _singleton: InstanceType<typeof CausalMemoryGraph> | null = null;
+
 export class CausalMemoryGraph {
+  static _resetSingleton(): void { _singleton = null; }
+
   private db: IDatabaseConnection;
   private graphBackend?: any; // GraphBackend or GraphDatabaseAdapter
   private attentionService?: AttentionService;

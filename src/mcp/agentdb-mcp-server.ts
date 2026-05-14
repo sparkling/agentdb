@@ -241,8 +241,9 @@ function cosineSimilarity(a: Float32Array, b: Float32Array): number {
 const dbPath = process.env.AGENTDB_PATH || './agentdb.db';
 const db = await createDatabase(dbPath);
 
-// Configure for performance
+// Configure for performance (ADR-0069 A1: busy_timeout required with WAL mode)
 db.pragma('journal_mode = WAL');
+db.pragma('busy_timeout = 5000');
 db.pragma('synchronous = NORMAL');
 db.pragma('cache_size = -64000');
 

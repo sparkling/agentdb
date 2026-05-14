@@ -10,6 +10,15 @@ import { ReflexionMemory } from '../controllers/ReflexionMemory.js';
 import { ReasoningBank } from '../controllers/ReasoningBank.js';
 import { SkillLibrary } from '../controllers/SkillLibrary.js';
 import { CausalMemoryGraph } from '../controllers/CausalMemoryGraph.js';
+import { CausalRecall } from '../controllers/CausalRecall.js';
+import { ExplainableRecall } from '../controllers/ExplainableRecall.js';
+import { NightlyLearner } from '../controllers/NightlyLearner.js';
+import { HierarchicalMemory } from '../controllers/HierarchicalMemory.js';
+import { MemoryConsolidation } from '../controllers/MemoryConsolidation.js';
+import { QueryOptimizer } from '../optimizations/QueryOptimizer.js';
+import { BatchOperations } from '../optimizations/BatchOperations.js';
+import { MutationGuard } from '../security/MutationGuard.js';
+import { AuditLogger } from '../services/audit-logger.service.js';
 import { EmbeddingService } from '../controllers/EmbeddingService.js';
 import { createBackend } from '../backends/factory.js';
 import type { VectorBackend } from '../backends/VectorBackend.js';
@@ -39,6 +48,8 @@ export interface AgentDBConfig {
     journalMode?: string;
     synchronous?: string;
   };
+  /** @deprecated ADR-0170 Phase D: graph-node retired; passing true throws at initialize() */
+  enableGraph?: boolean;
 }
 
 export class AgentDB {
@@ -47,6 +58,15 @@ export class AgentDB {
   private reasoningBank!: ReasoningBank;
   private skills!: SkillLibrary;
   private causalGraph!: CausalMemoryGraph;
+  private causalRecall: CausalRecall | undefined;
+  private explainableRecall: ExplainableRecall | undefined;
+  private nightlyLearner: NightlyLearner | undefined;
+  private hierarchicalMemory: HierarchicalMemory | undefined;
+  private memoryConsolidation: MemoryConsolidation | undefined;
+  private queryOptimizer: QueryOptimizer | undefined;
+  private batchOperations: BatchOperations | undefined;
+  private mutationGuard: MutationGuard | undefined;
+  private auditLogger: AuditLogger | undefined;
   private embedder!: EmbeddingService;
   public vectorBackend!: VectorBackend;
   private initialized = false;
@@ -65,6 +85,14 @@ export class AgentDB {
     // if embedding.model is missing or if a paid provider is configured without
     // allowPaidProvider=true (feedback-no-api-keys). Per Amendment 2 (2026-05-12)
     // does NOT validate @xenova availability.
+    // ADR-0170 Phase D: graph-node retired; loud-reject instead of silently no-op
+    if (this.config.enableGraph) {
+      throw new Error(
+        'AgentDB: enableGraph is no longer supported (ADR-0170 Phase D). ' +
+        'The graph-node backend was retired. Remove enableGraph from your config.',
+      );
+    }
+
     validateBoot();
     const chain = getConfig();
 
@@ -104,6 +132,17 @@ export class AgentDB {
       undefined, // config - use defaults
       this.vectorBackend
     );
+
+    this.causalRecall = new CausalRecall(this.db as any, this.embedder, this.vectorBackend);
+    this.explainableRecall = new ExplainableRecall(this.db as any, this.embedder);
+    this.nightlyLearner = new NightlyLearner(this.db as any, this.embedder);
+    this.hierarchicalMemory = new HierarchicalMemory(this.db as any, this.embedder, this.vectorBackend);
+    this.memoryConsolidation = new MemoryConsolidation(
+      this.db as any, this.hierarchicalMemory, this.embedder, this.vectorBackend,
+    );
+    this.queryOptimizer = new QueryOptimizer(this.db as any);
+    this.batchOperations = new BatchOperations(this.db as any, this.embedder);
+    this.auditLogger = new AuditLogger();
 
     this.initialized = true;
 
@@ -177,8 +216,34 @@ export class AgentDB {
       case 'skills':
         return this.skills;
       case 'causal':
+      case 'graph':
       case 'causalGraph':
         return this.causalGraph;
+      case 'causalRecall':
+        return this.causalRecall;
+      case 'learning':
+      case 'learningSystem':
+        return undefined; // LearningSystem requires PostgresBackend; use MCP tool agentdb_learner_run instead
+      case 'explainableRecall':
+        return this.explainableRecall;
+      case 'nightlyLearner':
+        return this.nightlyLearner;
+      case 'queryOptimizer':
+        return this.queryOptimizer;
+      case 'auditLogger':
+        return this.auditLogger;
+      case 'batchOperations':
+        return this.batchOperations;
+      case 'attentionService':
+        return this.config.enableAttention ? undefined : undefined; // requires explicit AttentionConfig
+      case 'hierarchicalMemory':
+        return this.hierarchicalMemory;
+      case 'memoryConsolidation':
+        return this.memoryConsolidation;
+      case 'vectorBackend':
+        return this.vectorBackend;
+      case 'mutationGuard':
+        return this.mutationGuard;
       default:
         throw new Error(`Unknown controller: ${name}`);
     }

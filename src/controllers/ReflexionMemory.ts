@@ -49,7 +49,11 @@ export interface ReflexionQuery {
   timeWindowDays?: number;
 }
 
+let _singleton: InstanceType<typeof ReflexionMemory> | null = null;
+
 export class ReflexionMemory {
+  static _resetSingleton(): void { _singleton = null; }
+
   private db: IDatabaseConnection;
   private embedder: EmbeddingService;
   private vectorBackend?: VectorBackend;

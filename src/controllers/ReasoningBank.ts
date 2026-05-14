@@ -85,7 +85,11 @@ export interface LearningBackend {
   }>;
 }
 
+let _singleton: InstanceType<typeof ReasoningBank> | null = null;
+
 export class ReasoningBank {
+  static _resetSingleton(): void { _singleton = null; }
+
   private db: IDatabaseConnection;
   private embedder: EmbeddingService;
   private cache: Map<string, any>;

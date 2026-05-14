@@ -55,7 +55,11 @@ export interface SkillQuery {
   preferRecent?: boolean;
 }
 
+let _singleton: InstanceType<typeof SkillLibrary> | null = null;
+
 export class SkillLibrary {
+  static _resetSingleton(): void { _singleton = null; }
+
   private db: IDatabaseConnection;
   private embedder: EmbeddingService;
   private vectorBackend: VectorBackend | null;

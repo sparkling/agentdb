@@ -15,6 +15,8 @@
  * - All inputs validated for dimension match
  */
 
+import { readEwcLambdaFromConfig } from '../../config/embedding-config.js';
+
 /** SONA configuration */
 export interface SonaConfig {
   /** Hidden dimension size (must match embedding dimension) */
@@ -113,7 +115,7 @@ export class SonaLearningBackend {
         embeddingDim: config.embeddingDim ?? dim,
         microLoraRank: Math.min(Math.max(1, config.microLoraRank ?? 1), 2),
         baseLoraRank: Math.min(Math.max(1, config.baseLoraRank ?? 8), 64),
-        ewcLambda: Math.min(Math.max(0, config.ewcLambda ?? 1000), MAX_EWC_LAMBDA),
+        ewcLambda: Math.min(Math.max(0, config.ewcLambda ?? readEwcLambdaFromConfig(2000)), MAX_EWC_LAMBDA),
         patternClusters: Math.min(Math.max(1, config.patternClusters ?? 50), MAX_PATTERN_CLUSTERS),
         trajectoryCapacity: Math.min(Math.max(10, config.trajectoryCapacity ?? 10000), MAX_TRAJECTORY_CAPACITY),
         backgroundIntervalMs: Math.max(1000, config.backgroundIntervalMs ?? 3600000),

@@ -86,7 +86,11 @@ export interface ProvenanceSource {
   metadata?: Record<string, any>;
 }
 
+let _singleton: InstanceType<typeof ExplainableRecall> | null = null;
+
 export class ExplainableRecall {
+  static _resetSingleton(): void { _singleton = null; }
+
   private db: Database;
   private attentionService?: AttentionService;
   private embedder?: EmbeddingService;

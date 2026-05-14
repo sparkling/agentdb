@@ -1,11 +1,15 @@
 /**
  * AgentDB v2 Resource Limit Enforcement
  *
- * Prevents denial of service attacks by enforcing:
+ * Provides denial-of-service protection:
  * - Memory usage limits
  * - Query timeouts
  * - Rate limiting
  * - Resource caps
+ *
+ * ADR-0069 A2: The rate limits here are intentionally per-second (not per-minute)
+ * because this layer operates at the database operation level, not the HTTP request
+ * level. Per-second granularity prevents burst writes from overwhelming the WAL.
  */
 
 import { ValidationError } from './input-validation.js';

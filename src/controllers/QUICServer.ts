@@ -18,6 +18,11 @@ import chalk from 'chalk';
 // Database type from db-fallback
 type Database = any;
 
+// ADR-0069 A2: QUICServer uses per-minute QUIC connection rate limiting, which
+// intentionally differs from the HTTP middleware's windowMs-based approach.
+// QUIC operates at the transport layer and tracks per-connection byte/request counts
+// rather than HTTP sliding windows. The 100 req/min default aligns with other limiters.
+
 export interface QUICServerConfig {
   host?: string;
   port?: number;
@@ -82,7 +87,7 @@ export class QUICServer {
       maxConnections: config.maxConnections || 100,
       authToken: config.authToken || '',
       rateLimit: config.rateLimit || {
-        maxRequestsPerMinute: 60,
+        maxRequestsPerMinute: 100,
         maxBytesPerMinute: 10 * 1024 * 1024, // 10MB
       },
       tlsConfig: config.tlsConfig || {},

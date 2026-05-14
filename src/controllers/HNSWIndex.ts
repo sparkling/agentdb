@@ -147,7 +147,7 @@ export class HNSWIndex {
       efConstruction: 200,
       efSearch: 100,
       metric: 'cosine',
-      dimension: 1536,
+      dimension: 768,
       maxElements: 100000,
       persistIndex: true,
       rebuildThreshold: 0.1, // Rebuild after 10% updates

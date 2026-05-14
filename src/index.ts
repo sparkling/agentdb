@@ -17,6 +17,8 @@ export default AgentDBClass;
 // ADR-0177 Phase 1.6: canonical config-chain accessor + typed errors.
 // `getEmbeddingConfig` lets `@claude-flow/memory/resolve-config.ts` layer its
 // overrides on top without importing memory back (which would be a cycle).
+// ADR-0065 P3-3: deriveHNSWParams re-exported here so @claude-flow/memory's
+// agentdb-backend can optionally wire it without a hard dep on memory.
 export {
   getConfig,
   getEmbeddingConfig,
@@ -25,9 +27,17 @@ export {
   validateBoot,
   ConfigChainValidationError,
   EmbeddingDimensionMismatchError,
+  deriveHNSWParams,
   type ConfigChain,
   type EmbeddingChainConfig,
 } from './core/config-chain.js';
+
+// ADR-0061 Phase 0: resource/rate/circuit/telemetry controllers that the
+// memory controller-registry imports from agentdb at bootstrap. Exporting
+// from the barrel so consumers can resolve the symbols without digging into
+// security/observability sub-paths.
+export { ResourceTracker, RateLimiter, CircuitBreaker } from './security/limits.js';
+export { TelemetryManager } from './observability/telemetry.js';
 
 // Core controllers
 export { CausalMemoryGraph } from './controllers/CausalMemoryGraph.js';

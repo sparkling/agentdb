@@ -269,4 +269,13 @@ export class AgentDB {
   get vectorBackendName(): string {
     return this.vectorBackend?.name || 'none';
   }
+
+  // ADR-0063 C2: expose the internal EmbeddingService for consumers that need
+  // direct embedding generation (e.g. acceptance test introspection).
+  getEmbeddingService(): EmbeddingService {
+    if (!this.initialized) {
+      throw new Error('AgentDB not initialized. Call initialize() first.');
+    }
+    return this.embedder;
+  }
 }

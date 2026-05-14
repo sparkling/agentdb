@@ -29,3 +29,18 @@ export type {
   ConfigChain,
   EmbeddingChainConfig,
 } from '@claude-flow/config-chain';
+
+/**
+ * Derive optimal HNSW parameters from embedding dimension (ADR-0065 P3-3).
+ * Single source of truth consumed by agentdb-backend in @claude-flow/memory.
+ * M = floor(sqrt(dim) / 1.2), clamped [8, 48].
+ */
+export function deriveHNSWParams(dimension: number, maxElements: number = 100000): {
+  M: number; efConstruction: number; efSearch: number; maxElements: number;
+} {
+  const rawM = Math.floor(Math.sqrt(dimension) / 1.2);
+  const M = Math.max(8, Math.min(48, rawM));
+  const efConstruction = Math.max(100, Math.min(500, 4 * M));
+  const efSearch = Math.max(50, Math.min(400, 2 * M));
+  return { M, efConstruction, efSearch, maxElements };
+}

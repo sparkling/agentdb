@@ -273,6 +273,14 @@ export class ReflexionMemory {
       episodes = await this.retrieveFromGenericGraph(query);
     } else if (this.vectorBackend) {
       episodes = await this.retrieveFromVectorBackend(queryEmbedding, query);
+      // The VectorBackend is constructed in-memory (AgentDB.createBackend
+      // passes no file path), so a fresh process sees an empty index and
+      // the search returns nothing. storeEpisode() always dual-writes the
+      // embedding to the durable episode_embeddings table — fall back to
+      // the SQL path so cross-process retrieval still works.
+      if (episodes.length === 0) {
+        episodes = await this.retrieveFromSQLFallback(queryEmbedding, query);
+      }
     } else {
       episodes = await this.retrieveFromSQLFallback(queryEmbedding, query);
     }

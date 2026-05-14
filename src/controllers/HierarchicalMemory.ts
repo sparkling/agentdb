@@ -369,9 +369,15 @@ export class HierarchicalMemory {
           return item;
         })
       ).then(items => items.filter((item): item is MemoryItem => item !== null));
-    } else {
-      // Fallback: manual search
-      results = await this.manualSearch(queryEmbedding, ['working', 'episodic', 'semantic'] as MemoryTier[], k, threshold);
+    }
+
+    // The in-memory VectorBackend is constructed without a persistence path
+    // (AgentDB.createBackend passes no file), so a fresh process sees an empty
+    // index and the search above returns nothing. Fall back to manualSearch —
+    // it re-embeds the durable hierarchical_memory rows directly. Also covers
+    // the no-VectorBackend case.
+    if (results.length === 0) {
+      results = await this.manualSearch(queryEmbedding, tiers, k, threshold);
     }
 
     // Apply forgetting curve if not including decayed

@@ -189,9 +189,15 @@ export class ReasoningBank {
 
     const patternId = normalizeRowId(result.lastInsertRowid);
 
-    // Store embedding based on mode
+    // Always persist the embedding to the durable pattern_embeddings table.
+    // The in-memory VectorBackend (AgentDB.createBackend passes no file path)
+    // is lost on process exit, so a separate agentdb_pattern-search process
+    // would see an empty index — searchPatterns() reads pattern_embeddings as
+    // the cross-process fallback.
+    this.storePatternEmbedding(patternId, embedding);
+
+    // Additionally seed the in-memory VectorBackend for fast same-process search.
     if (this.vectorBackend) {
-      // v2: Use VectorBackend for high-performance search
       const vectorId = `pattern_${this.nextVectorId++}`;
       this.idMapping.set(patternId, vectorId);
 
@@ -200,9 +206,6 @@ export class ReasoningBank {
         taskType: pattern.taskType,
         successRate: pattern.successRate,
       });
-    } else {
-      // v1: Use legacy SQLite storage (backward compatible)
-      this.storePatternEmbedding(patternId, embedding);
     }
 
     // Invalidate cache
@@ -252,12 +255,16 @@ export class ReasoningBank {
       taskEmbedding: queryEmbedding
     };
 
-    // Use VectorBackend if available (v2 mode)
+    // Use VectorBackend if available (v2 mode). The in-memory VectorBackend
+    // is empty in a fresh process, so fall back to the durable SQLite path
+    // (pattern_embeddings) when the v2 search yields nothing.
     if (this.vectorBackend) {
-      return this.searchPatternsV2(enrichedQuery);
+      const v2 = await this.searchPatternsV2(enrichedQuery);
+      if (v2.length > 0) return v2;
     }
 
-    // Legacy v1 search (100% backward compatible)
+    // Legacy v1 search (100% backward compatible) — also the cross-process
+    // fallback when the in-memory VectorBackend index is cold.
     return this.searchPatternsLegacy(enrichedQuery);
   }
 

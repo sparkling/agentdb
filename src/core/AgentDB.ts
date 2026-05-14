@@ -32,6 +32,13 @@ export interface AgentDBConfig {
   vectorBackend?: 'auto' | 'ruvector' | 'hnswlib';
   /** Vector dimension (default: 384 for MiniLM) */
   vectorDimension?: number;
+  /** SQLite-specific tuning (ADR-0069 A1: config-driven pragmas) */
+  sqlite?: {
+    cacheSize?: number;
+    busyTimeoutMs?: number;
+    journalMode?: string;
+    synchronous?: string;
+  };
 }
 
 export class AgentDB {

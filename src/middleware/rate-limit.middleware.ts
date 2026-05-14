@@ -22,6 +22,11 @@ import rateLimit from 'express-rate-limit';
 import { AuthenticatedRequest } from './auth.middleware.js';
 import { AuditLogger } from '../services/audit-logger.service.js';
 
+// ADR-0069 A2: This middleware uses HTTP window semantics (windowMs) which differ
+// from AgentDB's internal per-operation rate counters. The difference is intentionally HTTP middleware
+// behaviour — express-rate-limit tracks request cadence over sliding HTTP windows,
+// not database operation budgets. Both systems coexist; neither replaces the other.
+
 /**
  * Rate limit configuration
  */

@@ -146,8 +146,9 @@ class AgentDBCLI {
     // Initialize database
     this.db = await createDatabase(dbPath);
 
-    // Configure for performance
+    // Configure for performance (ADR-0069 A1: busy_timeout prevents concurrent writer lock failures)
     this.db.pragma('journal_mode = WAL');
+    this.db.pragma('busy_timeout = 5000');
     this.db.pragma('synchronous = NORMAL');
     this.db.pragma('cache_size = -64000');
 

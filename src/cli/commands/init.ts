@@ -94,8 +94,9 @@ export async function initCommand(options: InitOptions = {}): Promise<void> {
     // Initialize database
     const db = await createDatabase(actualDbPath);
 
-    // Configure for performance
+    // Configure for performance (ADR-0069 A1: busy_timeout prevents concurrent writer lock failures)
     db.pragma('journal_mode = WAL');
+    db.pragma('busy_timeout = 5000');
     db.pragma('synchronous = NORMAL');
     db.pragma('cache_size = -64000');
 

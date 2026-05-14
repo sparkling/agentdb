@@ -49,6 +49,10 @@ function applyMigration(dbPath: string, migrationFile: string): MigrationResult 
     // Open database
     const db = new Database(dbPath);
 
+    // ADR-0069: WAL mode + busy_timeout to prevent concurrent writer lock failures.
+    db.pragma('journal_mode = WAL');
+    db.pragma('busy_timeout = 5000');
+
     // Enable foreign keys
     db.pragma('foreign_keys = ON');
 

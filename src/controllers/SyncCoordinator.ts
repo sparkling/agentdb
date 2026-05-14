@@ -1,3 +1,4 @@
+// charter: dispatch
 /**
  * SyncCoordinator - Orchestrate AgentDB Synchronization
  *
@@ -14,9 +15,12 @@
  * - Sync state persistence
  */
 
+import { createHash } from 'node:crypto';
 import chalk from 'chalk';
 import { QUICClient, SyncOptions, SyncResult, PushResult } from './QUICClient.js';
 import { QUICServer, SyncRequest } from './QUICServer.js';
+import type { MutationContext } from '../archivist/mutation-context.js';
+import type { BulkIntent } from '../archivist/types.js';
 
 // Database type from db-fallback
 type Database = any;
@@ -93,9 +97,18 @@ export class SyncCoordinator {
   }
 
   /**
-   * Perform bidirectional synchronization
+   * Perform bidirectional synchronization.
+   *
+   * ADR-0180 §Caller surfaces · Inter-controller writes: `sync()` is the root
+   * orchestrator for the QUIC pull path; it receives a root `MutationContext`
+   * and threads it into `applyChanges`/`saveSyncState`, which write the four
+   * sync tables through `ctx.bulk()` (one summary audit entry per table — see
+   * §Bulk-write mode + Phase 9 Scenario B).
    */
-  async sync(onProgress?: (progress: SyncProgress) => void): Promise<SyncReport> {
+  async sync(
+    ctx: MutationContext,
+    onProgress?: (progress: SyncProgress) => void
+  ): Promise<SyncReport> {
     if (this.isSyncing) {
       throw new Error('Sync already in progress');
     }
@@ -144,7 +157,7 @@ export class SyncCoordinator {
 
       // Phase 5: Apply changes
       onProgress?.({ phase: 'applying', current: 0, total: itemsPulled, message: 'Applying changes...' });
-      await this.applyChanges(pullResult.data);
+      await this.applyChanges(ctx, pullResult.data);
 
       // Update sync state
       this.syncState.lastSyncAt = Date.now();
@@ -152,7 +165,7 @@ export class SyncCoordinator {
       this.syncState.totalBytesSynced += bytesTransferred;
       this.syncState.syncCount++;
       this.syncState.lastError = errors.length > 0 ? errors[0] : undefined;
-      this.saveSyncState();
+      await this.saveSyncState(ctx);
 
       const endTime = Date.now();
       const durationMs = endTime - startTime;
@@ -504,11 +517,28 @@ export class SyncCoordinator {
   }
 
   /**
-   * Apply pulled changes to local database
+   * Apply pulled changes to local database. Per ADR-0180 §Bulk-write mode +
+   * Phase 9 Scenario B, each of the four sync tables (episodes, skills,
+   * skill_edges, sync_state) writes through a single `ctx.bulk(intent, payload)`
+   * call so the audit log carries exactly one summary entry per table (4 total),
+   * not one per row. Underlying `INSERT OR REPLACE` SQL is unchanged —
+   * substrate-seam wire-up lands in F4-2.
    */
-  private async applyChanges(data: any): Promise<void> {
+  private async applyChanges(ctx: MutationContext | undefined, data: any): Promise<void> {
     // Apply episodes
     if (data.episodes && data.episodes.length > 0) {
+      const columnSet = [
+        'id', 'ts', 'session_id', 'task', 'input', 'output', 'critique', 'reward',
+        'success', 'latency_ms', 'tokens_used', 'tags', 'metadata',
+      ] as const;
+      const intent: BulkIntent = {
+        tableName: 'episodes',
+        columnSet,
+        count: data.episodes.length,
+        checksum: this.computeChecksum(data.episodes),
+      };
+      await ctx?.bulk(intent, data.episodes);
+
       const stmt = this.db.prepare(`
         INSERT OR REPLACE INTO episodes (
           id, ts, session_id, task, input, output, critique, reward, success,
@@ -537,6 +567,18 @@ export class SyncCoordinator {
 
     // Apply skills
     if (data.skills && data.skills.length > 0) {
+      const columnSet = [
+        'id', 'ts', 'name', 'description', 'code', 'success_rate',
+        'usage_count', 'avg_reward', 'tags', 'metadata',
+      ] as const;
+      const intent: BulkIntent = {
+        tableName: 'skills',
+        columnSet,
+        count: data.skills.length,
+        checksum: this.computeChecksum(data.skills),
+      };
+      await ctx?.bulk(intent, data.skills);
+
       const stmt = this.db.prepare(`
         INSERT OR REPLACE INTO skills (
           id, ts, name, description, code, success_rate, usage_count,
@@ -562,6 +604,17 @@ export class SyncCoordinator {
 
     // Apply edges
     if (data.edges && data.edges.length > 0) {
+      const columnSet = [
+        'id', 'ts', 'from_skill_id', 'to_skill_id', 'weight', 'co_occurrences',
+      ] as const;
+      const intent: BulkIntent = {
+        tableName: 'skill_edges',
+        columnSet,
+        count: data.edges.length,
+        checksum: this.computeChecksum(data.edges),
+      };
+      await ctx?.bulk(intent, data.edges);
+
       const stmt = this.db.prepare(`
         INSERT OR REPLACE INTO skill_edges (
           id, ts, from_skill_id, to_skill_id, weight, co_occurrences
@@ -579,6 +632,14 @@ export class SyncCoordinator {
         );
       }
     }
+  }
+
+  /**
+   * SHA-256 of the canonical-JSON-encoded payload. Used as the per-table
+   * manifest checksum for Phase 9 Scenario B replay equality.
+   */
+  private computeChecksum(rows: unknown): string {
+    return createHash('sha256').update(JSON.stringify(rows)).digest('hex');
   }
 
   /**
@@ -618,9 +679,11 @@ export class SyncCoordinator {
   }
 
   /**
-   * Save sync state to database
+   * Save sync state to database. ADR-0180 §Bulk-write mode + Phase 9 Scenario B
+   * count `sync_state` as the 4th synced table — one summary audit entry per
+   * sync run (count = 1 row, the singleton state record).
    */
-  private saveSyncState(): void {
+  private async saveSyncState(ctx: MutationContext | undefined): Promise<void> {
     try {
       // Create table if not exists
       this.db.exec(`
@@ -636,6 +699,19 @@ export class SyncCoordinator {
           last_error TEXT
         )
       `);
+
+      const columnSet = [
+        'id', 'last_sync_at', 'last_episode_sync', 'last_skill_sync',
+        'last_edge_sync', 'total_items_synced', 'total_bytes_synced',
+        'sync_count', 'last_error',
+      ] as const;
+      const intent: BulkIntent = {
+        tableName: 'sync_state',
+        columnSet,
+        count: 1,
+        checksum: this.computeChecksum([this.syncState]),
+      };
+      await ctx?.bulk(intent, this.syncState);
 
       // Upsert state
       this.db

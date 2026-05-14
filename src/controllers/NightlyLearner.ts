@@ -25,6 +25,7 @@ import { ReflexionMemory } from './ReflexionMemory.js';
 import { SkillLibrary } from './SkillLibrary.js';
 import { EmbeddingService } from './EmbeddingService.js';
 import { AttentionService, type FlashAttentionConfig } from '../services/AttentionService.js';
+import type { MutationContext } from '../archivist/mutation-context.js';
 
 export interface LearnerConfig {
   minSimilarity: number; // Min similarity to consider for causal edge (default: 0.7)
@@ -96,9 +97,18 @@ export class NightlyLearner {
   }
 
   /**
-   * Main learning job - runs all discovery and consolidation tasks
+   * Main learning job - runs all discovery and consolidation tasks.
+   *
+   * ADR-0180 §Re-entrancy: each child controller invocation runs in its own
+   * `ctx.child(reason)` so the audit chain reconstructs as a tree
+   * (root → causal/experiment/skill/reflexion/prune). Per ADR-0180 Phase 9
+   * Scenario A the resulting tree depth must remain ≤ 3.
+   *
+   * The bodies inside each `ctx.child(...)` step are intentionally TODO stubs
+   * that fall back to the legacy direct-controller call path — substrate-seam
+   * wire-up (routing through `_childCtx.substrate.withWrite`) lands in F4-2.
    */
-  async run(): Promise<LearnerReport> {
+  async run(ctx?: MutationContext): Promise<LearnerReport> {
     console.log('\n🌙 Nightly Learner Starting...\n');
     const startTime = Date.now();
 
@@ -115,29 +125,39 @@ export class NightlyLearner {
     };
 
     try {
-      // Step 1: Discover new causal edges
+      // Step 1: Discover new causal edges — `causal` child for the audit tree.
       console.log('📊 Discovering causal edges from episode patterns...');
-      report.edgesDiscovered = await this.discoverCausalEdges();
+      const causalCtx = ctx?.child('causal');
+      report.edgesDiscovered = await this.discoverCausalEdges(causalCtx);
       console.log(`   ✓ Discovered ${report.edgesDiscovered} new edges\n`);
 
-      // Step 2: Complete running experiments
+      // Step 2: Complete running experiments — `experiment` child (calculateUplift writes).
       console.log('🧪 Completing A/B experiments...');
-      report.experimentsCompleted = await this.completeExperiments();
+      const completeCtx = ctx?.child('experiment');
+      report.experimentsCompleted = await this.completeExperiments(completeCtx);
       console.log(`   ✓ Completed ${report.experimentsCompleted} experiments\n`);
 
-      // Step 3: Create new experiments (if enabled)
+      // Step 3: Create new experiments (if enabled) — separate `experiment` child.
       if (this.config.autoExperiments) {
         console.log('🔬 Creating new A/B experiments...');
-        report.experimentsCreated = await this.createExperiments();
+        const createCtx = ctx?.child('experiment');
+        report.experimentsCreated = await this.createExperiments(createCtx);
         console.log(`   ✓ Created ${report.experimentsCreated} new experiments\n`);
       }
 
-      // Step 4: Prune low-confidence edges
+      // Step 4: Prune low-confidence edges — `prune` child wrapping the DELETE.
       if (this.config.pruneOldEdges) {
         console.log('🧹 Pruning low-confidence edges...');
-        report.edgesPruned = await this.pruneEdges();
+        const pruneCtx = ctx?.child('prune');
+        report.edgesPruned = await this.pruneEdges(pruneCtx);
         console.log(`   ✓ Pruned ${report.edgesPruned} edges\n`);
       }
+
+      // Reflexion + skill consolidation children are reserved for future wire-up
+      // (NightlyLearner.run currently does not call reflexion.recordEpisode or
+      // skillLibrary.consolidateEpisodesIntoSkills). When those orchestration
+      // points land, mint them as `ctx.child('reflexion')` / `ctx.child('skill')`
+      // alongside the four above. Tracked under F4-2 substrate-seam wire-up.
 
       // Step 5: Calculate statistics
       const stats = this.calculateStats();
@@ -337,7 +357,11 @@ export class NightlyLearner {
     return denom === 0 ? 0 : dotProduct / denom;
   }
 
-  private async discoverCausalEdges(): Promise<number> {
+  private async discoverCausalEdges(_childCtx?: MutationContext): Promise<number> {
+    // TODO(F4-2): replace `this.causalGraph.addCausalEdge(edge)` below with a
+    // substrate-seam write routed through `_childCtx.substrate.withWrite(...)`
+    // (or the registered `addCausalEdge` GuardedWrite handler) so the audit
+    // chain records each discovered edge under the parent `causal` child.
     let discovered = 0;
 
     // Find episode pairs with high similarity and temporal sequence
@@ -485,7 +509,11 @@ export class NightlyLearner {
   /**
    * Complete running A/B experiments and calculate uplift
    */
-  private async completeExperiments(): Promise<number> {
+  private async completeExperiments(_childCtx?: MutationContext): Promise<number> {
+    // TODO(F4-2): route `this.causalGraph.calculateUplift(exp.id)` through
+    // `_childCtx.substrate.withWrite(...)` (experiment-table update) once the
+    // GuardedWrite handler exists. Each completed experiment becomes a leaf
+    // entry under this child's audit subtree.
     // Better-sqlite3 best practice: Prepare statements OUTSIDE loops for better performance
     const runningExperiments = this.db.prepare(`
       SELECT id, start_time, sample_size
@@ -511,7 +539,10 @@ export class NightlyLearner {
   /**
    * Create new A/B experiments for promising hypotheses
    */
-  private async createExperiments(): Promise<number> {
+  private async createExperiments(_childCtx?: MutationContext): Promise<number> {
+    // TODO(F4-2): route `this.causalGraph.createExperiment(...)` through
+    // `_childCtx.substrate.withWrite(...)` so each new experiment row lands
+    // as a leaf entry under this child's audit subtree.
     const currentExperiments = this.db.prepare(`
       SELECT COUNT(*) as count
       FROM causal_experiments
@@ -568,7 +599,11 @@ export class NightlyLearner {
   /**
    * Prune old or low-confidence edges
    */
-  private async pruneEdges(): Promise<number> {
+  private async pruneEdges(_childCtx?: MutationContext): Promise<number> {
+    // TODO(F4-2): execute the `DELETE FROM causal_edges` below via
+    // `_childCtx.substrate.withWrite({ storeId: 'causal_edges' as StoreId }, ...)`
+    // so the bulk prune is recorded as a single audit entry under the parent's
+    // `prune` child instead of bypassing the archivist seam.
     const maxAgeMs = this.config.edgeMaxAgeDays * 24 * 60 * 60 * 1000;
     const cutoffTime = Date.now() / 1000 - maxAgeMs / 1000;
 

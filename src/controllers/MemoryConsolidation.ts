@@ -1,3 +1,4 @@
+// charter: dispatch
 /**
  * MemoryConsolidation - Nightly Memory Processing
  *
@@ -24,6 +25,7 @@ import type { VectorBackend } from '../backends/VectorBackend.js';
 import { HierarchicalMemory, type MemoryItem, type MemoryTier } from './HierarchicalMemory.js';
 import { EmbeddingService } from './EmbeddingService.js';
 import { cosineSimilarity } from '../utils/similarity.js';
+import type { MutationContext } from '../archivist/mutation-context.js';
 
 // Database type from db-fallback
 type Database = any;
@@ -148,9 +150,20 @@ export class MemoryConsolidation {
   }
 
   /**
-   * Run nightly consolidation process
+   * Run nightly consolidation process.
+   *
+   * ADR-0180 §Re-entrancy: each cluster's store→markConsolidated cascade runs
+   * under its own `ctx.child('cluster')` (then `store` + `markConsolidated`
+   * descents inside `createSemanticMemory`), and the post-cluster forgetting
+   * sweep runs under `ctx.child('forget')` (with a `vectorRemove` leaf per
+   * forgotten memory). Per ADR-0180 Phase 9 Scenario C the resulting tree
+   * depth must remain ≤ 3.
+   *
+   * Bodies inside each `ctx.child(...)` block intentionally retain the legacy
+   * direct-DB call path — substrate-seam wire-up lands in F4-2 (handler
+   * registration). The children are minted to seed the audit tree.
    */
-  async consolidate(): Promise<ConsolidationReport> {
+  async consolidate(ctx?: MutationContext): Promise<ConsolidationReport> {
     console.log('\n🌙 Starting Memory Consolidation...\n');
     const startTime = Date.now();
 
@@ -185,11 +198,14 @@ export class MemoryConsolidation {
       report.clustersFormed = clusters.length;
       console.log(`   Formed ${clusters.length} clusters`);
 
-      // Step 3: Extract semantic patterns and create semantic memories
+      // Step 3: Extract semantic patterns and create semantic memories —
+      // each cluster gets its own `cluster` child (store + markConsolidated
+      // descents nest inside `createSemanticMemory`).
       console.log('🧠 Extracting semantic patterns...');
       for (const cluster of clusters) {
         if (cluster.members.length >= this.config.minClusterSize) {
-          const semanticMemory = await this.createSemanticMemory(cluster);
+          const clusterCtx = ctx?.child('cluster');
+          const semanticMemory = await this.createSemanticMemory(cluster, clusterCtx);
           if (semanticMemory) {
             report.semanticCreated++;
           }
@@ -197,9 +213,12 @@ export class MemoryConsolidation {
       }
       console.log(`   Created ${report.semanticCreated} semantic memories`);
 
-      // Step 4: Apply forgetting curve
+      // Step 4: Apply forgetting curve — `forget` child wraps the DELETE +
+      // vector-backend.remove sweep (a `vectorRemove` leaf is minted per
+      // forgotten memory inside).
       console.log('🗑️  Applying forgetting curve...');
-      const forgotten = await this.applyForgettingCurve(candidates);
+      const forgetCtx = ctx?.child('forget');
+      const forgotten = await this.applyForgettingCurve(candidates, forgetCtx);
       report.memoriesForgotten = forgotten;
       console.log(`   Forgot ${forgotten} low-value memories`);
 
@@ -342,9 +361,17 @@ export class MemoryConsolidation {
   }
 
   /**
-   * Create semantic memory from cluster
+   * Create semantic memory from cluster.
+   *
+   * ADR-0180 §Re-entrancy: the per-cluster cascade is the semantic `store`
+   * followed by one `markConsolidated` leaf per source member. Both legs are
+   * minted as children of the caller's `cluster` context so the audit tree
+   * reconstructs as cluster → (store, markConsolidated*).
    */
-  private async createSemanticMemory(cluster: MemoryCluster): Promise<string | null> {
+  private async createSemanticMemory(
+    cluster: MemoryCluster,
+    ctx?: MutationContext,
+  ): Promise<string | null> {
     // Extract common pattern from cluster members
     const pattern = this.extractSemanticPattern(cluster);
     if (!pattern) return null;
@@ -356,7 +383,9 @@ export class MemoryConsolidation {
       0
     ) / totalAccess;
 
-    // Store as semantic memory
+    // Store as semantic memory — `store` child wraps the hierarchical-memory write.
+    const storeCtx = ctx?.child('store');
+    void storeCtx;
     const memoryId = await (this.hierarchicalMemory as any).store(
       pattern,
       weightedImportance,
@@ -372,9 +401,11 @@ export class MemoryConsolidation {
       }
     );
 
-    // Mark source episodic memories as consolidated
+    // Mark source episodic memories as consolidated — one `markConsolidated`
+    // child per member so each UPDATE is its own audit leaf.
     for (const member of cluster.members) {
-      await this.markConsolidated(member.id);
+      const markCtx = ctx?.child('markConsolidated');
+      await this.markConsolidated(member.id, markCtx);
     }
 
     return memoryId;
@@ -422,9 +453,14 @@ export class MemoryConsolidation {
   }
 
   /**
-   * Mark episodic memory as consolidated
+   * Mark episodic memory as consolidated.
+   *
+   * ADR-0180: `ctx` is the `markConsolidated` child minted by
+   * `createSemanticMemory`. Body still issues the legacy direct UPDATE —
+   * substrate-seam wire-up lands in F4-2.
    */
-  private async markConsolidated(memoryId: string): Promise<void> {
+  private async markConsolidated(memoryId: string, ctx?: MutationContext): Promise<void> {
+    void ctx;
     const now = Date.now();
     this.db.prepare(`
       UPDATE hierarchical_memory
@@ -434,9 +470,17 @@ export class MemoryConsolidation {
   }
 
   /**
-   * Apply forgetting curve and delete low-value memories
+   * Apply forgetting curve and delete low-value memories.
+   *
+   * ADR-0180: `ctx` is the `forget` child minted by `consolidate()`. Each
+   * forgotten memory's vector-backend.remove runs under its own
+   * `vectorRemove` leaf so the audit tree captures one entry per dropped
+   * vector. Legacy direct-DB DELETE path retained (F4-2 substrate-seam).
    */
-  private async applyForgettingCurve(memories: MemoryItem[]): Promise<number> {
+  private async applyForgettingCurve(
+    memories: MemoryItem[],
+    ctx?: MutationContext,
+  ): Promise<number> {
     let forgotten = 0;
 
     for (const memory of memories) {
@@ -446,8 +490,10 @@ export class MemoryConsolidation {
         // Delete from database
         this.db.prepare('DELETE FROM hierarchical_memory WHERE id = ?').run(memory.id);
 
-        // Remove from vector backend
+        // Remove from vector backend — `vectorRemove` leaf per drop.
         if (this.vectorBackend) {
+          const vectorCtx = ctx?.child('vectorRemove');
+          void vectorCtx;
           this.vectorBackend.remove(memory.id);
         }
 

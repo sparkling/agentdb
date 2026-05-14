@@ -14,6 +14,16 @@
       "import": "./dist/src/index.js",
       "default": "./dist/src/index.js"
     },
+    "./archivist": {
+      "types": "./dist/src/archivist/index.d.ts",
+      "import": "./dist/src/archivist/index.js",
+      "default": "./dist/src/archivist/index.js"
+    },
+    "./archivist/testing": {
+      "types": "./dist/src/archivist/testing/index.d.ts",
+      "import": "./dist/src/archivist/testing/index.js",
+      "default": "./dist/src/archivist/testing/index.js"
+    },
     "./wasm": "./dist/src/wasm-loader.js",
     "./package.json": "./package.json",
     "./cli": "./dist/src/cli/agentdb-cli.js",
@@ -63,7 +73,8 @@
     "postinstall": "node scripts/postinstall.cjs || true",
     "dev": "tsx src/cli/agentdb-cli.ts",
     "test": "vitest",
-    "test:unit": "vitest --run",
+    "test:unit": "vitest --run && npm run test:charter",
+    "test:charter": "bash /Users/henrik/source/ruflo-patch/scripts/check-archivist-charter.sh",
     "test:browser": "vitest browser-bundle-unit.test.js --run",
     "test:ci": "npm run test:browser && npm run build && npm run verify:bundle",
     "verify:bundle": "node scripts/verify-bundle.js",
@@ -79,6 +90,8 @@
     "benchmark:adr072": "vitest run tests/benchmarks/adr-072-phase1-benchmark.test.ts --reporter=verbose",
     "benchmark:adr072:fast": "vitest run tests/benchmarks/validate-adr072.test.ts",
     "benchmark:all": "npm run benchmark:attention && npm run benchmark:backends && npm run benchmark:profile && npm run benchmark:ruvector",
+    "bench:hot-path": "tsx --test bench/hot-path.bench.ts",
+    "bench:hot-path-contended": "tsx --test bench/hot-path-contended.bench.ts",
     "build:model": "node scripts/build-model-rvf.mjs"
   },
   "keywords": [

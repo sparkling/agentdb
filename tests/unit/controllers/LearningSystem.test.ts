@@ -1,32 +1,34 @@
 /**
  * Unit Tests for LearningSystem Controller
  *
- * Tests reinforcement learning session management, action prediction, and policy training
+ * Tests reinforcement learning session management, action prediction, and policy training.
+ *
+ * ADR-0170 Phase B.6: ported from better-sqlite3 to PostgresBackend
+ * (pglite-embedded). Each test gets a fresh ephemeral pglite cluster
+ * under `os.tmpdir()`; the singleton-cache is reset between tests so
+ * sequential specs each construct against their own backend.
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import Database from 'better-sqlite3';
 import { LearningSystem, ActionFeedback } from '../../../src/controllers/LearningSystem.js';
 import { EmbeddingService } from '../../../src/controllers/EmbeddingService.js';
+import { PostgresBackend } from '../../../src/backends/postgres/PostgresBackend.js';
 import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
 
-const TEST_DB_PATH = './tests/fixtures/test-learning.db';
-
 describe('LearningSystem', () => {
-  let db: Database.Database;
+  let backend: PostgresBackend;
   let embedder: EmbeddingService;
   let learning: LearningSystem;
+  let dataDir: string;
 
   beforeEach(async () => {
-    // Clean up
-    [TEST_DB_PATH, `${TEST_DB_PATH}-wal`, `${TEST_DB_PATH}-shm`].forEach(file => {
-      if (fs.existsSync(file)) fs.unlinkSync(file);
-    });
+    LearningSystem._resetSingleton();
+    dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'learning-system-test-'));
 
-    // Initialize
-    db = new Database(TEST_DB_PATH);
-    db.pragma('journal_mode = WAL');
+    backend = new PostgresBackend({ metric: 'cosine', dataDir });
+    await backend.initialize();
 
     embedder = new EmbeddingService({
       model: 'mock-model',
@@ -35,14 +37,23 @@ describe('LearningSystem', () => {
     });
     await embedder.initialize();
 
-    learning = new LearningSystem(db, embedder);
+    learning = new LearningSystem(backend, embedder);
   });
 
-  afterEach(() => {
-    db.close();
-    [TEST_DB_PATH, `${TEST_DB_PATH}-wal`, `${TEST_DB_PATH}-shm`].forEach(file => {
-      if (fs.existsSync(file)) fs.unlinkSync(file);
-    });
+  afterEach(async () => {
+    try {
+      backend.close();
+    } catch {
+      /* best-effort */
+    }
+    LearningSystem._resetSingleton();
+    try {
+      if (dataDir && fs.existsSync(dataDir)) {
+        fs.rmSync(dataDir, { recursive: true, force: true });
+      }
+    } catch {
+      /* best-effort */
+    }
   });
 
   describe('startSession', () => {
@@ -92,7 +103,8 @@ describe('LearningSystem', () => {
         discountFactor: 0.9,
       });
 
-      const session = db.prepare('SELECT * FROM learning_sessions WHERE id = ?').get(sessionId);
+      const result = await backend.query('SELECT * FROM learning_sessions WHERE id = $1', [sessionId]);
+      const session = result.rows[0];
 
       expect(session).toBeDefined();
     });
@@ -107,7 +119,8 @@ describe('LearningSystem', () => {
 
       await learning.endSession(sessionId);
 
-      const session = db.prepare('SELECT * FROM learning_sessions WHERE id = ?').get(sessionId) as any;
+      const result = await backend.query('SELECT * FROM learning_sessions WHERE id = $1', [sessionId]);
+      const session = result.rows[0] as any;
 
       expect(session.status).toBe('completed');
       expect(session.end_time).toBeDefined();
@@ -225,10 +238,12 @@ describe('LearningSystem', () => {
 
       await learning.submitFeedback(feedback);
 
-      const experiences = db.prepare('SELECT * FROM learning_experiences WHERE session_id = ?')
-        .all(sessionId);
+      const result = await backend.query(
+        'SELECT * FROM learning_experiences WHERE session_id = $1',
+        [sessionId],
+      );
 
-      expect(experiences.length).toBe(1);
+      expect(result.rows.length).toBe(1);
     });
   });
 
@@ -337,8 +352,8 @@ describe('LearningSystem', () => {
   });
 
   describe('calculateReward', () => {
-    it('should calculate standard reward', () => {
-      const reward = learning.calculateReward({
+    it('should calculate standard reward', async () => {
+      const reward = await learning.calculateReward({
         success: true,
         targetAchieved: true,
         qualityScore: 0.8,
@@ -350,14 +365,14 @@ describe('LearningSystem', () => {
       expect(reward).toBeLessThanOrEqual(1);
     });
 
-    it('should calculate sparse reward', () => {
-      const successReward = learning.calculateReward({
+    it('should calculate sparse reward', async () => {
+      const successReward = await learning.calculateReward({
         success: true,
         targetAchieved: true,
         rewardFunction: 'sparse',
       });
 
-      const failureReward = learning.calculateReward({
+      const failureReward = await learning.calculateReward({
         success: false,
         targetAchieved: false,
         rewardFunction: 'sparse',
@@ -367,8 +382,8 @@ describe('LearningSystem', () => {
       expect(failureReward).toBe(0.0);
     });
 
-    it('should calculate dense reward with partial progress', () => {
-      const reward = learning.calculateReward({
+    it('should calculate dense reward with partial progress', async () => {
+      const reward = await learning.calculateReward({
         success: true,
         targetAchieved: false,
         qualityScore: 0.7,
@@ -380,8 +395,8 @@ describe('LearningSystem', () => {
       expect(reward).toBeLessThan(2);
     });
 
-    it('should calculate shaped reward with time bonus', () => {
-      const reward = learning.calculateReward({
+    it('should calculate shaped reward with time bonus', async () => {
+      const reward = await learning.calculateReward({
         success: true,
         targetAchieved: true,
         timeTakenMs: 500,

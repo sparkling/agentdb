@@ -24,6 +24,21 @@ import { EmbeddingService } from '../controllers/EmbeddingService.js';
 import { BatchOperations } from '../optimizations/BatchOperations.js';
 import { ReasoningBank } from '../controllers/ReasoningBank.js';
 import { MCPToolCaches } from '../optimizations/ToolCache.js';
+// ADR-0180 Open Follow-up #8 binding (a1): the standalone agentdb MCP server
+// MUST register handlers against the SAME archivist registry as the cli's MCP
+// server so cross-surface mutation invariants (audit chain, guards,
+// invariants) apply uniformly. The registry is a module-level singleton
+// (`mutationRegistry` / `readRegistry` in `archivist/registration.ts`) — both
+// surfaces share it via Node's module cache by importing from the same
+// `@sparkleideas/agentdb/archivist` path. These two imports are
+// side-effecting: each barrel re-exports files that call
+// `registerMutationHandler` / `registerReadHandler` at module load time,
+// populating the registry before the MCP server accepts any tool call.
+// Phase 8 deliberately stops at registration — wiring the existing tool
+// dispatch (below) through `archivist.dispatch(...)` is a later phase
+// (per the F4-3-equivalent migration for this server).
+import '../archivist/handlers/agentdb/index.js';
+import '../archivist/handlers/memory/index.js';
 import {
   validateId,
   validateTimestamp,

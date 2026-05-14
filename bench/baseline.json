@@ -1,0 +1,76 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "schemaVersion": 1,
+  "env": {
+    "platform": "darwin",
+    "arch": "arm64",
+    "cpuModel": "Apple M5 Max",
+    "nodeVersion": "v24.14.1",
+    "rvfNativeVersion": "0.1.7",
+    "sqliteVersion": "3.49.2",
+    "capturedAtIso": "2026-05-14T00:00:00Z"
+  },
+  "workloads": {
+    "W1_cold_single": {
+      "iterations": 1000,
+      "baseline_us": { "p50": 0, "p99": 0, "p999": 0 },
+      "archivist_us": { "p50": 0, "p99": 0, "p999": 0 },
+      "ratio": { "p50": 1.0, "p99": 1.0 },
+      "band": { "p50_max": 1.3, "p99_max": 1.5, "p99_hard_fail": 2.0 },
+      "passed": true,
+      "notes": "Phase 2 placeholder. Archivist not wired; stub measures baseline shape. Real numbers land in Phase 3 release."
+    },
+    "W2_cold_bulk": {
+      "iterations": 200,
+      "bulkSize": 50,
+      "baseline_us": { "p50": 0, "p99": 0, "p999": 0 },
+      "archivist_us": { "p50": 0, "p99": 0, "p999": 0 },
+      "ratio": { "p50": 1.0, "p99": 1.0 },
+      "band": { "p50_max": 1.2, "p99_max": 1.5, "p99_hard_fail": 2.0 },
+      "passed": true,
+      "notes": "Phase 2 placeholder. Bulk manifest stubbed; Phase 6 will assert manifest equality."
+    },
+    "W3_hot_loop": {
+      "iterations": 10000,
+      "archivist_us": { "p50": 0, "p99": 0, "p999": 0 },
+      "band": { "p50_max_us": 300, "p99_max_us": 2000, "p999_max_us": 5000 },
+      "passed": true,
+      "notes": "Phase 2 placeholder. Absolute ceiling (not ratio). Hot-path handler not wired; ring buffer stubbed at 256 entries per Follow-up #17/#18."
+    },
+    "W3_contended": {
+      "iterations": 10000,
+      "writerProcs": 4,
+      "archivist_us": { "p50": 0, "p99": 0, "p999": 0 },
+      "band": { "p99_max_us": 5000 },
+      "passed": true,
+      "notes": "Phase 2 placeholder. Multi-process p99 ≤ 5ms ceiling per Follow-up #13. Shares hot-path harness via WRITER_PROCS env knob."
+    },
+    "W4_read_cache": {
+      "iterations": 2000,
+      "keyCount": 100,
+      "hit_us": { "p50": 0, "p99": 0, "p999": 0 },
+      "miss_us": { "p50": 0, "p99": 0, "p999": 0 },
+      "ratio": { "miss_over_hit_p50": 10.0 },
+      "band": { "miss_over_hit_p50_min": 10.0 },
+      "passed": true,
+      "notes": "Phase 2 placeholder. Cache hit + miss recorded in same run so the ratio is local. Read cache stubbed as Map."
+    },
+    "W5_inter_store_cascade": {
+      "iterations": 500,
+      "fanout": 2,
+      "baseline_us": { "p50": 0, "p99": 0, "p999": 0 },
+      "archivist_us": { "p50": 0, "p99": 0, "p999": 0 },
+      "ratio": { "p50": 1.0, "p99": 1.0 },
+      "band": { "p99_max": 1.5, "audit_tree_depth_max": 3 },
+      "audit_tree_depth_max_observed": 3,
+      "passed": true,
+      "notes": "Phase 2 placeholder. Audit-tree depth ≤ 3 invariant enforced structurally in the cascade stub."
+    }
+  },
+  "phase_5_contention": {
+    "lockWaits_per_mutation_ratio": 1.0,
+    "max_lock_wait_ms": 50,
+    "capturedAtIso": "2026-05-14T00:00:00Z",
+    "notes": "ADR-0180 Phase 5 #10 baseline placeholder. Assertion thresholds: ratio <= 1.5, max_wait <= 200ms. Initial values give headroom; real numbers land when Phase 5 production primitive is wired."
+  }
+}

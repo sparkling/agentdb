@@ -1,0 +1,36 @@
+{
+  "//": [
+    "ADR-0180 §Type enforcement — substrate-handle path restriction.",
+    "Files under `src/archivist/**` may import `./substrate-internal`. Imports from",
+    "any other path fail at type-check via the `paths` rule below combined with the",
+    "main tsconfig's exclusion of this module from its `paths`.",
+    "",
+    "This is a standalone type-check config — `npx tsc -p src/archivist/tsconfig.archivist.json",
+    "--noEmit` runs the path-restriction gate in isolation. It is intentionally NOT wired",
+    "into `forks/agentdb/tsconfig.json` `references`: the package build (`build:ts` = plain",
+    "`tsc`) already type-checks `src/archivist/**` cleanly, and the repo has no `tsc --build`",
+    "convention. Because it is `--noEmit`-only and never `tsc --build`'d, it is NOT a",
+    "`composite` project — `composite` would require every transitively-pulled file to be",
+    "in `include`, re-raising TS6307 for the `src/backends/**` files the substrate factories",
+    "depend on. `rootDir` is `..` (= `src/`) because the substrate factories `import type`",
+    "the real `RvfBackend` from `src/backends/**` (ADR-0180 OF#10 — thin pass-throughs to",
+    "the layer that owns durability); a `rootDir` scoped to `src/archivist` would reject",
+    "those cross-tree type imports with TS6059. `include` stays scoped to the archivist",
+    "tree so only this module is gated.",
+    "",
+    "Follow-up still owed to the package's `exports` field in package.json: keep",
+    "`substrate-internal.ts` out of the published surface so external consumers cannot",
+    "reach the substrate seam either."
+  ],
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "rootDir": "..",
+    "baseUrl": ".",
+    "paths": {
+      "./substrate-internal": ["./substrate-internal.ts"]
+    }
+  },
+  "include": ["./**/*.ts"],
+  "exclude": ["./testing/**/*.test.ts"]
+}

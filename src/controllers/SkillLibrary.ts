@@ -8,6 +8,7 @@
  * https://arxiv.org/abs/2305.16291
  */
 
+import { createHash } from 'node:crypto';
 import type { IDatabaseConnection, DatabaseRows } from '../types/database.types.js';
 import { normalizeRowId } from '../types/database.types.js';
 import { EmbeddingService } from './EmbeddingService.js';
@@ -15,6 +16,8 @@ import { VectorBackend } from '../backends/VectorBackend.js';
 import type { GraphDatabaseAdapter } from '../backends/graph/GraphDatabaseAdapter.js';
 import { NodeIdMapper } from '../utils/NodeIdMapper.js';
 import { QueryCache, type QueryCacheConfig } from '../core/QueryCache.js';
+import type { MutationContext } from '../archivist/mutation-context.js';
+import type { BulkIntent } from '../archivist/types.js';
 
 export interface Skill {
   id?: number;
@@ -458,13 +461,23 @@ export class SkillLibrary {
   /**
    * Consolidate high-reward episodes into skills with ML pattern extraction
    * This is the core learning mechanism enhanced with pattern analysis
+   *
+   * Per ADR-0180 §Bulk-write mode + Phase 9 Scenario B, the cross-substrate
+   * fan-out announces one `ctx.bulk(intent, payload)` summary per substrate
+   * table touched (`skills`, `skill_embeddings`) so the audit log carries one
+   * manifest entry per table, not one per consolidated candidate. The existing
+   * per-candidate `createSkill` / `updateSkillStats` write bodies are unchanged
+   * — routing them through the substrate seam lands in F4-2.
    */
-  async consolidateEpisodesIntoSkills(config: {
-    minAttempts?: number;
-    minReward?: number;
-    timeWindowDays?: number;
-    extractPatterns?: boolean;
-  }): Promise<{
+  async consolidateEpisodesIntoSkills(
+    config: {
+      minAttempts?: number;
+      minReward?: number;
+      timeWindowDays?: number;
+      extractPatterns?: boolean;
+    },
+    ctx?: MutationContext
+  ): Promise<{
     created: number;
     updated: number;
     patterns: Array<{
@@ -503,6 +516,42 @@ export class SkillLibrary {
     `);
 
     const candidates = stmt.all(timeWindowDays * 86400, minReward, minAttempts);
+
+    // Bulk-write announce (ADR-0180 §Bulk-write mode). Read-only pre-pass over
+    // the candidates partitions which substrates the fan-out below will touch:
+    // every candidate writes an embedding via createSkill/VectorBackend; only
+    // candidates without an existing skill row INSERT into `skills`. One
+    // `ctx.bulk()` manifest is emitted per touched table — the actual writes
+    // still flow through the legacy per-candidate loop until F4-2 routes them
+    // through the substrate seam.
+    const newSkillRows = candidates.filter(
+      (c) => !this.db.prepare('SELECT id FROM skills WHERE name = ?').get(c.task)
+    );
+    if (newSkillRows.length > 0) {
+      const intent: BulkIntent = {
+        tableName: 'skills',
+        columnSet: [
+          'name', 'description', 'signature', 'code', 'success_rate', 'uses',
+          'avg_reward', 'avg_latency_ms', 'metadata',
+        ] as const,
+        count: newSkillRows.length,
+        checksum: this.computeChecksum(newSkillRows),
+      };
+      await ctx?.bulk(intent, newSkillRows);
+    }
+    if (candidates.length > 0) {
+      const intent: BulkIntent = {
+        tableName: 'skill_embeddings',
+        columnSet: ['skill_id', 'embedding'] as const,
+        count: candidates.length,
+        checksum: this.computeChecksum(candidates),
+      };
+      await ctx?.bulk(intent, candidates);
+    }
+
+    // TODO(F4-2): route the createSkill / updateSkillStats write bodies below
+    // through ctx.substrate.withBulkWrite so the substrate touches join the
+    // announced manifest instead of writing directly to this.db / VectorBackend.
     let created = 0;
     let updated = 0;
     const patterns: Array<{
@@ -582,6 +631,14 @@ export class SkillLibrary {
     }
 
     return { created, updated, patterns };
+  }
+
+  /**
+   * SHA-256 of the canonical-JSON-encoded payload. Used as the per-table
+   * manifest checksum for Phase 9 Scenario B replay equality.
+   */
+  private computeChecksum(rows: unknown): string {
+    return createHash('sha256').update(JSON.stringify(rows)).digest('hex');
   }
 
   /**

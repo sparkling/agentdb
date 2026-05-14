@@ -201,6 +201,11 @@ export class AgentDB {
     }
   }
 
+  /** Exposes the underlying database connection for controller wiring in memory package. */
+  get database(): IDatabaseConnection {
+    return this.db;
+  }
+
   getController(name: string): any {
     if (!this.initialized) {
       throw new Error('AgentDB not initialized. Call initialize() first.');

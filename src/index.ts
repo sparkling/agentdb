@@ -80,6 +80,9 @@ export { MultiHeadAttentionController } from './controllers/attention/MultiHeadA
 // Database utilities
 export { createDatabase } from './db-fallback.js';
 
+// SolverBandit: Thompson Sampling bandit for controller decisions (controller-registry.ts L1 solverBandit)
+export { SolverBandit } from './backends/rvf/SolverBandit.js';
+
 // Optimizations
 export { BatchOperations } from './optimizations/BatchOperations.js';
 export { QueryOptimizer } from './optimizations/QueryOptimizer.js';

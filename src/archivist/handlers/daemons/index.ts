@@ -15,9 +15,9 @@ export * from './consolidate.js';
 export * from './benchmark.js';
 export * from './auto-memory-bridge.js';
 export * from './hooks-learning.js';
-
-// STUB handlers — pending Phase N wire-up; excluded from registration so
-// cli dispatch surfaces `tool not registered` → acceptance skip-accepted.
-//   export * from './map.js';
-//   export * from './audit.js';
-//   export * from './testgaps.js';
+// ADR-0181 Phase 6 r4 wire-up — daemon-snapshot persistence handlers (cli
+// composes the snapshot, handler owns persistence only — `optimize.ts`
+// precedent). No controller dependency.
+export * from './map.js';
+export * from './audit.js';
+export * from './testgaps.js';

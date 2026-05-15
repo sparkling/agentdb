@@ -26,39 +26,63 @@ import {
 } from '../../index.js';
 
 /**
- * Mutation payload for the daemon-scheduled testgaps worker. The
- * `runTestGapsWorkerLocal` method (worker-daemon.ts:1455-1475) takes no
- * caller-supplied arguments; the payload is intentionally empty so the audit
- * record captures "the scheduler fired" without coupling to internal worker
- * state.
+ * Mutation payload for the daemon-scheduled testgaps worker.
+ *
+ * The cli's `runTestGapsWorkerLocal` (worker-daemon.ts:1534-1554) composes
+ * the snapshot from two `existsSync` probes (`tests/`, `__tests__/`) — those
+ * are filesystem reads the *daemon* performs on its own stack and are NOT a
+ * substrate concern (matches the `optimize.ts` / `consolidate.ts` precedent:
+ * the cli runs the work, the handler owns persistence only). So the snapshot
+ * arrives here fully-composed in the payload; the handler writes it verbatim.
+ *
+ * `mode` discriminates the two execution paths:
+ *   - `'local'` — `runTestGapsWorkerLocal` fallback (worker-daemon.ts:1534).
+ *     Carries `hasTestDir`, `estimatedCoverage`, `gaps`, `note`.
+ *   - `'headless'` — `persistHeadlessResult` (worker-daemon.ts:1355). Carries
+ *     `model`, `durationMs`, `tokensUsed`, `executionId`, `success`,
+ *     `findings`, `rawOutputPreview`, `rawOutputLength`. Both modes write to
+ *     the same file (`test-gaps.json`), so a single mutation handler covers
+ *     both; the on-disk schema diverges by `mode` exactly as the cli
+ *     produces today.
  */
-export interface TestGapsWorkerPayload {
-  // intentionally empty — daemon-scheduled, no external inputs
-}
+export type TestGapsWorkerPayload =
+  | {
+      readonly timestamp: string;
+      readonly mode: 'local';
+      readonly hasTestDir: boolean;
+      readonly estimatedCoverage: string;
+      readonly gaps: ReadonlyArray<unknown>;
+      readonly note: string;
+    }
+  | {
+      readonly timestamp: string;
+      readonly mode: 'headless';
+      readonly workerType: string;
+      readonly model?: string;
+      readonly durationMs?: number;
+      readonly tokensUsed?: number;
+      readonly executionId?: string;
+      readonly success: boolean;
+      readonly findings: unknown;
+      readonly rawOutputPreview?: string;
+      readonly rawOutputLength: number;
+    };
 
 const STORE_ID = 'metrics_test_gaps' as StoreId;
 
-// TODO(ADR-0180 Phase 5 wire-up, F4-3 deferral): port the scan body of
-// worker-daemon.ts `runTestGapsWorkerLocal` (lines 1455-1475) once the
-// dispatch boundary is wired through the daemon. The current cli body
-// composes a `{ timestamp, mode, hasTestDir, estimatedCoverage, gaps, note }`
-// snapshot via two `existsSync` probes (`tests/`, `__tests__/`) and then
-// `writeFileSync(.../test-gaps.json, ...)`. Probes are read-only filesystem
-// reads and therefore stay outside the `withWrite` scope; only the final
-// JSON write moves inside. Note the file name on disk uses the hyphenated
-// form (`test-gaps.json`) while the daemon worker type / handler name use
-// the unhyphenated form (`testgaps` / `daemon_testgaps`) — matching the
-// pre-existing cli surface.
+// F4-2 body: snapshot is composed daemon-side (existsSync probes are
+// filesystem reads, not a substrate concern — `optimize.ts` precedent) and
+// arrives in the payload; this handler owns persistence only. One `withWrite`
+// scope → one `handle.write` of the whole document. The cli
+// `writeFileSync(.../test-gaps.json)` at worker-daemon.ts:1552 (local) and
+// 1395 (headless) collapses to this call once F4-3 flips the daemon switch
+// to `archivist.dispatch('daemon_testgaps', snapshot)`.
 export const testGapsWorkerHandler: GuardedWrite<TestGapsWorkerPayload> =
   registerMutationHandler<TestGapsWorkerPayload>(
     'daemon_testgaps',
-    async (ctx: MutationContext<false>, _payload: TestGapsWorkerPayload): Promise<void> => {
-      await ctx.substrate.withWrite({ storeId: STORE_ID }, async (_handle) => {
-        throw new Error(
-          'archivist: daemon_testgaps handler body pending Phase 5 wire-up; ' +
-          'callers currently route through forks/ruflo/v3/@claude-flow/cli/src/services/worker-daemon.ts ' +
-          '\'runTestGapsWorkerLocal\' method',
-        );
+    async (ctx: MutationContext<false>, payload: TestGapsWorkerPayload): Promise<void> => {
+      await ctx.substrate.withWrite({ storeId: STORE_ID }, async (handle) => {
+        await handle.write({ storeId: STORE_ID, key: 'root', payload });
       });
     },
     {

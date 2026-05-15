@@ -167,6 +167,58 @@ export function listReadHandlers(): ReadonlyArray<string> {
   return Array.from(readRegistry.keys());
 }
 
+/**
+ * Register an additional dispatch name that resolves to an already-registered
+ * handler. Both names share the same registry entry (handler, invariants,
+ * cacheScope) — the alias is a pure routing convenience.
+ *
+ * ADR-0181 Phase 5 DA-memo CF#3 — namespace harmonization.
+ *
+ * Use case: the cli's MCP-tool surface and the archivist registration may
+ * spell the same logical operation differently for historical reasons (e.g.
+ * cli `hooks_pre-task` plural-hyphenated vs archivist `hook_pre_task`
+ * singular-underscored). Aliasing lets the cli dispatch under its own
+ * spelling without renaming user-facing tool names AND without forcing the
+ * archivist to abandon its internal convention. Phase 7 hook-flip work can
+ * call `dispatch('hooks_pre-task', payload)` once an alias is registered.
+ *
+ * Throws if the canonical name is not yet registered or if the alias name
+ * is already in use (in either registry) — fail-loud per
+ * `feedback-no-fallbacks`.
+ */
+export function registerMutationHandlerAlias(aliasName: string, canonicalName: string): void {
+  const canonical = mutationRegistry.get(canonicalName);
+  if (!canonical) {
+    throw new Error(
+      `archivist: cannot alias '${aliasName}' to '${canonicalName}' — canonical handler not registered`,
+    );
+  }
+  if (mutationRegistry.has(aliasName)) {
+    throw new Error(`archivist: mutation handler '${aliasName}' already registered (alias collision)`);
+  }
+  if (readRegistry.has(aliasName)) {
+    throw new Error(`archivist: '${aliasName}' already registered as a read handler (alias collision)`);
+  }
+  mutationRegistry.set(aliasName, canonical);
+}
+
+/** Read-handler counterpart to registerMutationHandlerAlias — see that fn for context. */
+export function registerReadHandlerAlias(aliasName: string, canonicalName: string): void {
+  const canonical = readRegistry.get(canonicalName);
+  if (!canonical) {
+    throw new Error(
+      `archivist: cannot alias '${aliasName}' to '${canonicalName}' — canonical read handler not registered`,
+    );
+  }
+  if (readRegistry.has(aliasName)) {
+    throw new Error(`archivist: read handler '${aliasName}' already registered (alias collision)`);
+  }
+  if (mutationRegistry.has(aliasName)) {
+    throw new Error(`archivist: '${aliasName}' already registered as a mutation handler (alias collision)`);
+  }
+  readRegistry.set(aliasName, canonical);
+}
+
 /** Internal — clear registry. Used by test fixtures, never by production. */
 export function __resetRegistry__(): void {
   mutationRegistry.clear();

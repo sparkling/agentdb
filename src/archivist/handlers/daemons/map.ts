@@ -26,35 +26,52 @@ import {
 } from '../../index.js';
 
 /**
- * Mutation payload for the daemon-scheduled codebase-map worker. The
- * `runMapWorker` method (worker-daemon.ts:1321-1344) takes no caller-supplied
- * arguments; the payload is intentionally empty so the audit record captures
- * "the scheduler fired" without coupling to internal worker state.
+ * Mutation payload for the daemon-scheduled codebase-map worker.
+ *
+ * The cli's `runMapWorker` (worker-daemon.ts:1400-1423) composes the snapshot
+ * from four `existsSync` probes (`package.json`, `tsconfig.json`, `.claude`,
+ * `.claude-flow`) — those are filesystem reads the *daemon* performs on its
+ * own stack and are NOT a substrate concern (matches the `optimize.ts` /
+ * `consolidate.ts` precedent: the cli runs the work, the handler owns
+ * persistence only). So the snapshot arrives here fully-composed in the
+ * payload; the handler writes it verbatim.
+ *
+ * The field set mirrors the cli snapshot 1:1 so the on-disk
+ * `.claude-flow/metrics/codebase-map.json` schema is unchanged when the F4-3
+ * dispatch wire-up flips `runMapWorker` to
+ * `archivist.dispatch('daemon_runMap', snapshot)`.
  */
 export interface MapWorkerPayload {
-  // intentionally empty — daemon-scheduled, no external inputs
+  /** ISO-8601 — `new Date().toISOString()` at the daemon tick. */
+  readonly timestamp: string;
+  /** Absolute project root the scan ran against. */
+  readonly projectRoot: string;
+  /** Marker-file presence — composed via four cli-side `existsSync` probes. */
+  readonly structure: {
+    readonly hasPackageJson: boolean;
+    readonly hasTsConfig: boolean;
+    readonly hasClaudeConfig: boolean;
+    readonly hasClaudeFlow: boolean;
+  };
+  /** `Date.now()` at scan completion (epoch ms, mirrors cli field). */
+  readonly scannedAt: number;
 }
 
 const STORE_ID = 'metrics_codebase_map' as StoreId;
 
-// TODO(ADR-0180 Phase 5 wire-up, F4-3 deferral): port the scan body of
-// worker-daemon.ts `runMapWorker` (lines 1321-1344) once the dispatch
-// boundary is wired through the daemon. The current cli body composes a
-// `{ timestamp, projectRoot, structure: { hasPackageJson, hasTsConfig,
-// hasClaudeConfig, hasClaudeFlow }, scannedAt }` snapshot via four
-// `existsSync` probes and then `writeFileSync(.../codebase-map.json, ...)`.
-// Probes are read-only filesystem reads and therefore stay outside the
-// `withWrite` scope; only the final JSON write moves inside.
+// F4-2 body: snapshot is composed daemon-side (existsSync probes are
+// filesystem reads, not a substrate concern — `optimize.ts` precedent) and
+// arrives in the payload; this handler owns persistence only. One `withWrite`
+// scope → one `handle.write` of the whole document. The cli
+// `writeFileSync(.../codebase-map.json)` at worker-daemon.ts:1421 collapses
+// to this call once F4-3 flips the daemon switch to
+// `archivist.dispatch('daemon_runMap', snapshot)`.
 export const mapWorkerHandler: GuardedWrite<MapWorkerPayload> =
   registerMutationHandler<MapWorkerPayload>(
     'daemon_runMap',
-    async (ctx: MutationContext<false>, _payload: MapWorkerPayload): Promise<void> => {
-      await ctx.substrate.withWrite({ storeId: STORE_ID }, async (_handle) => {
-        throw new Error(
-          'archivist: daemon_runMap handler body pending Phase 5 wire-up; ' +
-          'callers currently route through forks/ruflo/v3/@claude-flow/cli/src/services/worker-daemon.ts ' +
-          '\'runMapWorker\' method',
-        );
+    async (ctx: MutationContext<false>, payload: MapWorkerPayload): Promise<void> => {
+      await ctx.substrate.withWrite({ storeId: STORE_ID }, async (handle) => {
+        await handle.write({ storeId: STORE_ID, key: 'root', payload });
       });
     },
     {

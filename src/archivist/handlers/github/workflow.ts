@@ -56,24 +56,34 @@ export type GithubWorkflowPayload =
 
 const STORE_ID = 'github' as StoreId;
 
-// TODO(ADR-0180 Phase 5 wire-up): port the body of cli `github_workflow`
-// handler once the dispatch boundary is wired through cli. The cli's
-// open-coded `runArgv('gh', ['workflow', 'run', ...])` /
-// `runArgv('gh', ['run', 'cancel', ...])` callsites are recorded in the
-// audit chain — `ctx.substrate.withWrite` is the only path through which
-// the gh-side mutation lands an audit entry, even though the fork-side
-// FS-JSON store at `.claude-flow/github/store.json` is not persisted by
-// this tool (only `github_repo_analyze` / `github_pr_manage` /
-// `github_issue_track` touch the local store).
+// F4-2 body: the gh-process subprocess invocations stay cli-side (the
+// `runArgv('gh', ...)` calls in `cli/src/mcp-tools/github-tools.ts`
+// `github_workflow` at lines 481-535 — `gh run list`, `gh workflow list`,
+// `gh run view`, `gh workflow run --ref`, `gh run cancel`). Per the registry
+// note (substrate-registry.ts:203) `github_workflow` touches no local store —
+// only `github_repo_analyze` / `github_pr_manage` / `github_issue_track` do.
+// So this handler opens the `withWrite` scope ONLY to anchor the audit-chain
+// entry (intent → applied) for the gh-side mutation; no `handle.write` is
+// invoked because there is no fork-side document to update. This matches the
+// audit-uniformity discipline of ADR-0180 §Audit chain (mixed read/write
+// tools surface as one mutation handler so trigger/cancel land an audit entry
+// alongside list/status which also flow through the surface).
+//
+// `feedback-no-fallbacks`: the cli wrapper validates `owner` / `repo` /
+// `workflowId` / `ref` via `validateIdentifier` and surfaces validation errors
+// in its own envelope (`{ success: false, error }`) before any dispatch lands;
+// the handler does NOT re-validate because the cli boundary is the only
+// caller and a re-check here would duplicate the cli's invariants-author
+// surface (Phase 5 brief: invariants land in the registration metadata, not
+// in handler bodies).
 export const githubWorkflowHandler: GuardedWrite<GithubWorkflowPayload> =
   registerMutationHandler<GithubWorkflowPayload>(
     'github_workflow',
-    async (ctx: MutationContext<false>, payload: GithubWorkflowPayload): Promise<void> => {
+    async (ctx: MutationContext<false>, _payload: GithubWorkflowPayload): Promise<void> => {
       await ctx.substrate.withWrite({ storeId: STORE_ID }, async (_handle) => {
-        throw new Error(
-          `archivist: github_workflow (action=${payload.action}) handler body pending Phase 5 wire-up; ` +
-          `callers currently route through cli/src/mcp-tools/github-tools.ts github_workflow handler`,
-        );
+        // Audit-only: gh-process backend has no fork-side document to update.
+        // The withWrite scope is the audit-chain anchor; cli owns the
+        // subprocess invocation and result composition.
       });
     },
     {

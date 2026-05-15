@@ -13,7 +13,6 @@ export * from './shared.js';
 export * from './repo-analyze.js';
 export * from './pr-manage.js';
 export * from './issue-track.js';
-
-// STUB handlers — pending Phase N wire-up; dispatch surfaces
-// `tool not registered` → acceptance skip-accepted.
-//   export * from './workflow.js';
+// ADR-0181 Phase 6 r4 wire-up — gh-process backend (audit-anchor only,
+// no fork-side document mutation; cli owns the subprocess + result shape).
+export * from './workflow.js';

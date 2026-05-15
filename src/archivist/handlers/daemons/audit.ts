@@ -29,41 +29,67 @@ import {
 } from '../../index.js';
 
 /**
- * Mutation payload for the daemon-scheduled security-audit worker. The
- * `runAuditWorkerLocal` method (worker-daemon.ts:1349-1373) takes no
- * caller-supplied arguments; the payload is intentionally empty so the audit
- * record captures "the scheduler fired" without coupling to internal worker
- * state.
+ * Mutation payload for the daemon-scheduled security-audit worker.
+ *
+ * The cli's `runAuditWorkerLocal` (worker-daemon.ts:1428-1452) composes the
+ * snapshot from two `existsSync` probes (`.env.local`, `.gitignore`) — those
+ * are filesystem reads the *daemon* performs on its own stack and are NOT a
+ * substrate concern (matches the `optimize.ts` / `consolidate.ts` precedent:
+ * the cli runs the work, the handler owns persistence only). So the snapshot
+ * arrives here fully-composed in the payload; the handler writes it verbatim.
+ *
+ * `mode` discriminates the two execution paths:
+ *   - `'local'` — `runAuditWorkerLocal` fallback (worker-daemon.ts:1428).
+ *     Carries `checks`, `riskLevel`, `recommendations`, `note`.
+ *   - `'headless'` — `persistHeadlessResult` (worker-daemon.ts:1355). Carries
+ *     `model`, `durationMs`, `tokensUsed`, `executionId`, `success`,
+ *     `findings`, `rawOutputPreview`, `rawOutputLength`. Both modes write to
+ *     the same file (`security-audit.json`), so a single mutation handler
+ *     covers both; the on-disk schema diverges by `mode` exactly as the cli
+ *     produces today.
  */
-export interface AuditWorkerPayload {
-  // intentionally empty — daemon-scheduled, no external inputs
-}
+export type AuditWorkerPayload =
+  | {
+      readonly timestamp: string;
+      readonly mode: 'local';
+      readonly checks: {
+        readonly envFilesProtected: boolean;
+        readonly gitIgnoreExists: boolean;
+        readonly noHardcodedSecrets: boolean;
+      };
+      readonly riskLevel: string;
+      readonly recommendations: ReadonlyArray<unknown>;
+      readonly note: string;
+    }
+  | {
+      readonly timestamp: string;
+      readonly mode: 'headless';
+      readonly workerType: string;
+      readonly model?: string;
+      readonly durationMs?: number;
+      readonly tokensUsed?: number;
+      readonly executionId?: string;
+      readonly success: boolean;
+      readonly findings: unknown;
+      readonly rawOutputPreview?: string;
+      readonly rawOutputLength: number;
+    };
 
 const STORE_ID = 'metrics_security_audit' as StoreId;
 
-// TODO(ADR-0180 Phase 5 wire-up, F4-3 deferral): port the body of
-// worker-daemon.ts `runAuditWorkerLocal` (lines 1349-1373) once the dispatch
-// boundary is wired through the daemon. The current cli body composes a
-// `{ timestamp, mode: 'local', checks: { envFilesProtected, gitIgnoreExists,
-// noHardcodedSecrets }, riskLevel: 'low', recommendations: [], note }`
-// snapshot via two `existsSync` probes and then
-// `writeFileSync(.../security-audit.json, ...)`. Probes are read-only
-// filesystem reads and therefore stay outside the `withWrite` scope; only the
-// final JSON write moves inside. The headless variant
-// (`persistHeadlessResult`, worker-daemon.ts:1276) writes the richer
-// `{ timestamp, mode: 'headless', findings, rawOutputPreview, ... }` shape to
-// the same path; invariants-author should fold both modes into one handler
-// body keyed off `ctx`-derived execution-mode metadata.
+// F4-2 body: snapshot is composed daemon-side (existsSync probes are
+// filesystem reads, not a substrate concern — `optimize.ts` precedent) and
+// arrives in the payload; this handler owns persistence only. One `withWrite`
+// scope → one `handle.write` of the whole document. The cli
+// `writeFileSync(.../security-audit.json)` at worker-daemon.ts:1450 (local)
+// and 1395 (headless) collapses to this call once F4-3 flips the daemon
+// switch to `archivist.dispatch('daemon_audit', snapshot)`.
 export const auditWorkerHandler: GuardedWrite<AuditWorkerPayload> =
   registerMutationHandler<AuditWorkerPayload>(
     'daemon_audit',
-    async (ctx: MutationContext<false>, _payload: AuditWorkerPayload): Promise<void> => {
-      await ctx.substrate.withWrite({ storeId: STORE_ID }, async (_handle) => {
-        throw new Error(
-          'archivist: daemon_audit handler body pending Phase 5 wire-up; ' +
-          'callers currently route through forks/ruflo/v3/@claude-flow/cli/src/services/worker-daemon.ts ' +
-          '\'runAuditWorkerLocal\' method',
-        );
+    async (ctx: MutationContext<false>, payload: AuditWorkerPayload): Promise<void> => {
+      await ctx.substrate.withWrite({ storeId: STORE_ID }, async (handle) => {
+        await handle.write({ storeId: STORE_ID, key: 'root', payload });
       });
     },
     {

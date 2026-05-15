@@ -249,16 +249,22 @@ export interface ToolPayloadMap {
   // *plural-hyphenated* spelling (`hooks_pre-task`, `hooks_post-task`,
   // `hooks_post-edit`, `hooks_session-end`, plus ~20 more without archivist
   // counterparts). The archivist registers only these 4, under the
-  // *singular-underscored* spelling. Phase 5 delegation worker for
-  // hooks-tools.ts must resolve the spelling delta before flipping — see
-  // team-lead message + queen ruling. The map below covers the archivist
-  // registrations as-they-are-registered; if the queen decides aliasing is
-  // needed, additional entries (e.g. `'hooks_pre-task': PreTaskPayload`) can
-  // be added here without touching the handlers.
+  // *singular-underscored* spelling — for agentic-flow `hook_*` MCP tool
+  // compatibility (see agentic-flow/src/mcp/fastmcp/tools/hooks/*).
+  //
+  // ADR-0181 Phase 5 DA-memo CF#3 — namespace harmonization landed
+  // dispatch-name aliases via `registerMutationHandlerAlias` in
+  // `handlers/hooks/index.ts` so future Phase 7 cli-to-archivist flips can
+  // dispatch under either spelling. Each `hook_*` key below is paired with a
+  // `hooks_<verb>-<noun>` alias key resolving to the same payload type.
   readonly hook_post_edit: PostEditPayload;
   readonly hook_post_task: PostTaskPayload;
   readonly hook_pre_task: PreTaskPayload;
   readonly hook_session_end: SessionEndPayload;
+  readonly 'hooks_post-edit': PostEditPayload;
+  readonly 'hooks_post-task': PostTaskPayload;
+  readonly 'hooks_pre-task': PreTaskPayload;
+  readonly 'hooks_session-end': SessionEndPayload;
 
   // hive-mind_* (read + mutation) — note hyphenated `hive-mind` prefix; this
   // is the tool-name spelling, not an identifier, so it lives behind the

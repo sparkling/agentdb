@@ -9,11 +9,15 @@
 // shapes land here. Sibling worker types (audit, optimize, consolidate, ...)
 // register here as their Phase 5 wire-ups land.
 
-export * from './map.js';
-export * from './audit.js';
+// IMPLEMENTED handlers
 export * from './optimize.js';
-export * from './testgaps.js';
 export * from './consolidate.js';
 export * from './benchmark.js';
 export * from './auto-memory-bridge.js';
 export * from './hooks-learning.js';
+
+// STUB handlers — pending Phase N wire-up; excluded from registration so
+// cli dispatch surfaces `tool not registered` → acceptance skip-accepted.
+//   export * from './map.js';
+//   export * from './audit.js';
+//   export * from './testgaps.js';

@@ -52,13 +52,26 @@ export * from './semantic-route.js';
 // SQL-over-hierarchical_memory read so the read↔write pair shares the
 // same substrate family.
 //
-// Sona stays deferred: SonaTrajectoryService is in-memory-only by design
-// (no SQLite persistence) and there is no sibling read handler registered
-// yet — see the per-line note below.
+// Sona is NOT a deferred wiring decision — it joins the permanently-cli-only
+// bucket alongside hooks/* and session_* (handover Section J). The capability
+// surface and handler body are wired and work; what's missing is a
+// controller-level behavioural change (the service is pure-compute by design)
+// plus a sibling read handler. See the per-line note below for the full
+// rationale.
 export * from './feedback.js';
 export * from './pattern-store.js';
 export * from './experience-record.js';
 export * from './reflexion-store.js';
 export * from './skill-create.js';
 export * from './hierarchical-store.js';
-// export * from './sona-trajectory-store.js';  // DEFERRED Phase 7+: SonaTrajectoryService is in-memory-only by design (no SQLite persistence + no sibling read handler). Follow-up ADR required for SQLite migration + read handler registration.
+// export * from './sona-trajectory-store.js';
+//   PERMANENTLY CLI-ONLY pending follow-up ADR for SonaTrajectoryService
+//   SQLite-persistence design. The capability surface (SonaTrajectoryWriter)
+//   and handler body are wired and work; what's missing is a controller-level
+//   behavioural change — the service is pure-compute by design (in-memory
+//   `Map<string, StoredTrajectory[]>` at services/SonaTrajectoryService.ts:73-77),
+//   and there is no sibling read handler for the 'stats' action. Joins
+//   handover Section J's permanently-cli-only bucket alongside hooks/* and
+//   session_*; gating it here is not a "wire later" decision but a deliberate
+//   refusal to expose a write surface whose round-trip guarantee can't be
+//   honoured at the dispatch boundary.

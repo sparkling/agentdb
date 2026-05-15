@@ -3,29 +3,35 @@
 // return shape + §Provenance rollout scope).
 //
 // Recalls entries from the hierarchical memory store (working / episodic / semantic
-// tiers — ADR-0140 / HierarchicalMemory controller) by similarity to a query, with
+// tiers — ADR-0140 / HierarchicalMemory controller) ranked by importance, with
 // optional tier filter. Registers as `GuardedRead<AgentdbHierarchicalRecallQuery,
 // RankedResults<HierarchicalRecallHit>>` so every candidate carries provenance
-// verbatim (storeId='hierarchical:<tier>', matchType='semantic', rawScore, rank).
+// verbatim (storeId='hierarchical:<tier>', matchType='semantic', rawScore, rank,
+// matchedField='importance'). `matchType` stays `'semantic'` to preserve the
+// existing Provenance union (`semantic | bm25 | exact | fused | status` —
+// memory/search.ts:61) without a cross-cutting type widening; `matchedField`
+// carries the honest rank signal so callers can distinguish importance-ordering
+// from cosine reranking.
 //
-// ADR-0181 Phase 4 wire-up: the handler reads through `ctx.substrate.vectorSearch`
-// against the RVF `agentdb_hierarchical_store` — the same store the
-// `agentdb_hierarchical_store` mutation persists tier records into. The substrate
-// returns HNSW-ranked hits over ALL tiers in one pass; the optional `tier`
-// payload filter is applied client-side over the returned metadata. This is
-// correct because RVF has no tier-partitioned index — a tier-scoped pre-filter
-// would require a separate per-tier vector index (out of scope for Phase 4).
+// ADR-0181 Phase 7 wire-up: the handler reads through `ctx.substrate.query` against
+// the SQLite carve-out `hierarchical_memory` table (the same table AgentDB's
+// `memory init` provisions and HierarchicalMemory.store writes into through
+// the SQLite-classified `agentdb_hierarchical_store` write storeId). The
+// `hierarchical_memory` schema (id TEXT, tier TEXT, content TEXT, importance
+// REAL, created_at INTEGER, metadata TEXT — no embedding column) means
+// importance is the canonical rank signal exposed to readers; semantic
+// reranking would require a sibling embedding table that does not exist in
+// the current schema. The cli's `HierarchicalMemory.recall` walks the same
+// importance-ordered cursor.
 //
 // Pre-existing CLI surface: `forks/ruflo/v3/@claude-flow/cli/src/mcp-tools/agentdb-tools.ts`
 // `agentdb_hierarchical-recall` handler (line 501) — delegates to the package-level
 // `hierarchicalRecall(...)` helper which calls `HierarchicalMemory.recall(...)`.
 //
 // Type-enforcement: `ctx.substrate` is read-only narrowing (`ReadContext`, no audit,
-// no guard). The `EmbeddingScorer` capability is required to vectorize the query —
-// its `requireEmbeddingScorer()` accessor fails loud if no factory was wired into
-// `ArchivistInitConfig` (`feedback-no-fallbacks`). Cache scope is `'global'`
-// because the hierarchical store spans tiers rather than namespacing per-call —
-// the tier filter is a payload field, not a cache partition.
+// no guard). Cache scope is `'global'` because the hierarchical store spans tiers
+// rather than namespacing per-call — the tier filter is a payload field, not a
+// cache partition.
 
 import { registerReadHandler, type GuardedRead, type ReadContext, type StoreId } from '../../index.js';
 import type { RankedResult, RankedResults } from '../memory/search.js';
@@ -40,7 +46,8 @@ export interface AgentdbHierarchicalRecallQuery {
  * Hierarchical-recall hit shape. Mirrors the underlying `hierarchicalRecall(...)`
  * helper's per-result shape (key + value + tier + score) so a dispatch-side flatten
  * back to legacy `{ results: [{ key, value, tier, score }] }` is a field-pick when
- * `includeProvenance: false`.
+ * `includeProvenance: false`. `score` here is the row's `importance` value
+ * (canonical rank signal — see file header).
  */
 export interface HierarchicalRecallHit {
   readonly key: string;
@@ -54,82 +61,74 @@ const DEFAULT_TOP_K = 5;
 const VALID_TIERS = new Set<HierarchicalRecallHit['tier']>(['working', 'episodic', 'semantic']);
 
 /**
- * Shape of the metadata each `agentdb_hierarchical_store` write persists per
- * tier-record vector. Mirrors the `HierarchicalMemory.store(value, importance,
- * tier, { metadata: { key } })` shape: `tier` discriminator + `key` + `value`
- * carried verbatim. `vectorSearch` returns the full `SearchResult` as `item`;
- * the handler reads metadata fields off the substrate's returned shape.
+ * Row shape from the SELECT against `hierarchical_memory`. `metadata` is the
+ * cli's stringified JSON envelope written by `HierarchicalMemory.store`
+ * (typically `{ key }` plus any caller-supplied keys); `content` is the
+ * stored value verbatim. `tier` is one of working/episodic/semantic but
+ * arrives as raw `string` from SQL — `resolveTier` validates it.
  */
-interface HierarchicalSearchItem {
+interface HierarchicalRow {
   readonly id: string;
-  readonly similarity: number;
-  readonly metadata?: {
-    readonly tier?: unknown;
-    readonly key?: unknown;
-    readonly value?: unknown;
-    readonly content?: unknown;
-    readonly [k: string]: unknown;
-  };
+  readonly content: string;
+  readonly importance: number;
+  readonly tier: string;
+  readonly created_at: number;
+  readonly metadata: string | null;
 }
 
 export const hierarchicalRecallHandler: GuardedRead<AgentdbHierarchicalRecallQuery, RankedResults<HierarchicalRecallHit>> =
   registerReadHandler<AgentdbHierarchicalRecallQuery, RankedResults<HierarchicalRecallHit>>(
     'agentdb_hierarchical_recall',
     async (ctx: ReadContext, payload: AgentdbHierarchicalRecallQuery): Promise<RankedResults<HierarchicalRecallHit>> => {
-      const embedder = ctx.capabilities.requireEmbeddingScorer();
-      const vector = await embedder.embed(payload.query);
       const topK = payload.topK ?? DEFAULT_TOP_K;
 
-      // Over-fetch when tier-filtering so the post-filter still has a chance of
-      // returning `topK` hits per the caller's contract. The RVF index is not
-      // tier-partitioned, so a per-tier pre-filter is impossible at the
-      // substrate layer (rvf-store.ts:138 — `vectorSearch` takes no filter
-      // knob); pulling `topK * 4` and trimming after the tier filter is the
-      // closest the read path can get to honouring topK under a tier predicate.
-      // Without tier filter this collapses to a single `topK` fetch.
-      //
-      // 4× is a heuristic, NOT a guarantee — short-return under tier filter is
-      // possible and matches the cli's `hierarchicalRecall` behavior
-      // (agentdb-orchestration.ts:316-319: cli filters the recall results
-      // client-side and returns short with no iteration). The principled
-      // alternative — paginate-until-topK-survivors-or-MAX_FETCH_K — is
-      // deferred to Phase 7 bench: if tier filtering proves common at large
-      // topK, swap the constant for a bounded paginate loop. Until then 4×
-      // preserves cli parity and a single substrate round-trip.
-      const fetchK = payload.tier ? Math.max(topK * 4, topK) : topK;
+      // Push the tier predicate down to SQL so the importance-ordered cursor
+      // returns at most `topK` rows already-filtered. With no tier filter we
+      // ask for `topK` rows and the rank-N hit IS the rank-N row.
+      const where = payload.tier ? 'WHERE tier = @tier' : '';
+      const params: Record<string, unknown> = { limit: topK };
+      if (payload.tier) params.tier = payload.tier;
 
-      const hits = await ctx.substrate.vectorSearch<HierarchicalSearchItem>({
+      const rows = await ctx.substrate.query<HierarchicalRow>({
         storeId: STORE_ID,
-        vector,
-        topK: fetchK,
+        predicate: {
+          sql: `
+            SELECT id, content, importance, tier, created_at, metadata
+            FROM hierarchical_memory
+            ${where}
+            ORDER BY importance DESC
+            LIMIT @limit
+          `,
+          params,
+        },
       });
 
       // Build the ranked array from scratch (substrate-semantic immutability):
       // every per-hit field is built into a new HierarchicalRecallHit so the
       // substrate's returned objects are not aliased into the response.
+      // Skip rows whose `tier` column failed validation (corrupt data) rather
+      // than passing a synthetic tier — `feedback-no-fallbacks`.
       const ranked: RankedResult<HierarchicalRecallHit>[] = [];
-      for (const hit of hits) {
-        if (ranked.length >= topK) break;
-        const tier = resolveTier(hit.item.metadata?.tier);
-        if (!tier) continue; // skip hits whose tier metadata is missing/invalid
-        if (payload.tier && tier !== payload.tier) continue;
-        const key = typeof hit.item.metadata?.key === 'string' ? hit.item.metadata.key : hit.item.id;
-        const value = resolveValue(hit.item.metadata);
+      for (const row of rows) {
+        const tier = resolveTier(row.tier);
+        if (!tier) continue;
+        const meta = parseMetadata(row.metadata, row.id);
+        const key = typeof meta?.key === 'string' ? meta.key : row.id;
         const item: HierarchicalRecallHit = {
           key,
-          value,
+          value: row.content,
           tier,
-          score: hit.score,
+          score: row.importance,
         };
         ranked.push({
           item,
-          score: hit.score,
+          score: row.importance,
           provenance: {
             storeId: `hierarchical:${tier}`,
             matchType: 'semantic',
-            rawScore: hit.score,
+            rawScore: row.importance,
             rank: ranked.length + 1,
-            matchedField: 'query',
+            matchedField: 'importance',
           },
         });
       }
@@ -146,15 +145,25 @@ function resolveTier(raw: unknown): HierarchicalRecallHit['tier'] | undefined {
 }
 
 /**
- * Hierarchical mutations may persist the record under `metadata.value` (legacy
- * shape) OR `metadata.content` (`HierarchicalMemory.store`'s positional
- * `content` parameter — agentdb-orchestration.ts:283). Read both; prefer
- * `value` because the cli `hierarchicalRecall(...)` flattens the response under
- * that key (agentdb-orchestration.ts:312-313).
+ * Parse the `metadata` BLOB-as-TEXT column produced by HierarchicalMemory.store.
+ * A malformed JSON envelope here means the writer contract diverged — fail
+ * loud (`feedback-no-fallbacks`) so the caller sees the schema violation
+ * instead of silently coercing to undefined and losing the `key` lookup.
  */
-function resolveValue(meta: HierarchicalSearchItem['metadata']): unknown {
-  if (!meta) return undefined;
-  if (meta.value !== undefined) return meta.value;
-  if (meta.content !== undefined) return meta.content;
-  return undefined;
+function parseMetadata(raw: string | null, rowId: string): Record<string, unknown> | undefined {
+  if (raw === null || raw === '') return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (err) {
+    throw new Error(
+      `archivist: agentdb_hierarchical_recall metadata for row '${rowId}' is not valid JSON: ${(err as Error).message}`,
+    );
+  }
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error(
+      `archivist: agentdb_hierarchical_recall metadata for row '${rowId}' must JSON-parse to an object`,
+    );
+  }
+  return parsed as Record<string, unknown>;
 }

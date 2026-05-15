@@ -1,51 +1,56 @@
 // charter: dispatch
-// Per-handler unit test for `agentdb_hierarchical_recall` (ADR-0181 Phase 4 W3).
+// Per-handler unit test for `agentdb_hierarchical_recall` (ADR-0181 Phase 7).
 //
-// Covers the two layers the un-stub wires:
-//   1. `ctx.capabilities.requireEmbeddingScorer().embed(query)` produces the
-//      query vector handed to `ctx.substrate.vectorSearch`.
-//   2. `ctx.substrate.vectorSearch({ storeId: 'agentdb_hierarchical_store', ... })`
-//      returns ranked hits; the handler projects each hit's metadata onto a
-//      `HierarchicalRecallHit` and synthesizes per-hit `RankedResult` provenance.
+// Covers the SQL-port contract:
+//   1. `ctx.substrate.query<HierarchicalRow>(...)` is invoked with the
+//      importance-ordered `SELECT ... FROM hierarchical_memory ORDER BY
+//      importance DESC LIMIT ?` SQL — tier predicate pushed into WHERE when
+//      the payload supplies it.
+//   2. Each returned row is projected onto a `HierarchicalRecallHit`
+//      (key from metadata.key with row.id fallback; value = row.content;
+//      score = importance) with sequential per-result `provenance.rank`.
+//   3. Tier values that are not one of working/episodic/semantic skip silently
+//      (corrupt-data tolerance — no synthetic tier passthrough).
+//   4. Malformed metadata JSON throws fail-loud (`feedback-no-fallbacks`).
 //
-// Plus the fail-loud contract: an unwired `EmbeddingScorer` throws at the
-// capability accessor — same shape as production behaves for an un-supplied
-// factory in `ArchivistInitConfig`.
+// The handler no longer depends on `ctx.capabilities.requireEmbeddingScorer()` —
+// the SQLite `hierarchical_memory` schema has no embedding column, so
+// importance is the canonical rank signal exposed to readers (see file header
+// of the handler module).
 
 import { describe, it, expect } from 'vitest';
 import { withTestReadContext } from '../../../../src/archivist/testing/index.js';
 import { hierarchicalRecallHandler } from '../../../../src/archivist/handlers/agentdb/hierarchical-recall.js';
-import type { EmbeddingScorer } from '../../../../src/archivist/capabilities.js';
 import type { StoreId, SubstrateAccess, SubstrateHandle } from '../../../../src/archivist/types.js';
 
-interface FakeHit {
+interface FakeRow {
   readonly id: string;
-  readonly similarity: number;
-  readonly metadata: Record<string, unknown>;
+  readonly content: string;
+  readonly importance: number;
+  readonly tier: string;
+  readonly created_at: number;
+  readonly metadata: string | null;
 }
 
-interface VectorSearchCall {
+interface QueryCall {
   readonly storeId: StoreId;
-  readonly vector: Float32Array;
-  readonly topK: number;
+  readonly sql: string;
+  readonly params: Record<string, unknown>;
 }
 
-function makeRvfReadFake(hits: ReadonlyArray<FakeHit>): {
+function makeSqlReadFake(rows: ReadonlyArray<FakeRow>): {
   access: SubstrateAccess;
-  calls: ReadonlyArray<VectorSearchCall>;
+  calls: ReadonlyArray<QueryCall>;
 } {
-  const calls: VectorSearchCall[] = [];
+  const calls: QueryCall[] = [];
   const handle: SubstrateHandle & {
-    vectorSearch: (scope: { storeId: StoreId; vector: Float32Array; topK: number }) => Promise<
-      ReadonlyArray<{ item: unknown; score: number }>
-    >;
-    query: (scope: { storeId: StoreId; predicate: unknown }) => Promise<ReadonlyArray<unknown>>;
+    query: (scope: { storeId: StoreId; predicate: { sql: string; params?: Record<string, unknown> } }) => Promise<ReadonlyArray<unknown>>;
   } = {
     async read<R>(): Promise<R | undefined> {
-      throw new Error('rvf read fake: handle.read is not supported');
+      throw new Error('sql read fake: handle.read is not supported');
     },
     async write(): Promise<void> {
-      throw new Error('rvf read fake: handle.write is not supported');
+      throw new Error('sql read fake: handle.write is not supported');
     },
     async withWrite<T>(
       _scope: { storeId: StoreId },
@@ -54,67 +59,53 @@ function makeRvfReadFake(hits: ReadonlyArray<FakeHit>): {
       return fn(handle);
     },
     async withBulkWrite(): Promise<void> {
-      throw new Error('rvf read fake: handle.withBulkWrite is not supported');
+      throw new Error('sql read fake: handle.withBulkWrite is not supported');
     },
-    async query(): Promise<ReadonlyArray<unknown>> {
-      throw new Error('rvf read fake: handle.query is not supported');
-    },
-    async vectorSearch(scope) {
-      calls.push({ storeId: scope.storeId, vector: scope.vector, topK: scope.topK });
-      return hits.map((h) => ({ item: h, score: h.similarity }));
+    async query(scope) {
+      calls.push({ storeId: scope.storeId, sql: scope.predicate.sql, params: scope.predicate.params ?? {} });
+      return rows;
     },
   };
   return { access: handle as unknown as SubstrateAccess, calls };
 }
 
-function makeEmbeddingScorerStub(vector: Float32Array): EmbeddingScorer & {
-  readonly embedCalls: ReadonlyArray<string>;
-} {
-  const embedCalls: string[] = [];
+function row(
+  id: string,
+  importance: number,
+  tier: string,
+  content: string,
+  metadata: Record<string, unknown> | null = null,
+): FakeRow {
   return {
-    async embed(text: string): Promise<Float32Array> {
-      embedCalls.push(text);
-      return vector;
-    },
-    cosineSimilarity(a, b): number {
-      if (a.length !== b.length) throw new Error('length mismatch');
-      let dot = 0;
-      for (let i = 0; i < a.length; i++) dot += a[i] * b[i];
-      return dot;
-    },
-    get embedCalls() {
-      return embedCalls;
-    },
+    id,
+    content,
+    importance,
+    tier,
+    created_at: 1_700_000_000,
+    metadata: metadata === null ? null : JSON.stringify(metadata),
   };
 }
 
-describe('agentdb_hierarchical_recall handler (ADR-0181 Phase 4 W3)', () => {
-  it('embeds the query, vector-searches agentdb_hierarchical_store, and projects ranked hits', async () => {
-    const queryVector = new Float32Array([0.1, 0.2, 0.3]);
-    const scorer = makeEmbeddingScorerStub(queryVector);
-    const { access, calls } = makeRvfReadFake([
-      {
-        id: 'hier-1',
-        similarity: 0.91,
-        metadata: { tier: 'semantic', key: 'plan/a', value: 'recall plan A' },
-      },
-      {
-        id: 'hier-2',
-        similarity: 0.74,
-        metadata: { tier: 'episodic', key: 'evt/2', value: { detail: 42 } },
-      },
+describe('agentdb_hierarchical_recall handler (ADR-0181 Phase 7 SQL port)', () => {
+  it('issues importance-ordered SELECT against hierarchical_memory and projects ranked hits', async () => {
+    const { access, calls } = makeSqlReadFake([
+      row('hier-1', 0.91, 'semantic', 'recall plan A', { key: 'plan/a' }),
+      row('hier-2', 0.74, 'episodic', 'event detail', { key: 'evt/2' }),
     ]);
 
     const { result } = await withTestReadContext(
       hierarchicalRecallHandler,
       { query: 'recall the plans', topK: 5 },
-      { substrate: access, embeddingScorer: scorer },
+      { substrate: access },
     );
 
-    expect(scorer.embedCalls).toEqual(['recall the plans']);
-    expect(calls).toEqual([
-      { storeId: 'agentdb_hierarchical_store', vector: queryVector, topK: 5 },
-    ]);
+    expect(calls).toHaveLength(1);
+    expect(calls[0].storeId).toBe('agentdb_hierarchical_store');
+    expect(calls[0].sql).toMatch(/FROM hierarchical_memory/);
+    expect(calls[0].sql).toMatch(/ORDER BY importance DESC/);
+    expect(calls[0].sql).toMatch(/LIMIT @limit/);
+    expect(calls[0].params).toEqual({ limit: 5 });
+
     expect(result).toHaveLength(2);
     expect(result[0]).toEqual({
       item: { key: 'plan/a', value: 'recall plan A', tier: 'semantic', score: 0.91 },
@@ -124,12 +115,12 @@ describe('agentdb_hierarchical_recall handler (ADR-0181 Phase 4 W3)', () => {
         matchType: 'semantic',
         rawScore: 0.91,
         rank: 1,
-        matchedField: 'query',
+        matchedField: 'importance',
       },
     });
     expect(result[1].item).toEqual({
       key: 'evt/2',
-      value: { detail: 42 },
+      value: 'event detail',
       tier: 'episodic',
       score: 0.74,
     });
@@ -137,42 +128,36 @@ describe('agentdb_hierarchical_recall handler (ADR-0181 Phase 4 W3)', () => {
     expect(result[1].provenance.storeId).toBe('hierarchical:episodic');
   });
 
-  it('filters by tier client-side and re-ranks remaining hits with sequential ranks', async () => {
-    const scorer = makeEmbeddingScorerStub(new Float32Array([1, 0]));
-    const { access, calls } = makeRvfReadFake([
-      { id: 'w1', similarity: 0.95, metadata: { tier: 'working', key: 'w1', value: 'w' } },
-      { id: 's1', similarity: 0.85, metadata: { tier: 'semantic', key: 's1', value: 's' } },
-      { id: 'e1', similarity: 0.80, metadata: { tier: 'episodic', key: 'e1', value: 'e' } },
-      { id: 's2', similarity: 0.70, metadata: { tier: 'semantic', key: 's2', value: 's2' } },
+  it('pushes the tier filter into the SQL WHERE clause and forwards the parameter', async () => {
+    const { access, calls } = makeSqlReadFake([
+      row('s1', 0.85, 'semantic', 's-content-1', { key: 's1' }),
+      row('s2', 0.70, 'semantic', 's-content-2', { key: 's2' }),
     ]);
 
     const { result } = await withTestReadContext(
       hierarchicalRecallHandler,
       { query: 'q', tier: 'semantic', topK: 5 },
-      { substrate: access, embeddingScorer: scorer },
+      { substrate: access },
     );
 
-    // Tier filter over-fetches via topK * 4 — assert the substrate call honoured it.
-    expect(calls[0].topK).toBe(20);
+    expect(calls).toHaveLength(1);
+    expect(calls[0].sql).toMatch(/WHERE tier = @tier/);
+    expect(calls[0].params).toEqual({ limit: 5, tier: 'semantic' });
+
     expect(result.map((r) => r.item.key)).toEqual(['s1', 's2']);
     expect(result.map((r) => r.provenance.rank)).toEqual([1, 2]);
     expect(result.every((r) => r.item.tier === 'semantic')).toBe(true);
   });
 
-  it('falls back to metadata.content when value is absent and uses substrate id when key is missing', async () => {
-    const scorer = makeEmbeddingScorerStub(new Float32Array([1]));
-    const { access } = makeRvfReadFake([
-      {
-        id: 'hier-only-content',
-        similarity: 0.5,
-        metadata: { tier: 'working', content: 'inline payload' },
-      },
+  it('uses row.id as the key when metadata.key is absent', async () => {
+    const { access } = makeSqlReadFake([
+      row('hier-only-content', 0.5, 'working', 'inline payload', null),
     ]);
 
     const { result } = await withTestReadContext(
       hierarchicalRecallHandler,
       { query: 'q' },
-      { substrate: access, embeddingScorer: scorer },
+      { substrate: access },
     );
 
     expect(result).toHaveLength(1);
@@ -184,18 +169,16 @@ describe('agentdb_hierarchical_recall handler (ADR-0181 Phase 4 W3)', () => {
     });
   });
 
-  it('skips hits whose tier metadata is missing or invalid (no silent passthrough)', async () => {
-    const scorer = makeEmbeddingScorerStub(new Float32Array([1]));
-    const { access } = makeRvfReadFake([
-      { id: 'no-tier', similarity: 0.9, metadata: { key: 'x', value: 'x' } },
-      { id: 'bad-tier', similarity: 0.8, metadata: { tier: 'archived', key: 'y', value: 'y' } },
-      { id: 'ok', similarity: 0.7, metadata: { tier: 'episodic', key: 'z', value: 'z' } },
+  it('skips rows whose tier value is not one of working/episodic/semantic', async () => {
+    const { access } = makeSqlReadFake([
+      row('bad-tier', 0.95, 'archived', 'x'),
+      row('ok', 0.7, 'episodic', 'z', { key: 'z' }),
     ]);
 
     const { result } = await withTestReadContext(
       hierarchicalRecallHandler,
       { query: 'q' },
-      { substrate: access, embeddingScorer: scorer },
+      { substrate: access },
     );
 
     expect(result).toHaveLength(1);
@@ -203,48 +186,55 @@ describe('agentdb_hierarchical_recall handler (ADR-0181 Phase 4 W3)', () => {
     expect(result[0].provenance.rank).toBe(1);
   });
 
-  it('caps the response at topK after tier filtering', async () => {
-    const scorer = makeEmbeddingScorerStub(new Float32Array([1]));
-    const { access } = makeRvfReadFake(
-      Array.from({ length: 8 }, (_, i) => ({
-        id: `s${i}`,
-        similarity: 1 - i * 0.05,
-        metadata: { tier: 'semantic' as const, key: `s${i}`, value: i },
-      })),
-    );
-
-    const { result } = await withTestReadContext(
-      hierarchicalRecallHandler,
-      { query: 'q', topK: 3 },
-      { substrate: access, embeddingScorer: scorer },
-    );
-
-    expect(result).toHaveLength(3);
-    expect(result.map((r) => r.item.key)).toEqual(['s0', 's1', 's2']);
-  });
-
-  it('throws fail-loud when the EmbeddingScorer capability is unwired', async () => {
-    const { access } = makeRvfReadFake([]);
+  it('throws fail-loud when metadata is not valid JSON (no synthetic fallback)', async () => {
+    const malformed: FakeRow = {
+      id: 'bad-meta',
+      content: 'x',
+      importance: 0.9,
+      tier: 'semantic',
+      created_at: 1,
+      metadata: '{not-json',
+    };
+    const { access } = makeSqlReadFake([malformed]);
 
     await expect(
-      withTestReadContext(
-        hierarchicalRecallHandler,
-        { query: 'unembedded' },
-        { substrate: access },
-      ),
-    ).rejects.toThrow(/EmbeddingScorer capability/i);
+      withTestReadContext(hierarchicalRecallHandler, { query: 'q' }, { substrate: access }),
+    ).rejects.toThrow(/agentdb_hierarchical_recall metadata for row 'bad-meta' is not valid JSON/);
   });
 
-  it('returns empty array when the substrate has no hits (no synthetic fallbacks)', async () => {
-    const scorer = makeEmbeddingScorerStub(new Float32Array([1]));
-    const { access } = makeRvfReadFake([]);
+  it('throws when metadata JSON-parses to a non-object (array / scalar)', async () => {
+    const wrongShape: FakeRow = {
+      id: 'array-meta',
+      content: 'x',
+      importance: 0.9,
+      tier: 'semantic',
+      created_at: 1,
+      metadata: '[1,2,3]',
+    };
+    const { access } = makeSqlReadFake([wrongShape]);
+
+    await expect(
+      withTestReadContext(hierarchicalRecallHandler, { query: 'q' }, { substrate: access }),
+    ).rejects.toThrow(/must JSON-parse to an object/);
+  });
+
+  it('returns empty array when the substrate has no rows', async () => {
+    const { access } = makeSqlReadFake([]);
 
     const { result } = await withTestReadContext(
       hierarchicalRecallHandler,
       { query: 'no matches' },
-      { substrate: access, embeddingScorer: scorer },
+      { substrate: access },
     );
 
     expect(result).toEqual([]);
+  });
+
+  it('defaults topK to 5 when payload omits it', async () => {
+    const { access, calls } = makeSqlReadFake([]);
+
+    await withTestReadContext(hierarchicalRecallHandler, { query: 'q' }, { substrate: access });
+
+    expect(calls[0].params).toEqual({ limit: 5 });
   });
 });

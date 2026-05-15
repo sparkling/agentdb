@@ -57,18 +57,25 @@ export type SubstrateFamily = 'rvf' | 'sqlite' | 'fs-json';
 //
 // Exact storeIds whose primary substrate is RVF. `memory_store` is the canonical
 // RVF content store; the agentdb_* entries are the vector/content write surfaces
-// (ReasoningBank patterns, ReflexionMemory episodes, SkillLibrary skills,
-// HierarchicalMemory tiers, SonaLearningBackend trajectories) plus the learner
-// write paths whose *episodic* persistence is RVF (the carve-out is the
-// GROUP-BY *aggregation* read, not the per-episode write — ADR-0166
-// Amendment 2026-05-11f).
+// whose persistence model is RVF + HNSW (ReasoningBank patterns,
+// SonaLearningBackend trajectories) plus the learner write paths whose
+// *episodic* persistence is RVF (the carve-out is the GROUP-BY *aggregation*
+// read, not the per-episode write — ADR-0166 Amendment 2026-05-11f).
+//
+// ADR-0181 Phase 7 correction: ReflexionMemory (`episodes` +
+// `episode_embeddings`), SkillLibrary (`skills` + `skill_embeddings`), and
+// HierarchicalMemory (`hierarchical_memory`) all persist into the SQLite
+// carve-out tables AgentDB's `memory init` schema creates — the read tools
+// (agentdb_reflexion_retrieve / agentdb_skill_search / agentdb_hierarchical_recall)
+// are already classified `sqlite` and SQL-port their re-embed + cosine path off
+// those tables. Routing the matching write storeIds to RVF would have
+// silently desynced reads from writes (write-to-RVF, read-from-SQLite — the
+// `episodes` table would stay empty even after successful writes). They live
+// alongside the read storeIds in `SQLITE_CARVE_OUT_STORE_IDS` below.
 
 const RVF_STORE_IDS: ReadonlySet<string> = new Set([
   'memory_store',
   'agentdb_pattern_store',
-  'agentdb_reflexion_store',
-  'agentdb_skill_create',
-  'agentdb_hierarchical_store',
   'agentdb_sona_trajectory_store',
   'agentdb_experience_record',
   'agentdb_route',
@@ -86,16 +93,24 @@ const RVF_STORE_IDS: ReadonlySet<string> = new Set([
 // moment the handler lands, not a phase later.
 //
 // Roster ↔ controller:
-//   agentdb_causal_recall      → CausalRecall                (Phase 6, LIVE)
-//   agentdb_causal_query       → CausalMemoryGraph reads      (Phase 6)
-//   agentdb_causal_edge        → CausalMemoryGraph writes     (Phase 9 inter-controller)
-//   agentdb_learner_run        → NightlyLearner.run()         (Phase 9 inter-controller)
-//   agentdb_learning_predict   → LearningSystem aggregations  (Phase 6)
-//   agentdb_pattern_search     → ReasoningBank GROUP-BY read  (Phase 6)
+//   agentdb_causal_recall        → CausalRecall                  (Phase 6, LIVE)
+//   agentdb_causal_query         → CausalMemoryGraph reads       (Phase 6)
+//   agentdb_causal_edge          → CausalMemoryGraph writes      (Phase 9 inter-controller)
+//   agentdb_learner_run          → NightlyLearner.run()          (Phase 9 inter-controller)
+//   agentdb_learning_predict     → LearningSystem aggregations   (Phase 6)
+//   agentdb_pattern_search       → ReasoningBank GROUP-BY read   (Phase 6)
+//   agentdb_reflexion_retrieve   → episodes ⨝ episode_embeddings (Phase 5, LIVE)
+//   agentdb_skill_search         → skills ⨝ skill_embeddings     (Phase 5, LIVE)
+//   agentdb_reflexion_store      → ReflexionMemory.storeEpisode  (Phase 7, LIVE)
+//   agentdb_skill_create         → SkillLibrary.createSkill      (Phase 7, LIVE)
+//   agentdb_hierarchical_store   → HierarchicalMemory.store      (Phase 7, LIVE)
 //
 // NOTE: `agentdb_pattern_search` (a GROUP-BY *read* over ReasoningBank) is
 // carve-out, while `agentdb_pattern_store` (a per-pattern *write*) is RVF —
-// this asymmetry is the ADR-0166 axis-separation, not a bug.
+// this asymmetry is the ADR-0166 axis-separation, not a bug. The
+// reflexion/skill/hierarchical READ+WRITE pair is in carve-out together
+// (per Phase 7) — those controllers' SQLite tables ARE the persistence model,
+// not a derived index, so the read and write must classify the same family.
 
 const SQLITE_CARVE_OUT_STORE_IDS: ReadonlySet<string> = new Set([
   'agentdb_causal_recall',
@@ -112,6 +127,18 @@ const SQLITE_CARVE_OUT_STORE_IDS: ReadonlySet<string> = new Set([
   // to fs-json which throws on .query() — runtime dispatch failure.
   'agentdb_reflexion_retrieve',
   'agentdb_skill_search',
+  // ADR-0181 Phase 7 fix: the matching WRITE storeIds for the reflexion +
+  // skill + hierarchical controllers. AgentDB's `memory init` provisions
+  // SQLite tables (`episodes`/`episode_embeddings`, `skills`/`skill_embeddings`,
+  // `hierarchical_memory`) and the cli's controllers (ReflexionMemory,
+  // SkillLibrary, HierarchicalMemory) own table-population through them. Read
+  // sibling handlers were already SQLite-classified above; routing the writers
+  // to RVF previously silently desynced (write-to-RVF, read-from-SQLite). The
+  // controllers expose write methods (storeEpisode / createSkill / store) that
+  // the dispatch path invokes through the SQLite-classified `withWrite` scope.
+  'agentdb_reflexion_store',
+  'agentdb_skill_create',
+  'agentdb_hierarchical_store',
 ]);
 
 // ── Classification ───────────────────────────────────────────────────────────

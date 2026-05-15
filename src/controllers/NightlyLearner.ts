@@ -26,6 +26,18 @@ import { SkillLibrary } from './SkillLibrary.js';
 import { EmbeddingService } from './EmbeddingService.js';
 import { AttentionService, type FlashAttentionConfig } from '../services/AttentionService.js';
 import type { MutationContext } from '../archivist/mutation-context.js';
+import type { StoreId } from '../archivist/types.js';
+
+// ADR-0181 Item 4 (2026-05-16) — substrate-seam storeIds for the F4-2
+// audit-chain wraps below. `agentdb_causal_edge` covers `causal_edges`
+// table writes (addCausalEdge + DELETE prune); `agentdb_causal_experiment`
+// covers `causal_experiments` writes (createExperiment INSERT +
+// calculateUplift UPDATE). Both classify as SQLite carve-out per
+// substrate-registry.ts, sharing the `ControllerRegistry.getAgentDB().database`
+// handle that `this.db` already references — so the withWrite envelope adds
+// audit enrolment without changing where bytes land.
+const STORE_CAUSAL_EDGE = 'agentdb_causal_edge' as StoreId;
+const STORE_CAUSAL_EXPERIMENT = 'agentdb_causal_experiment' as StoreId;
 
 export interface LearnerConfig {
   minSimilarity: number; // Min similarity to consider for causal edge (default: 0.7)
@@ -219,9 +231,20 @@ export class NightlyLearner {
    * Identifies patterns and relationships across episodes for causal edge discovery.
    *
    * @param sessionId - Session to consolidate (optional, processes all if not provided)
+   * @param _childCtx - ADR-0181 Item 4 forward-compatible audit-chain handle.
+   *   When supplied, each per-pair `addCausalEdge` write is wrapped in a
+   *   substrate-seam `withWrite` envelope so the discovered edges enrol
+   *   under the parent dispatch's audit subtree. Today no caller passes
+   *   one (cli `agentdb_learner_run` invokes `learner.run()` with no ctx,
+   *   and `routeSessionOp`'s `consolidate` branch is dead per task #88's
+   *   misnamed-method bug); the parameter exists so the contract is
+   *   recorded in code, activating the moment a caller mints a ctx.
    * @returns Number of edges discovered through consolidation
    */
-  async consolidateEpisodes(sessionId?: string): Promise<{
+  async consolidateEpisodes(
+    sessionId?: string,
+    _childCtx?: MutationContext,
+  ): Promise<{
     edgesDiscovered: number;
     episodesProcessed: number;
     metrics?: {
@@ -310,11 +333,11 @@ export class NightlyLearner {
           const uplift = episodes[idx].reward - episodes[i].reward;
 
           if (Math.abs(uplift) >= this.config.upliftThreshold) {
-            await this.causalGraph.addCausalEdge({
+            const edge = {
               fromMemoryId: episodes[i].id,
-              fromMemoryType: 'episode',
+              fromMemoryType: 'episode' as const,
               toMemoryId: episodes[idx].id,
-              toMemoryType: 'episode',
+              toMemoryType: 'episode' as const,
               similarity: score,
               uplift,
               confidence: score,
@@ -324,7 +347,24 @@ export class NightlyLearner {
                 consolidationMethod: 'flash_attention',
                 blockSize: this.config.flashConfig?.blockSize || 256,
               },
-            });
+            };
+
+            // ADR-0181 Item 4 substrate-seam wrap. `this.db` and the
+            // substrate's SQLite handle are the same `ControllerRegistry
+            // .getAgentDB().database` instance (controller-registry.ts:1599),
+            // so the withWrite envelope adds audit enrolment without
+            // changing where bytes land. Legacy direct path remains for
+            // ctx-less callers (today, all of them).
+            if (_childCtx) {
+              await _childCtx.substrate.withWrite(
+                { storeId: STORE_CAUSAL_EDGE },
+                async (_handle) => {
+                  await this.causalGraph.addCausalEdge(edge);
+                },
+              );
+            } else {
+              await this.causalGraph.addCausalEdge(edge);
+            }
 
             edgesDiscovered++;
           }
@@ -358,10 +398,19 @@ export class NightlyLearner {
   }
 
   private async discoverCausalEdges(_childCtx?: MutationContext): Promise<number> {
-    // TODO(F4-2): replace `this.causalGraph.addCausalEdge(edge)` below with a
-    // substrate-seam write routed through `_childCtx.substrate.withWrite(...)`
-    // (or the registered `addCausalEdge` GuardedWrite handler) so the audit
-    // chain records each discovered edge under the parent `causal` child.
+    // ADR-0181 Item 4 (2026-05-16) — F4-2 substrate-seam wrap landed.
+    // Per-pair `addCausalEdge` calls below now route through
+    // `_childCtx.substrate.withWrite({ storeId: STORE_CAUSAL_EDGE }, ...)`
+    // when the parent passes a ctx, so the audit chain records each
+    // discovered edge under the parent `causal` child. The substrate's
+    // SQLite handle and `this.db` reference the same
+    // `ControllerRegistry.getAgentDB().database` instance
+    // (controller-registry.ts:1599), so the wrap adds audit enrolment
+    // without changing where bytes land. The legacy direct path remains
+    // for the no-ctx case (cli `agentdb_learner_run` invokes
+    // `learner.run()` with no arg today, so every wrap below is dead
+    // code at the live entry point — the contract is recorded in code,
+    // activating the moment a caller mints a ctx).
     let discovered = 0;
 
     // Find episode pairs with high similarity and temporal sequence
@@ -432,7 +481,16 @@ export class NightlyLearner {
           }
         };
 
-        this.causalGraph.addCausalEdge(edge);
+        if (_childCtx) {
+          await _childCtx.substrate.withWrite(
+            { storeId: STORE_CAUSAL_EDGE },
+            async (_handle) => {
+              await this.causalGraph.addCausalEdge(edge);
+            },
+          );
+        } else {
+          await this.causalGraph.addCausalEdge(edge);
+        }
         discovered++;
       }
     }
@@ -510,10 +568,13 @@ export class NightlyLearner {
    * Complete running A/B experiments and calculate uplift
    */
   private async completeExperiments(_childCtx?: MutationContext): Promise<number> {
-    // TODO(F4-2): route `this.causalGraph.calculateUplift(exp.id)` through
-    // `_childCtx.substrate.withWrite(...)` (experiment-table update) once the
-    // GuardedWrite handler exists. Each completed experiment becomes a leaf
-    // entry under this child's audit subtree.
+    // ADR-0181 Item 4 (2026-05-16) — F4-2 substrate-seam wrap landed.
+    // `calculateUplift` UPDATEs `causal_experiments`, hence the
+    // `STORE_CAUSAL_EXPERIMENT` storeId (distinct from `STORE_CAUSAL_EDGE`
+    // so per-storeId invariants can target the experiments table
+    // separately even though both share the same SQLite handle). Wrap
+    // is per-experiment so a single failed uplift in a batch records as
+    // its own audit entry under the parent `experiment` child.
     // Better-sqlite3 best practice: Prepare statements OUTSIDE loops for better performance
     const runningExperiments = this.db.prepare(`
       SELECT id, start_time, sample_size
@@ -526,7 +587,16 @@ export class NightlyLearner {
 
     for (const exp of runningExperiments) {
       try {
-        this.causalGraph.calculateUplift(exp.id);
+        if (_childCtx) {
+          await _childCtx.substrate.withWrite(
+            { storeId: STORE_CAUSAL_EXPERIMENT },
+            async (_handle) => {
+              this.causalGraph.calculateUplift(exp.id);
+            },
+          );
+        } else {
+          this.causalGraph.calculateUplift(exp.id);
+        }
         completed++;
       } catch (error) {
         console.error(`   ⚠ Failed to calculate uplift for experiment ${exp.id}:`, error);
@@ -540,9 +610,10 @@ export class NightlyLearner {
    * Create new A/B experiments for promising hypotheses
    */
   private async createExperiments(_childCtx?: MutationContext): Promise<number> {
-    // TODO(F4-2): route `this.causalGraph.createExperiment(...)` through
-    // `_childCtx.substrate.withWrite(...)` so each new experiment row lands
-    // as a leaf entry under this child's audit subtree.
+    // ADR-0181 Item 4 (2026-05-16) — F4-2 substrate-seam wrap landed.
+    // `createExperiment` INSERTs `causal_experiments`, same storeId as
+    // `completeExperiments` above. Each new experiment row becomes a
+    // leaf entry under the parent `experiment` child's audit subtree.
     const currentExperiments = this.db.prepare(`
       SELECT COUNT(*) as count
       FROM causal_experiments
@@ -576,19 +647,30 @@ export class NightlyLearner {
     let created = 0;
 
     for (const candidate of candidates) {
-      const expId = this.causalGraph.createExperiment({
+      const experiment = {
         name: `Auto: ${candidate.treatment_task} Impact`,
         hypothesis: `${candidate.treatment_task} affects downstream outcomes`,
         treatmentId: candidate.treatment_id,
-        treatmentType: 'episode',
+        treatmentType: 'episode' as const,
         startTime: Date.now(),
         sampleSize: 0,
-        status: 'running',
+        status: 'running' as const,
         metadata: {
           autoGenerated: true,
           potentialOutcomes: candidate.potential_outcomes
         }
-      });
+      };
+
+      if (_childCtx) {
+        await _childCtx.substrate.withWrite(
+          { storeId: STORE_CAUSAL_EXPERIMENT },
+          async (_handle) => {
+            this.causalGraph.createExperiment(experiment);
+          },
+        );
+      } else {
+        this.causalGraph.createExperiment(experiment);
+      }
 
       created++;
     }
@@ -600,20 +682,32 @@ export class NightlyLearner {
    * Prune old or low-confidence edges
    */
   private async pruneEdges(_childCtx?: MutationContext): Promise<number> {
-    // TODO(F4-2): execute the `DELETE FROM causal_edges` below via
-    // `_childCtx.substrate.withWrite({ storeId: 'causal_edges' as StoreId }, ...)`
-    // so the bulk prune is recorded as a single audit entry under the parent's
+    // ADR-0181 Item 4 (2026-05-16) — F4-2 substrate-seam wrap landed.
+    // The bulk DELETE records as a single audit entry under the parent
     // `prune` child instead of bypassing the archivist seam.
     const maxAgeMs = this.config.edgeMaxAgeDays * 24 * 60 * 60 * 1000;
     const cutoffTime = Date.now() / 1000 - maxAgeMs / 1000;
 
-    const result = this.db.prepare(`
-      DELETE FROM causal_edges
-      WHERE confidence < ?
-        OR created_at < ?
-    `).run(this.config.confidenceThreshold, cutoffTime);
+    const exec = (): number => {
+      const result = this.db.prepare(`
+        DELETE FROM causal_edges
+        WHERE confidence < ?
+          OR created_at < ?
+      `).run(this.config.confidenceThreshold, cutoffTime);
+      return result.changes;
+    };
 
-    return result.changes;
+    if (_childCtx) {
+      let changes = 0;
+      await _childCtx.substrate.withWrite(
+        { storeId: STORE_CAUSAL_EDGE },
+        async (_handle) => {
+          changes = exec();
+        },
+      );
+      return changes;
+    }
+    return exec();
   }
 
   /**

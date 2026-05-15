@@ -96,6 +96,7 @@ const RVF_STORE_IDS: ReadonlySet<string> = new Set([
 //   agentdb_causal_recall        → CausalRecall                  (Phase 6, LIVE)
 //   agentdb_causal_query         → CausalMemoryGraph reads       (Phase 6)
 //   agentdb_causal_edge          → CausalMemoryGraph writes      (Phase 9 inter-controller)
+//   agentdb_causal_experiment    → CausalMemoryGraph A/B exps    (ADR-0181 Item 4 — NightlyLearner substrate-seam wrap)
 //   agentdb_learner_run          → NightlyLearner.run()          (Phase 9 inter-controller)
 //   agentdb_learning_predict     → LearningSystem aggregations   (Phase 6)
 //   agentdb_pattern_search       → ReasoningBank GROUP-BY read   (Phase 6)
@@ -116,6 +117,12 @@ const SQLITE_CARVE_OUT_STORE_IDS: ReadonlySet<string> = new Set([
   'agentdb_causal_recall',
   'agentdb_causal_query',
   'agentdb_causal_edge',
+  // ADR-0181 Item 4 (2026-05-16): `causal_experiments` UPDATE/INSERT writes
+  // from NightlyLearner.{completeExperiments,createExperiments}. Distinct
+  // storeId from `agentdb_causal_edge` so per-storeId invariants can target
+  // the experiments table separately from the edges table even though both
+  // share the same SQLite handle.
+  'agentdb_causal_experiment',
   'agentdb_learner_run',
   'agentdb_learning_predict',
   'agentdb_pattern_search',

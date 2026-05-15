@@ -59,6 +59,26 @@ export const storeMemoryHandler: GuardedWrite<MemoryStorePayload> =
   registerMutationHandler<MemoryStorePayload>(
     'memory_store',
     async (ctx: MutationContext<false>, payload: MemoryStorePayload): Promise<void> => {
+      const namespace = payload.namespace || 'default';
+      const id = `${namespace}:${payload.key}`;
+      const now = Date.now();
+
+      // Generate the real embedding via the cli-wired EmbeddingScorer
+      // capability (ADR-0069 unified model — Xenova/all-mpnet-base-v2,
+      // 768-dim). Without a real embedding, memory_search's vector query
+      // (also derived from text) would never match this insert and the
+      // entry would be retrievable by exact key but invisible to semantic
+      // search. `generateEmbedding: false` opts out for callers that only
+      // need key-anchored storage (mostly nothing — kept for parity with
+      // the cli wrapper's payload shape).
+      let embedding: Float32Array;
+      if (payload.generateEmbedding !== false && payload.content) {
+        const scorer = ctx.capabilities.requireEmbeddingScorer();
+        embedding = await scorer.embed(payload.content);
+      } else {
+        embedding = new Float32Array(768);
+      }
+
       await ctx.substrate.withWrite({ storeId: STORE_ID }, async (handle) => {
         const rvfHandle = handle as { rvf?: {
           insertAsync(id: string, embedding: Float32Array, metadata?: Record<string, unknown>): Promise<void>;
@@ -69,14 +89,6 @@ export const storeMemoryHandler: GuardedWrite<MemoryStorePayload> =
             'The cli must call `ensureRvfWired()` before dispatching to populate the substrate.',
           );
         }
-        const namespace = payload.namespace || 'default';
-        const id = `${namespace}:${payload.key}`;
-        const now = Date.now();
-        // Placeholder embedding — the cli's real embedding pipeline runs in
-        // `routeMemoryOp` (legacy path). When ReadCapabilities exposes an
-        // EmbeddingGenerator surface for dispatched writes, this zero-vector
-        // is replaced with `ctx.capabilities.embeddingScorer.generateEmbedding(content)`.
-        const embedding = new Float32Array(768);
         await rvfHandle.rvf.insertAsync(id, embedding, {
           namespace,
           key: payload.key,

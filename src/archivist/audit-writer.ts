@@ -29,6 +29,35 @@ export function setAuditLogPath(absolutePath: string): void {
   auditPath = absolutePath;
 }
 
+/**
+ * Test-only reset. Closes the audit fd (if open) and clears module-level
+ * state so a subsequent `setAuditLogPath()` + first write opens a fresh fd
+ * at the new path.
+ *
+ * Use case: unit tests that `chdir` into a fresh sandbox per test and
+ * therefore want each test's archivist audit chain to land in its own
+ * sandbox. Paired with cli's `__resetProcessArchivistForTests()`.
+ *
+ * NOT for production: closing the fd mid-process abandons any unfsync'd
+ * writes. The cli's mcp-server / daemon / hooks don't shift cwd within a
+ * single process, so this function should never be called from runtime
+ * paths.
+ */
+export async function __resetAuditWriterForTests(): Promise<void> {
+  if (fsyncTimer) {
+    clearTimeout(fsyncTimer);
+    fsyncTimer = null;
+  }
+  if (auditFd) {
+    try { await auditFd.close(); } catch { /* test cleanup — swallow */ }
+  }
+  auditFd = null;
+  auditFdNum = null;
+  currentSize = 0;
+  dirty = false;
+  auditPath = path.resolve(process.cwd(), DEFAULT_AUDIT_LOG);
+}
+
 export async function writeThroughEntry(entry: AuditEntry): Promise<void> {
   await ensureFdOpen();
   installSignalHandlersOnce();

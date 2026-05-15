@@ -163,7 +163,7 @@ export type { MultiFileTarget, MultiFileWriteResult } from './substrates/fs-json
 // log (ADR-0180 §15) land under different roots and the multi-process audit
 // chain fragments. `setAuditLogPath()` is the host-facing seam for that; it must
 // be called before the first dispatch (it throws once the audit fd is open).
-export { setAuditLogPath } from './audit-writer.js';
+export { setAuditLogPath, __resetAuditWriterForTests } from './audit-writer.js';
 
 /**
  * Construction-time wiring for `Archivist.initialize()` (ADR-0180 §Architecture

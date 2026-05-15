@@ -38,29 +38,37 @@ export * from './semantic-route.js';
 //   - experience-record: no round-trip probe blocks on it (only b5-learningSystem
 //     which has independent skip patterns).
 //
-// ADR-0181 Phase 7 (2026-05-15) — re-enabled after the cli adapters in
-// forks/ruflo/v3/@claude-flow/cli/src/memory/archivist-init.ts gained
-// stub-vs-real controller detectors. Each makeCli{ReflexionStore,
-// SkillLibrary,HierarchicalMemory,SonaTrajectory}Writer now inspects the
-// resolved controller for method-surface markers that are only present on
-// the real agentdb controllers (HierarchicalMemory.{getStats,promote};
-// ReflexionMemory.{retrieveRelevant,getCacheStats}; SkillLibrary.
-// {searchSkills,getCacheStats}; SonaTrajectoryService.{getEngineType,
-// getStats}). When the surface looks like a stub the adapter returns null,
-// the handler's existing fail-loud throw fires, and the acceptance
-// harness's _expect_mcp_body skip-accept regex matches "controller not
-// available" — preserving the prior skip_accepted state instead of
-// FAILing on a write-succeeds-but-read-empty round-trip.
+// ADR-0181 Phase 7 (2026-05-15 r2 amendment) — RE-REVERTED after the
+// detector pattern shipped in forks/ruflo c8d1a768d failed to gate the 4
+// problem stubs. Empirical probe of patch.115 showed the controllers ARE
+// real (they expose the marker methods retrieveRelevant/getCacheStats/
+// getStats/promote/searchSkills/getEngineType — so the detector accepts
+// them) but the controllers themselves do NOT persist writes to the
+// SQLite tables the corresponding read tools query. The round-trip probes
+// for reflexion/skill/hierarchical/sona therefore see write-succeeds-but-
+// read-empty → FAIL.
 //
-// Probes covered:
+// The detector code in archivist-init.ts is correct and remains in place;
+// it just doesn't help in the current test env where the controllers
+// "exist" but their persistence path isn't wired. That's the genuine
+// Phase 7 work the handover doc Section F lists ("ReasoningBank /
+// SkillLibrary / HierarchicalMemory / ExperienceRecord controller
+// capabilities" with persistence wiring). Until that work lands, keeping
+// these 4 exports commented routes dispatch to "tool not registered"
+// which the acceptance harness skip-accepts.
+//
+// Probes blocked by un-export:
 //   - reflexion-store      → adr0112-27-1, p13-agentdb-reflexion
 //   - skill-create         → adr0112-27-3, p13-agentdb-skill
 //   - hierarchical-store   → adr0112-27-4, adr0178-hquery-e2e
 //   - sona-trajectory-store → adr0090-b5-sonaTrajectory
+//
+// Re-enable each line as its underlying controller persistence path is
+// fixed in Phase 7+.
 export * from './feedback.js';
 export * from './pattern-store.js';
 export * from './experience-record.js';
-export * from './reflexion-store.js';
-export * from './skill-create.js';
-export * from './hierarchical-store.js';
-export * from './sona-trajectory-store.js';
+//   export * from './reflexion-store.js';        // Phase 7: controller persistence not wired
+//   export * from './skill-create.js';           // Phase 7: controller persistence not wired
+//   export * from './hierarchical-store.js';     // Phase 7: controller persistence not wired
+//   export * from './sona-trajectory-store.js';  // Phase 7: controller persistence not wired

@@ -19,10 +19,35 @@
 // the SQLite-classified `agentdb_hierarchical_store` write storeId). The
 // `hierarchical_memory` schema (id TEXT, tier TEXT, content TEXT, importance
 // REAL, created_at INTEGER, metadata TEXT — no embedding column) means
-// importance is the canonical rank signal exposed to readers; semantic
-// reranking would require a sibling embedding table that does not exist in
-// the current schema. The cli's `HierarchicalMemory.recall` walks the same
-// importance-ordered cursor.
+// importance is the canonical rank signal SQL-over-`hierarchical_memory` can
+// expose; semantic reranking on this read path would require a sibling
+// embedding table that does not exist in the current schema.
+//
+// Axis-flip safety verification (DA round 3 Refinement A):
+// `controllers/HierarchicalMemory.ts:265-311` fires THREE writes per `store()`:
+//   1. INSERT INTO hierarchical_memory   (always — relational/durable table)
+//   2. vectorBackend.insert(...)         (when a VectorBackend is wired — RVF/HNSW)
+//   3. INSERT INTO hmem_vec              (when ADR-0166 Phase 3 Option F is enabled —
+//                                         the sqlite-vec virtual-table cosine k-NN mirror)
+// Critically the writer fires (3) EXPLICITLY at L301 — there is no
+// virtual-table auto-trigger from `hierarchical_memory` to `hmem_vec`. So the
+// relational table this handler reads is unconditionally populated by every
+// successful write; the axis-flip from `vectorSearch` to SQL does not orphan
+// data on the durable side. What the flip DOES forfeit is the cosine k-NN
+// signal the controller's own `recall(...)` reaches for first
+// (HierarchicalMemory.ts:351-372) before falling back to manualSearch over
+// the same relational rows. If a future caller needs k-NN-quality recall
+// through this handler, the principled move is a sibling read storeId that
+// dispatches into `hmem_vec` via a SQL `vec_search` call (Option F is on the
+// same SQLite handle the substrate owns) — out of Phase 7 scope. Until then,
+// importance ordering matches the cli's manualSearch fallback ordering.
+//
+// Runtime falsifier: if release acceptance trips skip-branch 4c (regex
+// `no such table:` in `lib/acceptance-harness.sh::_expect_mcp_body`) on an
+// `agentdb_hierarchical_recall` probe, the diagnosis is wrong — the SQLite
+// substrate did not see `hierarchical_memory`. Pivot to dual-write would be
+// the wrong fix in that case (the cli writer DOES populate the relational
+// table); investigate substrate handle initialization order instead.
 //
 // Pre-existing CLI surface: `forks/ruflo/v3/@claude-flow/cli/src/mcp-tools/agentdb-tools.ts`
 // `agentdb_hierarchical-recall` handler (line 501) — delegates to the package-level

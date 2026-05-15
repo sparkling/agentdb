@@ -82,37 +82,20 @@ export const recordExperienceHandler: GuardedWrite<AgentdbExperienceRecordPayloa
       const success = payload.success ?? false;
       const writer = ctx.capabilities.requireLearningSystemWriter();
 
-      await ctx.substrate.withWrite({ storeId: STORE_ID }, async (handle) => {
+      await ctx.substrate.withWrite({ storeId: STORE_ID }, async (_handle) => {
         const result = await writer.recordExperience({ task, input, output, reward, success });
 
         if (result && result.success) return;
-        if (result && !result.success && result.error && !/not available|not wired|not initialized|missing.*method/i.test(result.error)) {
-          throw new Error(`archivist: agentdb_experience_record — LearningSystem rejected: ${result.error}`);
+        if (result && !result.success && result.error) {
+          // ADR-0082: surface controller errors loudly per TODO (L65-66:
+          // "Surface controller-unavailable / method-missing as explicit
+          // rejections (no silent fallback)").
+          throw new Error(`archivist: agentdb_experience_record — LearningSystem: ${result.error}`);
         }
-
-        // Fallback: controller unwired. RVF persistence ensures observability.
-        const scorer = ctx.capabilities.requireEmbeddingScorer();
-        const embedded = `${task}\n${input}\n${output}`;
-        const embedding = await scorer.embed(embedded);
-        const id = `experience-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-        const rvfHandle = handle as { rvf?: {
-          insertAsync(id: string, embedding: Float32Array, metadata?: Record<string, unknown>): Promise<void>;
-        } };
-        if (!rvfHandle.rvf || typeof rvfHandle.rvf.insertAsync !== 'function') {
-          throw new Error(
-            'archivist: agentdb_experience_record — RVF substrate handle missing `rvf.insertAsync`.',
-          );
-        }
-        await rvfHandle.rvf.insertAsync(id, embedding, {
-          namespace: 'experience',
-          task,
-          input,
-          output,
-          reward,
-          success,
-          tags: ['experience', 'learning', 'fallback'],
-          controller: 'memory-store-fallback',
-        });
+        throw new Error(
+          'archivist: agentdb_experience_record — LearningSystem controller not available in this process; ' +
+          'the `learning_experiences` SQLite table cannot be created without the controller. Silent RVF fallback is forbidden per TODO L65-66.',
+        );
       });
     },
     {

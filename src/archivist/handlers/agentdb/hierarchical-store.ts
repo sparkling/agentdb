@@ -67,7 +67,7 @@ export const storeHierarchicalHandler: GuardedWrite<AgentdbHierarchicalStorePayl
       const tier: 'working' | 'episodic' | 'semantic' = payload.tier ?? 'working';
       const writer = ctx.capabilities.requireHierarchicalMemoryWriter();
 
-      await ctx.substrate.withWrite({ storeId: STORE_ID }, async (handle) => {
+      await ctx.substrate.withWrite({ storeId: STORE_ID }, async (_handle) => {
         const result = await writer.storeHierarchical({
           key: payload.key,
           value: payload.value,
@@ -75,31 +75,18 @@ export const storeHierarchicalHandler: GuardedWrite<AgentdbHierarchicalStorePayl
         });
 
         if (result && result.success) return;
-        if (result && !result.success && result.error && !/not available|not wired|not initialized|missing.*method/i.test(result.error)) {
-          throw new Error(`archivist: agentdb_hierarchical_store — HierarchicalMemory rejected: ${result.error}`);
+        if (result && !result.success && result.error) {
+          // ADR-0082: surface controller errors loudly (TODO L56-57).
+          throw new Error(`archivist: agentdb_hierarchical_store — HierarchicalMemory: ${result.error}`);
         }
-
-        // Fallback: controller unwired. RVF persistence under namespace
-        // `'hierarchical:<tier>'` keeps the value retrievable.
-        const scorer = ctx.capabilities.requireEmbeddingScorer();
-        const embedding = await scorer.embed(payload.value);
-        const id = `hierarchical-${tier}-${payload.key}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-        const rvfHandle = handle as { rvf?: {
-          insertAsync(id: string, embedding: Float32Array, metadata?: Record<string, unknown>): Promise<void>;
-        } };
-        if (!rvfHandle.rvf || typeof rvfHandle.rvf.insertAsync !== 'function') {
-          throw new Error(
-            'archivist: agentdb_hierarchical_store — RVF substrate handle missing `rvf.insertAsync`.',
-          );
-        }
-        await rvfHandle.rvf.insertAsync(id, embedding, {
-          namespace: `hierarchical:${tier}`,
-          key: payload.key,
-          value: payload.value,
-          tier,
-          tags: ['hierarchical', tier, 'fallback'],
-          controller: 'memory-store-fallback',
-        });
+        // null result = controller not present. The read tool
+        // (agentdb_hierarchical-recall) reads through HierarchicalMemory.recall
+        // which queries the controller's own tables; RVF fallback would be
+        // invisible to that read path. Fail loud per the TODO directive.
+        throw new Error(
+          'archivist: agentdb_hierarchical_store — HierarchicalMemory controller not available in this process; ' +
+          'refusing silent RVF fallback since agentdb_hierarchical-recall reads through the controller.',
+        );
       });
     },
     {

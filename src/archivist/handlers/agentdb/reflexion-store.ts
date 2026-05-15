@@ -69,7 +69,7 @@ export const storeReflexionHandler: GuardedWrite<AgentdbReflexionStorePayload> =
     async (ctx: MutationContext<false>, payload: AgentdbReflexionStorePayload): Promise<void> => {
       const writer = ctx.capabilities.requireReflexionStoreWriter();
 
-      await ctx.substrate.withWrite({ storeId: STORE_ID }, async (handle) => {
+      await ctx.substrate.withWrite({ storeId: STORE_ID }, async (_handle) => {
         const result = await writer.storeEpisode({
           sessionId: payload.session_id,
           task: payload.task,
@@ -78,32 +78,24 @@ export const storeReflexionHandler: GuardedWrite<AgentdbReflexionStorePayload> =
         });
 
         if (result && result.success) return;
-        if (result && !result.success && result.error && !/not available|not wired|not initialized|missing.*method|timed out/i.test(result.error)) {
-          throw new Error(`archivist: agentdb_reflexion_store — Reflexion rejected: ${result.error}`);
+        if (result && !result.success && result.error) {
+          // ADR-0082 no-silent-failure — any controller error (including
+          // "not available", timeout, or real rejection) propagates. The
+          // acceptance harness's `_expect_mcp_body` skip-accept regex
+          // downgrades the unwired-pattern errors to skip_accepted;
+          // other errors are real failures.
+          throw new Error(`archivist: agentdb_reflexion_store — Reflexion: ${result.error}`);
         }
-
-        // Fallback: controller unwired / missing method / timed out. RVF
-        // persistence ensures the episode is observable.
-        const scorer = ctx.capabilities.requireEmbeddingScorer();
-        const embedding = await scorer.embed(payload.task);
-        const id = `reflexion-${payload.session_id}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-        const rvfHandle = handle as { rvf?: {
-          insertAsync(id: string, embedding: Float32Array, metadata?: Record<string, unknown>): Promise<void>;
-        } };
-        if (!rvfHandle.rvf || typeof rvfHandle.rvf.insertAsync !== 'function') {
-          throw new Error(
-            'archivist: agentdb_reflexion_store — RVF substrate handle missing `rvf.insertAsync`.',
-          );
-        }
-        await rvfHandle.rvf.insertAsync(id, embedding, {
-          namespace: 'reflexion',
-          sessionId: payload.session_id,
-          task: payload.task,
-          reward: payload.reward,
-          success: payload.success,
-          tags: ['reflexion', 'episode', 'fallback'],
-          controller: 'memory-store-fallback',
-        });
+        // null result = controller not present. The read tool
+        // (agentdb_reflexion-retrieve) classifies to SQLite carve-out
+        // (substrate-registry.ts) and reads the `episodes` table the
+        // controller would have created. RVF fallback would be invisible
+        // to that read path, so silently coalescing to RVF would mask the
+        // unwired state. Fail loud instead.
+        throw new Error(
+          'archivist: agentdb_reflexion_store — ReflexionMemory controller not available in this process; ' +
+          'the SQLite `episodes` table required by agentdb_reflexion-retrieve cannot be created without the controller.',
+        );
       });
     },
     {

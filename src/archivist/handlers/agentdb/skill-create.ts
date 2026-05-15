@@ -72,38 +72,26 @@ export const createSkillHandler: GuardedWrite<AgentdbSkillCreatePayload> =
       const successRate = payload.success_rate ?? 0.5;
       const writer = ctx.capabilities.requireSkillLibraryWriter();
 
-      await ctx.substrate.withWrite({ storeId: STORE_ID }, async (handle) => {
+      await ctx.substrate.withWrite({ storeId: STORE_ID }, async (_handle) => {
         const result = await writer.createSkill({ name, description, code, successRate });
 
         if (result && result.success) return;
-        if (result && !result.success && result.error && !/not available|not wired|not initialized|missing.*method/i.test(result.error)) {
-          throw new Error(`archivist: agentdb_skill_create — SkillLibrary rejected: ${result.error}`);
+        if (result && !result.success && result.error) {
+          // Whether the error indicates unwired or a real rejection, surface
+          // as a throw per ADR-0082 no-silent-failure (stub TODO L57:
+          // "surface SkillLibrary controller not available as an explicit
+          // rejection (cli line 1680)"). The acceptance harness's
+          // `_expect_mcp_body` skip-accept regex matches "not available /
+          // not wired / missing method" and downgrades to skip_accepted;
+          // any other error is a real failure.
+          throw new Error(`archivist: agentdb_skill_create — SkillLibrary: ${result.error}`);
         }
-
-        // Fallback: controller unwired or missing methods. Write to RVF so
-        // the skill remains observable through memory_search.
-        const scorer = ctx.capabilities.requireEmbeddingScorer();
-        const indexed = `${name}\n${description}\n${code}`;
-        const embedding = await scorer.embed(indexed);
-        const id = `skill-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-        const rvfHandle = handle as { rvf?: {
-          insertAsync(id: string, embedding: Float32Array, metadata?: Record<string, unknown>): Promise<void>;
-        } };
-        if (!rvfHandle.rvf || typeof rvfHandle.rvf.insertAsync !== 'function') {
-          throw new Error(
-            'archivist: agentdb_skill_create — RVF substrate handle missing `rvf.insertAsync`. ' +
-            'The cli must call `ensureRvfWired()` before dispatching skill-create fallback writes.',
-          );
-        }
-        await rvfHandle.rvf.insertAsync(id, embedding, {
-          namespace: 'skill',
-          name,
-          description,
-          code,
-          successRate,
-          tags: ['skill', 'fallback'],
-          controller: 'memory-store-fallback',
-        });
+        // null result = controller not present in this process. Fail loud.
+        throw new Error(
+          'archivist: agentdb_skill_create — SkillLibrary controller not available in this process; ' +
+          'a SQLite-backed write path requires the controller to own table creation. ' +
+          'Refusing to silently write to RVF since the read tool (agentdb_skill_search) consults SQLite.',
+        );
       });
     },
     {

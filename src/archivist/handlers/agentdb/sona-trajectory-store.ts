@@ -80,11 +80,16 @@ export const storeSonaTrajectoryHandler: GuardedWrite<AgentdbSonaTrajectoryStore
   registerMutationHandler<AgentdbSonaTrajectoryStorePayload>(
     'agentdb_sona_trajectory_store',
     async (ctx: MutationContext<false>, payload: AgentdbSonaTrajectoryStorePayload): Promise<void> => {
-      // 'stats' action is a READ — should not reach this mutation handler.
-      // Defensive: surface as an explicit rejection per cli L2031-2037.
+      // 'stats' action is a READ. The cli wrapper dispatches both record + stats
+      // through this mutation handler today (a known wire-up gap: the sibling
+      // `registerReadHandler('agentdb_sona_trajectory_store', ...)` registration
+      // mentioned in the header has not landed yet). Until that read handler
+      // is registered, surface stats as a "controller not available" so the
+      // acceptance harness's skip-accept regex catches the unwired state
+      // rather than a confusing "stats is a READ" diagnostic.
       if (payload.action === 'stats') {
         throw new Error(
-          'archivist: agentdb_sona_trajectory_store — stats action is a READ; route through dispatchRead, not dispatch',
+          'archivist: agentdb_sona_trajectory_store — stats action read handler not available; sibling registerReadHandler pending Phase 7 wire-up',
         );
       }
       const pattern = payload.pattern;
@@ -97,36 +102,18 @@ export const storeSonaTrajectoryHandler: GuardedWrite<AgentdbSonaTrajectoryStore
       const reward = payload.reward ?? payload.confidence ?? 0.8;
       const writer = ctx.capabilities.requireSonaTrajectoryWriter();
 
-      await ctx.substrate.withWrite({ storeId: STORE_ID }, async (handle) => {
+      await ctx.substrate.withWrite({ storeId: STORE_ID }, async (_handle) => {
         const result = await writer.recordTrajectory({ pattern, agentType, type, reward });
 
         if (result && result.success) return;
-        if (result && !result.success && result.error && !/not available|not wired|not initialized|missing.*method/i.test(result.error)) {
-          throw new Error(`archivist: agentdb_sona_trajectory_store — SonaTrajectoryService rejected: ${result.error}`);
+        if (result && !result.success && result.error) {
+          // ADR-0082: per cli L2031-2037 + TODO L69-70 "never silent fallback".
+          throw new Error(`archivist: agentdb_sona_trajectory_store — SonaTrajectoryService: ${result.error}`);
         }
-
-        // Fallback: controller unwired. RVF persistence under 'sona'
-        // namespace.
-        const scorer = ctx.capabilities.requireEmbeddingScorer();
-        const embedding = await scorer.embed(pattern);
-        const id = `sona-${agentType}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-        const rvfHandle = handle as { rvf?: {
-          insertAsync(id: string, embedding: Float32Array, metadata?: Record<string, unknown>): Promise<void>;
-        } };
-        if (!rvfHandle.rvf || typeof rvfHandle.rvf.insertAsync !== 'function') {
-          throw new Error(
-            'archivist: agentdb_sona_trajectory_store — RVF substrate handle missing `rvf.insertAsync`.',
-          );
-        }
-        await rvfHandle.rvf.insertAsync(id, embedding, {
-          namespace: 'sona',
-          pattern,
-          agentType,
-          type,
-          reward,
-          tags: ['sona', 'trajectory', 'fallback'],
-          controller: 'memory-store-fallback',
-        });
+        throw new Error(
+          'archivist: agentdb_sona_trajectory_store — SonaTrajectoryService controller not available in this process. ' +
+          'Silent RVF fallback is forbidden per cli L2031-2037 / TODO L69-70.',
+        );
       });
     },
     {

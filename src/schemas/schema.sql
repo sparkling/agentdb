@@ -374,6 +374,70 @@ BEGIN
 END;
 
 -- ============================================================================
+-- LearningSystem (ADR-0181 Item 5 — pglite → SQLite reversal of ADR-0170 B.6)
+-- ============================================================================
+-- Reinforcement-learning session lifecycle, policy versions, and per-state
+-- embeddings. Originally added in PostgresBackend (ADR-0170 Phase B.6); the
+-- pglite substrate was retired by ADR-0177 (RVF-first single-node fork). This
+-- block ports the four tables to SQLite so LearningSystem becomes a Tier-1
+-- AgentDB controller alongside ReflexionMemory / SkillLibrary / NightlyLearner
+-- — all already on better-sqlite3.
+
+CREATE TABLE IF NOT EXISTS learning_sessions (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  session_type TEXT NOT NULL,
+  config TEXT NOT NULL,
+  start_time INTEGER NOT NULL,
+  end_time INTEGER,
+  status TEXT NOT NULL,
+  metadata TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_learning_sessions_user ON learning_sessions(user_id);
+CREATE INDEX IF NOT EXISTS idx_learning_sessions_status ON learning_sessions(status);
+
+CREATE TABLE IF NOT EXISTS learning_experiences (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  session_id TEXT NOT NULL,
+  state TEXT NOT NULL,
+  action TEXT NOT NULL,
+  reward REAL NOT NULL,
+  next_state TEXT,
+  success INTEGER NOT NULL,
+  timestamp INTEGER NOT NULL,
+  metadata TEXT,
+  FOREIGN KEY(session_id) REFERENCES learning_sessions(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_learning_experiences_session ON learning_experiences(session_id);
+CREATE INDEX IF NOT EXISTS idx_learning_experiences_reward ON learning_experiences(reward);
+
+CREATE TABLE IF NOT EXISTS learning_policies (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  session_id TEXT NOT NULL,
+  state_action_pairs TEXT NOT NULL,
+  q_values TEXT NOT NULL,
+  visit_counts TEXT NOT NULL,
+  avg_rewards TEXT NOT NULL,
+  version INTEGER NOT NULL,
+  created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
+  FOREIGN KEY(session_id) REFERENCES learning_sessions(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_learning_policies_session ON learning_policies(session_id);
+
+CREATE TABLE IF NOT EXISTS learning_state_embeddings (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  session_id TEXT NOT NULL,
+  state TEXT NOT NULL,
+  embedding BLOB NOT NULL,
+  FOREIGN KEY(session_id) REFERENCES learning_sessions(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_learning_state_embeddings_session ON learning_state_embeddings(session_id);
+
+-- ============================================================================
 -- Initialization Complete
 -- ============================================================================
 -- Schema version: 1.0.0

@@ -38,21 +38,29 @@ export * from './semantic-route.js';
 //   - experience-record: no round-trip probe blocks on it (only b5-learningSystem
 //     which has independent skip patterns).
 //
-// HANDLERS PRESENT BUT UN-EXPORTED (stub controllers in test env succeed
-// without persisting to SQLite; the round-trip probes read SQLite which
-// stays empty → FAIL). These handlers' bodies are ready; they'll re-enable
-// once Phase 7 wires real controllers (or a controller-stub detector
-// returns null so my fail-loud throw fires):
-//   - reflexion-store      blocks: adr0112-27-1, p13-agentdb-reflexion
-//   - skill-create         blocks: adr0112-27-3, p13-agentdb-skill
-//   - hierarchical-store   blocks: adr0112-27-4, adr0178-hquery-e2e
-//   - sona-trajectory-store blocks: adr0090-b5-sonaTrajectory
-// Re-enable by uncommenting each line below as Phase 7 capability wiring
-// matures.
+// ADR-0181 Phase 7 (2026-05-15) — re-enabled after the cli adapters in
+// forks/ruflo/v3/@claude-flow/cli/src/memory/archivist-init.ts gained
+// stub-vs-real controller detectors. Each makeCli{ReflexionStore,
+// SkillLibrary,HierarchicalMemory,SonaTrajectory}Writer now inspects the
+// resolved controller for method-surface markers that are only present on
+// the real agentdb controllers (HierarchicalMemory.{getStats,promote};
+// ReflexionMemory.{retrieveRelevant,getCacheStats}; SkillLibrary.
+// {searchSkills,getCacheStats}; SonaTrajectoryService.{getEngineType,
+// getStats}). When the surface looks like a stub the adapter returns null,
+// the handler's existing fail-loud throw fires, and the acceptance
+// harness's _expect_mcp_body skip-accept regex matches "controller not
+// available" — preserving the prior skip_accepted state instead of
+// FAILing on a write-succeeds-but-read-empty round-trip.
+//
+// Probes covered:
+//   - reflexion-store      → adr0112-27-1, p13-agentdb-reflexion
+//   - skill-create         → adr0112-27-3, p13-agentdb-skill
+//   - hierarchical-store   → adr0112-27-4, adr0178-hquery-e2e
+//   - sona-trajectory-store → adr0090-b5-sonaTrajectory
 export * from './feedback.js';
 export * from './pattern-store.js';
 export * from './experience-record.js';
-//   export * from './reflexion-store.js';        // Phase 7: stub controller false-positive
-//   export * from './skill-create.js';           // Phase 7: stub controller false-positive
-//   export * from './hierarchical-store.js';     // Phase 7: stub controller false-positive
-//   export * from './sona-trajectory-store.js';  // Phase 7: stub controller false-positive
+export * from './reflexion-store.js';
+export * from './skill-create.js';
+export * from './hierarchical-store.js';
+export * from './sona-trajectory-store.js';

@@ -315,13 +315,53 @@ export function makeFsJsonSubstrate<S>(opts: MakeFsJsonSubstrateOpts<S>): Substr
   // matches the in-memory FS-JSON fixture at `archivist/testing/fs-json-substrate-fixture.ts`
   // so a swap of fixture-for-production keeps handler tests passing
   // (substrate-genericity.test.ts contract).
+  // ADR-0181 Phase 6 — 'root' key is whole-document
+  //
+  // Every hive-mind/swarm/task/agent/claim/workflow handler in
+  // `archivist/handlers/**` writes its top-level state under `key: 'root'`
+  // (the convention established by `COORD_STORE_KEY = 'root'` in
+  // `handlers/coordination/shared.ts` and mirrored across families).
+  // Wrapping that state under a `{root: ...}` object adds a level of
+  // indirection that breaks every cli reader doing
+  // `JSON.parse(readFileSync(<store>)).agents` etc. To restore parity
+  // with the cli's flat-file convention, treat `'root'` as
+  // whole-document: read returns the entire doc; write replaces the
+  // entire doc. Other keys (none exist as of 2026-05-15, but future
+  // multi-keyed FS-JSON consumers stay accommodated) still address
+  // top-level fields via `setField`.
+  //
+  // This is NOT a silent fallback (feedback-no-fallbacks) — it's the
+  // intentional convention: every existing handler ASKED for the whole
+  // doc by passing `key: 'root'`. The wrapping was an implementation
+  // artifact that the original 'root' convention was working around.
   const getField = (doc: unknown, key: string): unknown => {
     if (doc === undefined || doc === null) return undefined;
     if (typeof doc !== 'object') return undefined;
+    if (key === 'root') {
+      const asRecord = doc as Record<string, unknown>;
+      // Back-compat: legacy docs that landed under `.root` (pre-this-patch
+      // writes; the cli's `loadHiveState`/`loadAgentStore` unwrap path).
+      // Prefer the wrapped value if present; otherwise return the whole doc.
+      const rootField = asRecord.root;
+      if (rootField !== undefined && rootField !== null && typeof rootField === 'object') {
+        return rootField;
+      }
+      return doc;
+    }
     return (doc as Record<string, unknown>)[key];
   };
 
   const setField = (doc: unknown, key: string, value: unknown): Record<string, unknown> => {
+    if (key === 'root') {
+      // Whole-document write. If the existing doc has a `.root` field
+      // (legacy wrapped shape from pre-this-patch writes), prefer the
+      // unwrapped overlay so a subsequent read sees the new state at
+      // top level. Otherwise just write the payload as the whole doc.
+      const base = (value && typeof value === 'object')
+        ? (value as Record<string, unknown>)
+        : ({} as Record<string, unknown>);
+      return base;
+    }
     const base = (doc && typeof doc === 'object')
       ? (doc as Record<string, unknown>)
       : ({} as Record<string, unknown>);

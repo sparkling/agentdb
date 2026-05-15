@@ -160,6 +160,34 @@ export interface IMemoryRvfBackend {
   delete(id: string): Promise<boolean>;
   getStats(): Promise<MemoryBackendStatsShape>;
   getStoredDimension(): Promise<number>;
+  /**
+   * ADR-0181 §C — memory_store RC-2 idempotency probe. The cli's `RvfBackend`
+   * exposes `getByKey(namespace, key)` (rvf-backend.ts:526) over its in-memory
+   * `keyIndex` Map — O(1) lookup, no embedding cost. The archivist's
+   * `memory_store` handler uses this to detect (key, value) collisions before
+   * insert: same-value → no-op, different-value → throw "duplicate key" (when
+   * `upsert:false`), or fall through to insert when nothing exists.
+   *
+   * Returns the existing entry or `null`. The handler reads `.content` /
+   * `.id` only; declaring the full `MemoryEntryShape` keeps the structural
+   * contract honest with the cli's published shape.
+   */
+  getByKey(namespace: string, key: string): Promise<MemoryEntryShape | null>;
+  /**
+   * ADR-0181 §C — memory_store RC-2 idempotency `upsert:true` path. Replaces
+   * the existing entry's content/tags/metadata in place; preserves id so the
+   * vector index keeps its label mapping. Mirrors the cli's `routeMemoryOp
+   * ('store')` upsert path (memory-router.ts:1052-1056).
+   */
+  update(
+    id: string,
+    update: {
+      readonly content?: string;
+      readonly tags?: readonly string[];
+      readonly metadata?: Record<string, unknown>;
+      readonly embedding?: Float32Array;
+    },
+  ): Promise<MemoryEntryShape | null>;
 }
 
 // ─── Adapter config + errors ───
@@ -303,6 +331,36 @@ export class MemoryRvfAdapter implements VectorBackendAsync {
 
   async removeAsync(id: string): Promise<boolean> {
     return this.memory.delete(id);
+  }
+
+  /**
+   * ADR-0181 §C — memory_store RC-2 idempotency probe. Surfaces the cli
+   * `RvfBackend.getByKey` over the adapter so the archivist's memory_store
+   * handler can detect duplicate-key writes without searching the vector
+   * index. Returns the underlying `MemoryEntryShape` (handler reads
+   * `.content` / `.id` only).
+   */
+  async getByKeyAsync(namespace: string, key: string): Promise<MemoryEntryShape | null> {
+    return this.memory.getByKey(namespace, key);
+  }
+
+  /**
+   * ADR-0181 §C — memory_store RC-2 `upsert:true` path. Updates content/tags/
+   * metadata in place; preserves id so the HNSW label mapping is stable.
+   * Returns the updated entry, or `null` if the id was not found (the handler
+   * only calls this after a successful `getByKeyAsync`, so `null` here is a
+   * race the substrate's audit guard would already surface).
+   */
+  async updateAsync(
+    id: string,
+    update: {
+      readonly content?: string;
+      readonly tags?: readonly string[];
+      readonly metadata?: Record<string, unknown>;
+      readonly embedding?: Float32Array;
+    },
+  ): Promise<MemoryEntryShape | null> {
+    return this.memory.update(id, update);
   }
 
   async getStatsAsync(): Promise<VectorStats> {

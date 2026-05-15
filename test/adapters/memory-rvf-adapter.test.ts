@@ -89,6 +89,35 @@ function makeStubBackend(dimension: number): IMemoryRvfBackend & {
     async getStoredDimension(): Promise<number> {
       return storedDimension;
     },
+    async getByKey(namespace: string, key: string): Promise<MemoryEntryShape | null> {
+      for (const entry of entries.values()) {
+        if (entry.namespace === namespace && entry.key === key) return entry;
+      }
+      return null;
+    },
+    async update(
+      id: string,
+      update: {
+        readonly content?: string;
+        readonly tags?: readonly string[];
+        readonly metadata?: Record<string, unknown>;
+        readonly embedding?: Float32Array;
+      },
+    ): Promise<MemoryEntryShape | null> {
+      const existing = entries.get(id);
+      if (!existing) return null;
+      const updated: MemoryEntryShape = {
+        ...existing,
+        content: update.content ?? existing.content,
+        tags: update.tags ?? existing.tags,
+        metadata: update.metadata ?? existing.metadata,
+        embedding: update.embedding ?? existing.embedding,
+        updatedAt: Date.now(),
+        version: existing.version + 1,
+      };
+      entries.set(id, updated);
+      return updated;
+    },
   };
 }
 

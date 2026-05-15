@@ -25,6 +25,14 @@ export interface TaskCreatePayload {
   readonly priority?: TaskRecord['priority'];
   readonly assignTo?: ReadonlyArray<string>;
   readonly tags?: ReadonlyArray<string>;
+  // Caller-supplied taskId. When present, the handler honours it instead of
+  // minting one. Lets the cli pre-compute the id so its envelope-shaper can
+  // look up the record by id rather than diffing pre/post snapshots — the
+  // diff is racy under parallel test execution (cap=12) where the FS-JSON
+  // O_EXCL lock serializes writes but the pre-snapshot may already see a
+  // sibling create's row. Non-cli callers can still omit and let the
+  // handler mint, so the change is back-compat.
+  readonly taskId?: string;
 }
 
 const STORE_ID = 'tasks' as StoreId;
@@ -42,7 +50,7 @@ export const taskCreateHandler: GuardedWrite<TaskCreatePayload> =
         const current = await handle.read<TaskStore>({ storeId: STORE_ID, key: 'root' });
         const store: TaskStore = current ?? { tasks: {}, version: '3.0.0' };
 
-        const taskId = `task-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+        const taskId = payload.taskId ?? `task-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
         const task: TaskRecord = {
           taskId,
           type: payload.type,

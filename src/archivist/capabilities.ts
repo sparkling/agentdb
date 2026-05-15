@@ -514,6 +514,8 @@ export interface CapabilityFactories {
   readonly sonaTrajectoryWriterFactory?: () => SonaTrajectoryWriter;
   /** Lazy `FeedbackRecorder` — adapts the cli `recordFeedback(...)` path. */
   readonly feedbackRecorderFactory?: () => FeedbackRecorder;
+  /** Lazy `CausalGraphWriter` — adapts the cli `recordCausalEdge(...)` path. */
+  readonly causalGraphWriterFactory?: () => CausalGraphWriter;
   /** Lazy `GNNTelemetryReader` — adapts the cli `getController('gnnService')` telemetry surface. */
   readonly gnnTelemetryReaderFactory?: () => GNNTelemetryReader;
   /** Lazy `SemanticRouteReader` — adapts the cli `getController('semanticRouter').route(...)` path. */
@@ -538,6 +540,7 @@ export function makeMutationCapabilities(resolved: {
   readonly learningSystemWriter?: LearningSystemWriter;
   readonly sonaTrajectoryWriter?: SonaTrajectoryWriter;
   readonly feedbackRecorder?: FeedbackRecorder;
+  readonly causalGraphWriter?: CausalGraphWriter;
 }): MutationCapabilities {
   return {
     taskRouter: resolved.taskRouter,
@@ -549,6 +552,7 @@ export function makeMutationCapabilities(resolved: {
     learningSystemWriter: resolved.learningSystemWriter,
     sonaTrajectoryWriter: resolved.sonaTrajectoryWriter,
     feedbackRecorder: resolved.feedbackRecorder,
+    causalGraphWriter: resolved.causalGraphWriter,
     requireTaskRouter(): TaskRouter {
       if (!resolved.taskRouter) {
         throw new Error(
@@ -629,6 +633,15 @@ export function makeMutationCapabilities(resolved: {
         );
       }
       return resolved.feedbackRecorder;
+    },
+    requireCausalGraphWriter(): CausalGraphWriter {
+      if (!resolved.causalGraphWriter) {
+        throw new Error(
+          'archivist: this handler needs the CausalGraphWriter capability, but no causalGraphWriterFactory ' +
+            'was supplied to initialize() — pass { causalGraphWriterFactory } in ArchivistInitConfig',
+        );
+      }
+      return resolved.causalGraphWriter;
     },
   };
 }

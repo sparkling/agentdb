@@ -31,6 +31,7 @@ import { createReadContext } from './read-context.js';
 import {
   makeMutationCapabilities,
   makeReadCapabilities,
+  type CausalGraphWriter,
   type EmbeddingScorer,
   type FeedbackRecorder,
   type GNNTelemetryReader,
@@ -109,6 +110,8 @@ export type {
 // re-exported — the type-enforcement boundary lets a handler see only the narrow
 // capability, never the backend object (see `capabilities.ts`).
 export type {
+  CausalGraphWriter,
+  CausalGraphWriteResult,
   EmbeddingScorer,
   FeedbackRecorder,
   FeedbackWriteResult,
@@ -321,6 +324,21 @@ export interface ArchivistInitConfig {
    */
   readonly feedbackRecorderFactory?: () => FeedbackRecorder;
   /**
+   * Lazy `CausalGraphWriter` capability factory (ADR-0181 Item 3 wire-up,
+   * 2026-05-16). Adapts the cli's `recordCausalEdge(...)` orchestration
+   * helper (`agentdb-orchestration.ts:150`) — which delegates to
+   * `routeCausalOp({ type:'edge' })` (controller-first +
+   * router-fallback) — down to the narrow `CausalGraphWriter` surface.
+   * Threaded onto `MutationContext.capabilities.causalGraphWriter` — used
+   * by the `agentdb_causal_edge` handler.
+   *
+   * Adapter MUST resolve `recordCausalEdge` via deferred dynamic import
+   * per call (no module/closure caching). `routeCausalOp` itself awaits
+   * `ensureRegistry()` per call so a controller swap mid-process is
+   * observed at the next dispatch.
+   */
+  readonly causalGraphWriterFactory?: () => CausalGraphWriter;
+  /**
    * Lazy `GNNTelemetryReader` capability factory (ADR-0181 Item 2 wire-up,
    * 2026-05-15). Adapts the cli's `getController('gnnService')` telemetry
    * surface down to the narrow `GNNTelemetryReader`. Threaded onto
@@ -424,6 +442,7 @@ export class Archivist {
   private learningSystemWriter?: LearningSystemWriter;
   private sonaTrajectoryWriter?: SonaTrajectoryWriter;
   private feedbackRecorder?: FeedbackRecorder;
+  private causalGraphWriter?: CausalGraphWriter;
   private gnnTelemetryReader?: GNNTelemetryReader;
   private semanticRouteReader?: SemanticRouteReader;
 
@@ -507,6 +526,7 @@ export class Archivist {
     this.learningSystemWriter = config.learningSystemWriterFactory?.();
     this.sonaTrajectoryWriter = config.sonaTrajectoryWriterFactory?.();
     this.feedbackRecorder = config.feedbackRecorderFactory?.();
+    this.causalGraphWriter = config.causalGraphWriterFactory?.();
     this.gnnTelemetryReader = config.gnnTelemetryReaderFactory?.();
     this.semanticRouteReader = config.semanticRouteReaderFactory?.();
 
@@ -892,6 +912,7 @@ export class Archivist {
         learningSystemWriter: this.learningSystemWriter,
         sonaTrajectoryWriter: this.sonaTrajectoryWriter,
         feedbackRecorder: this.feedbackRecorder,
+        causalGraphWriter: this.causalGraphWriter,
       }),
       bulkDispatch: async () => {
         throw new Error('archivist: bulk dispatch not yet wired (Phase 4 substrate seam)');

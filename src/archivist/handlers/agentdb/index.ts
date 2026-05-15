@@ -27,6 +27,15 @@ export * from './semantic-route.js';
 // agentdb_neural_patterns into its own dispatched handler — every action of
 // the legacy cli tool now goes through dispatch (no per-action bypass).
 export * from './gnn-stats.js';
+// ADR-0181 Item 3 (2026-05-16): CausalMemoryGraph writer — audit-trail
+// dispatch wrap around the existing cli `recordCausalEdge` /
+// `routeCausalOp` path. Today's writer falls through to RVF via the
+// router-fallback because `CausalMemoryGraph.addCausalEdge` requires a
+// numeric memoryId mapping that ADR-0147 R7 has not delivered yet;
+// substrate-registry already classifies the storeId as SQLite carve-out so
+// a future R7 collapse can land without re-routing. See the handler header
+// for the full audit-vs-storage rationale.
+export * from './causal-edge.js';
 
 // ADR-0181 Phase 6 wire-up — bodies port to call narrow writer capabilities
 // (ReasoningBankWriter / SkillLibraryWriter / etc.) with substrate.withWrite

@@ -25,7 +25,7 @@ import {
   type GuardedWrite,
   type MutationContext,
   type StoreId,
-} from '../../index';
+} from '../../index.js';
 
 /** Workflow step type discriminator — matches the cli inputSchema enum. */
 export type WorkflowStepType = 'task' | 'condition' | 'parallel' | 'loop' | 'wait';

@@ -23,7 +23,7 @@ import {
   type GuardedWrite,
   type MutationContext,
   type StoreId,
-} from '../../index';
+} from '../../index.js';
 
 /** Mutation payload for workflow_delete. `workflowId` required. */
 export interface WorkflowDeletePayload {

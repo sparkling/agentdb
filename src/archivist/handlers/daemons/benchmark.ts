@@ -37,7 +37,7 @@ import {
   type GuardedWrite,
   type MutationContext,
   type StoreId,
-} from '../../index';
+} from '../../index.js';
 
 /**
  * Mutation payload for the daemon-scheduled benchmark worker.

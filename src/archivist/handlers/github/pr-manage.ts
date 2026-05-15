@@ -21,7 +21,7 @@ import {
   type GuardedWrite,
   type MutationContext,
   type StoreId,
-} from '../../index';
+} from '../../index.js';
 
 /** Mutation payload — discriminated by `action`. Mirrors the five action
  *  branches at cli `github_pr_manage`. The `list` and `review` actions are

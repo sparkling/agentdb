@@ -24,17 +24,17 @@
 // `src/archivist/**` carries a `// charter: <tag>` header whose tag is listed in
 // MODULE.md (ADR-0180 §Governance).
 
-import { composeGuards, registerGuard, type GuardFn } from './guards';
-import type { GuardVerdict } from './guards-types';
-import { createMutationContext } from './mutation-context';
-import { createReadContext } from './read-context';
+import { composeGuards, registerGuard, type GuardFn } from './guards.js';
+import type { GuardVerdict } from './guards-types.js';
+import { createMutationContext } from './mutation-context.js';
+import { createReadContext } from './read-context.js';
 import {
   makeMutationCapabilities,
   makeReadCapabilities,
   type EmbeddingScorer,
   type PatternReader,
   type TaskRouter,
-} from './capabilities';
+} from './capabilities.js';
 import {
   getRegistration,
   registerMutationHandler,
@@ -42,21 +42,21 @@ import {
   type Invariant,
   type RegisterMutationOpts,
   type RegisterReadOpts,
-} from './registration';
-import type { MutationHandlerFn, HotPathMutationHandlerFn, ReadHandlerFn } from './registration';
-import type { AuditEntry, AuditState, InvariantVerdict } from './audit-types';
-import { writeThroughEntry } from './audit-writer';
-import { getSharedHotPathQueue } from './hot-path-writer';
-import { makeReadOnlySubstrateAccess, makeSubstrateAccess } from './substrate-internal';
-import { makeFsJsonSubstrate } from './substrates/fs-json-store';
-import { makeRvfSubstrate } from './substrates/rvf-store';
-import { makeSqliteSubstrate } from './substrates/sqlite-store';
+} from './registration.js';
+import type { MutationHandlerFn, HotPathMutationHandlerFn, ReadHandlerFn } from './registration.js';
+import type { AuditEntry, AuditState, InvariantVerdict } from './audit-types.js';
+import { writeThroughEntry } from './audit-writer.js';
+import { getSharedHotPathQueue } from './hot-path-writer.js';
+import { makeReadOnlySubstrateAccess, makeSubstrateAccess } from './substrate-internal.js';
+import { makeFsJsonSubstrate } from './substrates/fs-json-store.js';
+import { makeRvfSubstrate } from './substrates/rvf-store.js';
+import { makeSqliteSubstrate } from './substrates/sqlite-store.js';
 import {
   SubstrateRegistry,
   fsJsonPathFor,
   type SubstrateFamily,
-} from './substrate-registry';
-import type { RvfBackend } from '../backends/rvf/RvfBackend';
+} from './substrate-registry.js';
+import type { RvfBackend } from '../backends/rvf/RvfBackend.js';
 import type BetterSqlite3 from 'better-sqlite3';
 import type {
   GuardedRead,
@@ -66,7 +66,7 @@ import type {
   StoreId,
   SubstrateAccess,
   SubstrateHandle,
-} from './types';
+} from './types.js';
 import { createHash, randomUUID } from 'node:crypto';
 
 // --- Re-exported public types ---
@@ -81,17 +81,17 @@ export type {
   SubstrateAccess,
   SubstrateHandle,
   ReadOnlySubstrateHandle,
-} from './types';
+} from './types.js';
 export type {
   ChildMode,
   HotPathMutationContext,
   MutationContext,
-} from './mutation-context';
+} from './mutation-context.js';
 export type {
   CacheHints,
   ReadContext,
   ReadOnlyCache,
-} from './read-context';
+} from './read-context.js';
 // Narrow capability handles threaded onto the contexts (ADR-0180 F4-2 Phase C).
 // Handlers import these to type the `ctx.capabilities.*` surfaces; the raw
 // controllers (`SemanticRouter`, `EmbeddingService`, `ReasoningBank`) are NOT
@@ -105,7 +105,7 @@ export type {
   ReadCapabilities,
   RouteDecision,
   TaskRouter,
-} from './capabilities';
+} from './capabilities.js';
 export type {
   GuardName,
   GuardOutcome,
@@ -116,7 +116,7 @@ export type {
   RateLimitVerdict,
   SchemaVerdict,
   SizeVerdict,
-} from './guards';
+} from './guards.js';
 export type {
   CacheScope,
   HotPathMutationHandlerFn,
@@ -125,10 +125,10 @@ export type {
   ReadHandlerFn,
   RegisterMutationOpts,
   RegisterReadOpts,
-} from './registration';
+} from './registration.js';
 
 // --- Public registration HOFs ---
-export { registerMutationHandler, registerReadHandler } from './registration';
+export { registerMutationHandler, registerReadHandler } from './registration.js';
 
 // --- Multi-file atomic-write primitive (ADR-0180 OF#11, F4-2 Phase C) ---
 // Unlike `makeSubstrateAccess` (deliberately NOT re-exported — it is the
@@ -142,8 +142,8 @@ export { registerMutationHandler, registerReadHandler } from './registration';
 // route, so the primitive takes N explicit `{ path, payload }` targets directly
 // rather than routing through the `StoreId` seam. Atomicity is honest-partial —
 // see the primitive's doc-block in `substrates/fs-json-store.ts`.
-export { writeMultiFileAtomic } from './substrates/fs-json-store';
-export type { MultiFileTarget, MultiFileWriteResult } from './substrates/fs-json-store';
+export { writeMultiFileAtomic } from './substrates/fs-json-store.js';
+export type { MultiFileTarget, MultiFileWriteResult } from './substrates/fs-json-store.js';
 
 // --- Audit-log path setter (ADR-0181 Phase 1) ---
 // audit-writer.ts keeps `auditPath` as a process-global, defaulting to
@@ -154,7 +154,7 @@ export type { MultiFileTarget, MultiFileWriteResult } from './substrates/fs-json
 // log (ADR-0180 §15) land under different roots and the multi-process audit
 // chain fragments. `setAuditLogPath()` is the host-facing seam for that; it must
 // be called before the first dispatch (it throws once the audit fd is open).
-export { setAuditLogPath } from './audit-writer';
+export { setAuditLogPath } from './audit-writer.js';
 
 /**
  * Construction-time wiring for `Archivist.initialize()` (ADR-0180 §Architecture

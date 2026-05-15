@@ -8,9 +8,9 @@
 // for this barrel — they route through `dispatchRead` when the read-split
 // lands and will register under a sibling read barrel.
 
-export * from './agent-create';
-export * from './agent-adapt';
-export * from './workflow-create';
-export * from './workflow-execute';
-export * from './knowledge-share';
-export * from './cognitive-pattern';
+export * from './agent-create.js';
+export * from './agent-adapt.js';
+export * from './workflow-create.js';
+export * from './workflow-execute.js';
+export * from './knowledge-share.js';
+export * from './cognitive-pattern.js';

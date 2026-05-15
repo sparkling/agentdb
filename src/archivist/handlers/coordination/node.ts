@@ -32,7 +32,7 @@ import {
   type GuardedWrite,
   type MutationContext,
   type StoreId,
-} from '../../index';
+} from '../../index.js';
 
 /** Node lifecycle status persisted alongside each node record. The cli emits
  *  `'active'` on add/heartbeat; future agents may emit `'degraded' | 'offline'`. */

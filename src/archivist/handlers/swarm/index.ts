@@ -7,5 +7,5 @@
 // surfaces (swarm_status, swarm_health, swarm_exists) land in Phase 7 §Read
 // surface migration with `registerReadHandler` semantics.
 
-export * from './init';
-export * from './shutdown';
+export * from './init.js';
+export * from './shutdown.js';

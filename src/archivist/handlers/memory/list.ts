@@ -10,8 +10,8 @@
 // existing closed Provenance union in ./search) with rawScore: 0 and rank
 // reflecting the 1-based, offset-inclusive position.
 
-import { registerReadHandler, type GuardedRead, type ReadContext } from '../../index';
-import type { RankedResults } from './search';
+import { registerReadHandler, type GuardedRead, type ReadContext } from '../../index.js';
+import type { RankedResults } from './search.js';
 
 export interface MemoryListQuery {
   readonly namespace?: string;

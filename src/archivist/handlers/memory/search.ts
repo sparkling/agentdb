@@ -5,7 +5,7 @@
 // `{id, content, score}[]`) vs full RankedResult shape is gated by the
 // includeProvenance parameter wired separately by provenance-rollout-worker-search.
 
-import { registerReadHandler, type GuardedRead, type ReadContext } from '../../index';
+import { registerReadHandler, type GuardedRead, type ReadContext } from '../../index.js';
 
 export interface MemorySearchQuery {
   readonly namespace?: string;

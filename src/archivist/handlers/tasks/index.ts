@@ -3,10 +3,10 @@
 // Importing this module triggers the side-effecting `registerMutationHandler`
 // calls so the registry is populated before dispatch.
 
-export * from './create';
-export * from './status';
-export * from './list';
-export * from './complete';
-export * from './update';
-export * from './assign';
-export * from './cancel';
+export * from './create.js';
+export * from './status.js';
+export * from './list.js';
+export * from './complete.js';
+export * from './update.js';
+export * from './assign.js';
+export * from './cancel.js';

@@ -9,7 +9,7 @@
 // Baseline (verbatim from ADR-0180 §Mutation invariants): memory_store →
 // {namespace, content_bytes, embedding_dim} equality between intent and recorded.
 
-import type { Invariant } from '../../registration';
+import type { Invariant } from '../../registration.js';
 
 /**
  * Caller intent / recorded payload shape for memory_store mutations.

@@ -6,8 +6,8 @@
 // returned set (the legacy memory_retrieve tool returns at most one entry, but
 // shape parity with search avoids a second result type).
 
-import { registerReadHandler, type GuardedRead, type ReadContext } from '../../index';
-import type { MemoryRecord, RankedResults } from './search';
+import { registerReadHandler, type GuardedRead, type ReadContext } from '../../index.js';
+import type { MemoryRecord, RankedResults } from './search.js';
 
 export interface MemoryRetrieveQuery {
   readonly namespace?: string;

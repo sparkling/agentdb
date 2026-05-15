@@ -3,8 +3,8 @@
 // Importing this module triggers the side-effecting `registerMutationHandler`
 // calls so the registry is populated before dispatch.
 
-export * from './create';
-export * from './prompt';
-export * from './tool';
-export * from './terminate';
-export * from './gallery-create';
+export * from './create.js';
+export * from './prompt.js';
+export * from './tool.js';
+export * from './terminate.js';
+export * from './gallery-create.js';

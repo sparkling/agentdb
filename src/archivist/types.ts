@@ -107,8 +107,8 @@ export type GuardedRead<T, R> = ((ctx: ReadContextLike, payload: T) => Promise<R
 // The runtime modules export the canonical interfaces; these are structural-only
 // shadows used in the GuardedWrite/Read signatures above.
 
-import type { GuardVerdict } from './guards-types';
-import type { MutationCapabilities, ReadCapabilities } from './capabilities';
+import type { GuardVerdict } from './guards-types.js';
+import type { MutationCapabilities, ReadCapabilities } from './capabilities.js';
 
 export interface MutationContextLike<HotPath extends boolean = false> {
   readonly auditId: string;

@@ -23,7 +23,7 @@ import {
   type GuardedWrite,
   type MutationContext,
   type StoreId,
-} from '../../index';
+} from '../../index.js';
 
 /** Mutation payload — discriminated by `action`. Mirrors the five action
  *  branches at cli `github_issue_track`. Labels are typed as

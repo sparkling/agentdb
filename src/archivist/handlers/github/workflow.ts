@@ -25,7 +25,7 @@ import {
   type GuardedWrite,
   type MutationContext,
   type StoreId,
-} from '../../index';
+} from '../../index.js';
 
 /** Mutation payload — discriminated by `action`. Mirrors the four action
  *  branches at cli `github_workflow`. `workflowId` carries the same

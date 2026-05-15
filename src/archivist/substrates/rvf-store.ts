@@ -21,15 +21,15 @@
 // The archivist emits the one-entry bulk manifest a layer up; this substrate
 // only forwards.
 
-import { makeSubstrateAccess } from '../substrate-internal';
+import { makeSubstrateAccess } from '../substrate-internal.js';
 import type {
   BulkIntent,
   ReadCapableSubstrate,
   StoreId,
   SubstrateAccess,
   SubstrateHandle,
-} from '../types';
-import type { RvfBackend } from '../../backends/rvf/RvfBackend';
+} from '../types.js';
+import type { RvfBackend } from '../../backends/rvf/RvfBackend.js';
 
 // ── Handle augmentation ──────────────────────────────────────────────────────
 //

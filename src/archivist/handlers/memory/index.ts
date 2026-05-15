@@ -3,9 +3,9 @@
 // Importing this module triggers the side-effecting `registerReadHandler` /
 // `registerMutationHandler` calls so the registry is populated before dispatch.
 
-export * from './search';
-export * from './search-unified';
-export * from './store';
-export * from './retrieve';
-export * from './list';
-export * from './bridge-status';
+export * from './search.js';
+export * from './search-unified.js';
+export * from './store.js';
+export * from './retrieve.js';
+export * from './list.js';
+export * from './bridge-status.js';

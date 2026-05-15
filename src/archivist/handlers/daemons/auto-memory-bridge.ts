@@ -47,7 +47,7 @@ import {
   type GuardedWrite,
   type MutationContext,
   type StoreId,
-} from '../../index';
+} from '../../index.js';
 import { createHash } from 'node:crypto';
 
 /**

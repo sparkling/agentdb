@@ -29,7 +29,7 @@ import {
   type GuardedWrite,
   type MutationContext,
   type StoreId,
-} from '../../index';
+} from '../../index.js';
 
 /** Model kinds — matches the CLI inputSchema enum. */
 export type NeuralModelType = 'moe' | 'transformer' | 'classifier' | 'embedding';

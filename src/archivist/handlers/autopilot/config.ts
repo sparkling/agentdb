@@ -28,7 +28,7 @@ import {
   type GuardedWrite,
   type MutationContext,
   type StoreId,
-} from '../../index';
+} from '../../index.js';
 
 /** Valid task-source enum — matches `VALID_TASK_SOURCES` in autopilot-state.ts. */
 export type AutopilotTaskSource = 'team-tasks' | 'swarm-tasks' | 'file-checklist';

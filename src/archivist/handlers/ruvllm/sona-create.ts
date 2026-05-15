@@ -17,7 +17,7 @@ import {
   type GuardedWrite,
   type MutationContext,
   type StoreId,
-} from '../../index';
+} from '../../index.js';
 
 export interface RuvllmSonaCreatePayload {
   readonly hiddenDim?: number;

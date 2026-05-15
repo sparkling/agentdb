@@ -33,7 +33,7 @@ import {
   type GuardedWrite,
   type MutationContext,
   type StoreId,
-} from '../../index';
+} from '../../index.js';
 
 /** Spawn action discriminator — matches the CLI inputSchema enum (ADR-0131 T12). */
 export type HiveMindSpawnAction = 'spawn' | 'retryTask';

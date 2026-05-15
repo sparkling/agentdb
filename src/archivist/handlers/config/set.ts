@@ -36,7 +36,7 @@ import {
   type GuardedWrite,
   type MutationContext,
   type StoreId,
-} from '../../index';
+} from '../../index.js';
 
 /** Scope discriminator — mirrors the cli `config_set` inputSchema. `'default'`
  *  writes into `store.values` (top-level); any other string writes into

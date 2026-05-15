@@ -24,7 +24,7 @@ import {
   type GuardedWrite,
   type MutationContext,
   type StoreId,
-} from '../../index';
+} from '../../index.js';
 
 export interface MemoryStorePayload {
   readonly namespace: string;

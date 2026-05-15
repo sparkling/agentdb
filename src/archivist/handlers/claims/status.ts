@@ -9,8 +9,8 @@ import {
   type GuardedWrite,
   type MutationContext,
   type StoreId,
-} from '../../index';
-import type { ClaimsStore, ClaimStatus } from './claim';
+} from '../../index.js';
+import type { ClaimsStore, ClaimStatus } from './claim.js';
 
 export interface ClaimsStatusPayload {
   readonly issueId: string;

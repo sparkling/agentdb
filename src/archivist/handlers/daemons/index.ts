@@ -9,11 +9,11 @@
 // shapes land here. Sibling worker types (audit, optimize, consolidate, ...)
 // register here as their Phase 5 wire-ups land.
 
-export * from './map';
-export * from './audit';
-export * from './optimize';
-export * from './testgaps';
-export * from './consolidate';
-export * from './benchmark';
-export * from './auto-memory-bridge';
-export * from './hooks-learning';
+export * from './map.js';
+export * from './audit.js';
+export * from './optimize.js';
+export * from './testgaps.js';
+export * from './consolidate.js';
+export * from './benchmark.js';
+export * from './auto-memory-bridge.js';
+export * from './hooks-learning.js';

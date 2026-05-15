@@ -3,7 +3,7 @@
 // Importing this module triggers the side-effecting `registerMutationHandler`
 // calls so the registry is populated before dispatch.
 
-export * from './train';
-export * from './compress';
-export * from './optimize';
-export * from './patterns';
+export * from './train.js';
+export * from './compress.js';
+export * from './optimize.js';
+export * from './patterns.js';

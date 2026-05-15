@@ -17,8 +17,8 @@ import {
   type GuardedWrite,
   type MutationContext,
   type StoreId,
-} from '../../index';
-import type { TaskStore } from './shared';
+} from '../../index.js';
+import type { TaskStore } from './shared.js';
 
 export interface TaskStatusPayload {
   readonly taskId: string;

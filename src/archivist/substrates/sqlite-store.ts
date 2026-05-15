@@ -31,14 +31,14 @@
 
 import type BetterSqlite3 from 'better-sqlite3';
 
-import { makeSubstrateAccess } from '../substrate-internal';
+import { makeSubstrateAccess } from '../substrate-internal.js';
 import type {
   BulkIntent,
   ReadCapableSubstrate,
   StoreId,
   SubstrateAccess,
   SubstrateHandle,
-} from '../types';
+} from '../types.js';
 
 // ── Handle augmentation ──────────────────────────────────────────────────────
 //

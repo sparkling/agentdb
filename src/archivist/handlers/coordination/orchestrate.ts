@@ -28,7 +28,7 @@ import {
   type GuardedWrite,
   type MutationContext,
   type StoreId,
-} from '../../index';
+} from '../../index.js';
 
 /** Orchestration strategy — matches the CLI inputSchema enum. */
 export type OrchestrationStrategy = 'parallel' | 'sequential' | 'pipeline' | 'broadcast';

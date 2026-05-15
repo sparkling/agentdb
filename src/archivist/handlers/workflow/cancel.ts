@@ -22,7 +22,7 @@ import {
   type GuardedWrite,
   type MutationContext,
   type StoreId,
-} from '../../index';
+} from '../../index.js';
 
 /** Mutation payload for workflow_cancel. `workflowId` required;
  *  `reason` is recorded on the workflow record as `error`. */

@@ -9,11 +9,11 @@
 // Phase 5/6 expand this barrel with `makeSqliteSubstrate` and
 // `makeRvfSubstrate` per the same recommendation.
 
-export { makeFsJsonSubstrate, writeMultiFileAtomic } from './fs-json-store';
+export { makeFsJsonSubstrate, writeMultiFileAtomic } from './fs-json-store.js';
 export type {
   MakeFsJsonSubstrateOpts,
   MultiFileTarget,
   MultiFileWriteResult,
-} from './fs-json-store';
-export * from './rvf-store';
-export * from './sqlite-store';
+} from './fs-json-store.js';
+export * from './rvf-store.js';
+export * from './sqlite-store.js';

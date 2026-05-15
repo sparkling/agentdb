@@ -26,7 +26,7 @@ import {
   type GuardedWrite,
   type MutationContext,
   type StoreId,
-} from '../../index';
+} from '../../index.js';
 
 /**
  * Hierarchical memory tier — mirrors the cli enum constraint

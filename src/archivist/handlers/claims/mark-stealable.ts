@@ -9,8 +9,8 @@ import {
   type GuardedWrite,
   type MutationContext,
   type StoreId,
-} from '../../index';
-import type { ClaimsStore, StealReason } from './claim';
+} from '../../index.js';
+import type { ClaimsStore, StealReason } from './claim.js';
 
 export interface ClaimsMarkStealablePayload {
   readonly issueId: string;

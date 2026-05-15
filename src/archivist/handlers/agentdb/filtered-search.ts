@@ -25,8 +25,8 @@
 // MutationGuard — those writes die with the process and are reflected in
 // `ctx.cacheHints.wrote_cache` as advisory observability.
 
-import { registerReadHandler, type GuardedRead, type ReadContext, type StoreId } from '../../index';
-import type { RankedResult, RankedResults } from '../memory/search';
+import { registerReadHandler, type GuardedRead, type ReadContext, type StoreId } from '../../index.js';
+import type { RankedResult, RankedResults } from '../memory/search.js';
 
 /**
  * Input payload mirroring the CLI tool's `agentdb_filtered_search` input shape

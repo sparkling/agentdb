@@ -44,7 +44,7 @@ import {
   type GuardedWrite,
   type MutationContext,
   type StoreId,
-} from '../../index';
+} from '../../index.js';
 
 /** Consensus strategy at the coordination surface — matches the CLI inputSchema
  *  enum (line 505 of coordination-tools.ts). Narrower than hive-mind's set

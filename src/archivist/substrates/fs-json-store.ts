@@ -63,14 +63,14 @@ import {
 } from 'node:fs';
 import { dirname } from 'node:path';
 
-import { makeSubstrateAccess } from '../substrate-internal';
+import { makeSubstrateAccess } from '../substrate-internal.js';
 import type {
   BulkIntent,
   ReadCapableSubstrate,
   StoreId,
   SubstrateAccess,
   SubstrateHandle,
-} from '../types';
+} from '../types.js';
 
 // ── Lock-acquire tuning (matches hive-mind-tools.ts:1215-1218) ────────────────
 

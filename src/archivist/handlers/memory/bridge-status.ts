@@ -5,8 +5,8 @@
 // entry per component. Each entry carries provenance so telemetry consumers can
 // map back to the source store/namespace, matchType='status' (Pass-3 disposition).
 
-import { registerReadHandler, type GuardedRead, type ReadContext } from '../../index';
-import type { RankedResults } from './search';
+import { registerReadHandler, type GuardedRead, type ReadContext } from '../../index.js';
+import type { RankedResults } from './search.js';
 
 export interface MemoryBridgeStatusQuery {
   readonly detail?: 'brief' | 'verbose';

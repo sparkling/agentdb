@@ -31,7 +31,7 @@ import {
   type GuardedWrite,
   type MutationContext,
   type StoreId,
-} from '../../index';
+} from '../../index.js';
 
 /** Claude Agent SDK model selector — mirrors the CLI inputSchema enum. */
 export type ClaudeModel = 'haiku' | 'sonnet' | 'opus' | 'inherit';

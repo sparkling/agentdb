@@ -23,8 +23,8 @@
 // the same `makeFsJsonSubstrate` primitive that the mutation peers (spawn,
 // consensus, agents-json) use.
 
-import { registerReadHandler, type GuardedRead, type ReadContext } from '../../index';
-import type { RankedResults } from '../memory/search';
+import { registerReadHandler, type GuardedRead, type ReadContext } from '../../index.js';
+import type { RankedResults } from '../memory/search.js';
 
 /** Query payload — mirrors the cli tool's inputSchema (line 1666-1670 of
  *  hive-mind-tools.ts). `verbose` adds workerDetails / consensusHistory /

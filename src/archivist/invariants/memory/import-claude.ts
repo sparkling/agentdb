@@ -5,7 +5,7 @@
 // source path AND record count match what the caller staged. Silent-drop on a malformed
 // MEMORY.md line would replay identically without this gate.
 
-import type { Invariant } from '../../registration';
+import type { Invariant } from '../../registration.js';
 
 /**
  * memory_import_claude intent. The import source path is the canonical pointer

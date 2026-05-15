@@ -21,12 +21,12 @@ import {
   registerMutationHandler,
   type GuardedWrite,
   type MutationContext,
-} from '../../index';
+} from '../../index.js';
 import {
   NEURAL_STORE_ID,
   NEURAL_STORE_KEY,
   type NeuralStore,
-} from './train';
+} from './train.js';
 
 /** Mutating subactions only — list/get/search are read-side and registered separately. */
 export type NeuralPatternsMutationAction = 'store' | 'delete';

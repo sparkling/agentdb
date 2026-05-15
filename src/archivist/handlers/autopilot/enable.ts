@@ -33,7 +33,7 @@ import {
   type GuardedWrite,
   type MutationContext,
   type StoreId,
-} from '../../index';
+} from '../../index.js';
 
 /**
  * Mutation payload mirroring the CLI tool's `autopilot_enable` input shape

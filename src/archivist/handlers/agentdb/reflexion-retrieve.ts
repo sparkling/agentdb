@@ -22,8 +22,8 @@
 // in-memory caches (embedding cache for the query task) without invoking
 // MutationGuard.
 
-import { registerReadHandler, type GuardedRead, type ReadContext, type StoreId } from '../../index';
-import type { RankedResult, RankedResults } from '../memory/search';
+import { registerReadHandler, type GuardedRead, type ReadContext, type StoreId } from '../../index.js';
+import type { RankedResult, RankedResults } from '../memory/search.js';
 
 /**
  * Input payload mirroring the CLI tool's `agentdb_reflexion_retrieve` input shape

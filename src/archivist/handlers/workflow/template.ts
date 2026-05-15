@@ -33,7 +33,7 @@ import {
   type GuardedWrite,
   type MutationContext,
   type StoreId,
-} from '../../index';
+} from '../../index.js';
 
 /** Template action discriminator — matches the cli inputSchema enum. */
 export type WorkflowTemplateAction = 'save' | 'create' | 'list';

@@ -13,6 +13,6 @@
 // If any later gains a read-handler (Phase 6+) it should land under this same
 // directory and be re-exported below.
 
-export * from './metrics';
-export * from './health';
-export * from './reset';
+export * from './metrics.js';
+export * from './health.js';
+export * from './reset.js';

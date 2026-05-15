@@ -25,7 +25,7 @@ import {
   type GuardedWrite,
   type MutationContext,
   type StoreId,
-} from '../../index';
+} from '../../index.js';
 
 /** Per-sample performance snapshot — shape mirrors the cli's `PerfMetrics`
  *  interface (performance-tools.ts:26-33) so on-disk metrics.json round-trips

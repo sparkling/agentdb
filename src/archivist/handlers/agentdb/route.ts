@@ -31,8 +31,8 @@ import {
   type GuardedWrite,
   type MutationContext,
   type StoreId,
-} from '../../index';
-import type { RvfSubstrateHandle } from '../../substrates/rvf-store';
+} from '../../index.js';
+import type { RvfSubstrateHandle } from '../../substrates/rvf-store.js';
 
 /**
  * Mutation payload mirroring the CLI tool's `agentdb_route` input shape

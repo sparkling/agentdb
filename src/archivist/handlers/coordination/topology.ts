@@ -34,7 +34,7 @@ import {
   type GuardedWrite,
   type MutationContext,
   type StoreId,
-} from '../../index';
+} from '../../index.js';
 
 /** Topology type — matches the CLI inputSchema enum. */
 export type TopologyType =

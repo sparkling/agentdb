@@ -29,7 +29,7 @@ import {
   type GuardedWrite,
   type MutationContext,
   type StoreId,
-} from '../../index';
+} from '../../index.js';
 
 /** Action discriminator — mirrors the cli tool's inputSchema.action enum. */
 export type CoordinationSyncAction = 'status' | 'trigger' | 'resolve';

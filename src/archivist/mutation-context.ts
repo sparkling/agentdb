@@ -4,9 +4,9 @@
 // the archivist's public surface (`index.ts`). Stores receive contexts only as
 // arguments delivered by the archivist runtime; they cannot mint their own.
 
-import type { BulkIntent, SubstrateAccess } from './types';
-import type { GuardVerdict } from './guards-types';
-import type { MutationCapabilities } from './capabilities';
+import type { BulkIntent, SubstrateAccess } from './types.js';
+import type { GuardVerdict } from './guards-types.js';
+import type { MutationCapabilities } from './capabilities.js';
 
 /** Child-context relationship metadata recorded in the audit tree. */
 export type ChildMode = 'sequential' | 'parallel';

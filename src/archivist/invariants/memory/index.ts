@@ -9,14 +9,14 @@
 // the contract spec; wiring lands when each migrator's `handlers/memory/<tool>.ts`
 // file does. The barrel makes the wiring a single import per migrator.
 
-export type { MemoryStorePayload } from './store';
-export { storeInvariants } from './store';
+export type { MemoryStorePayload } from './store.js';
+export { storeInvariants } from './store.js';
 
-export type { MemoryDeletePayload } from './delete';
-export { deleteInvariants } from './delete';
+export type { MemoryDeletePayload } from './delete.js';
+export { deleteInvariants } from './delete.js';
 
-export type { MemoryMigratePayload } from './migrate';
-export { migrateInvariants } from './migrate';
+export type { MemoryMigratePayload } from './migrate.js';
+export { migrateInvariants } from './migrate.js';
 
-export type { MemoryImportClaudePayload } from './import-claude';
-export { importClaudeInvariants } from './import-claude';
+export type { MemoryImportClaudePayload } from './import-claude.js';
+export { importClaudeInvariants } from './import-claude.js';

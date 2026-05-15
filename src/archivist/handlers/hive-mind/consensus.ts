@@ -50,7 +50,7 @@ import {
   type GuardedWrite,
   type MutationContext,
   type StoreId,
-} from '../../index';
+} from '../../index.js';
 
 /** Consensus strategy — matches the CLI inputSchema enum.
  *  'byzantine' is a wire-boundary alias for 'bft' (carry-forward from ADR-0106

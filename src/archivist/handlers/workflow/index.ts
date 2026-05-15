@@ -5,11 +5,11 @@
 // workflow_list are read-only at the cli surface and migrate as
 // `registerReadHandler<...>` in a sibling Phase 5 task — not exported here.
 
-export * from './run';
-export * from './create';
-export * from './execute';
-export * from './pause';
-export * from './resume';
-export * from './cancel';
-export * from './delete';
-export * from './template';
+export * from './run.js';
+export * from './create.js';
+export * from './execute.js';
+export * from './pause.js';
+export * from './resume.js';
+export * from './cancel.js';
+export * from './delete.js';
+export * from './template.js';

@@ -25,8 +25,8 @@
 // during the migration window — this file establishes the registration shape the
 // dispatch path will resolve when the boundary is wired.
 
-import { registerReadHandler, type GuardedRead, type ReadContext } from '../../index';
-import type { RankedResults } from '../memory/search';
+import { registerReadHandler, type GuardedRead, type ReadContext } from '../../index.js';
+import type { RankedResults } from '../memory/search.js';
 
 /**
  * Input payload mirroring the CLI tool's `agentdb_causal-recall` input shape

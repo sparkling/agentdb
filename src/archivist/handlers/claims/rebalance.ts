@@ -14,8 +14,8 @@ import {
   type GuardedWrite,
   type MutationContext,
   type StoreId,
-} from '../../index';
-import type { ClaimsStore, IssueClaim } from './claim';
+} from '../../index.js';
+import type { ClaimsStore, IssueClaim } from './claim.js';
 
 export interface ClaimsRebalancePayload {
   readonly dryRun?: boolean;

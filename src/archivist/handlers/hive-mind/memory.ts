@@ -37,7 +37,7 @@ import {
   type GuardedWrite,
   type MutationContext,
   type StoreId,
-} from '../../index';
+} from '../../index.js';
 
 /** Memory type — mirrors the cli's MemoryType union (ADR-0122 T4: 8 typed
  *  memory types from USERGUIDE). Required on `set`; optional filter on `list`. */

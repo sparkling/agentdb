@@ -27,7 +27,7 @@ import {
   type GuardedWrite,
   type MutationContext,
   type StoreId,
-} from '../../index';
+} from '../../index.js';
 
 /** Workflow run options — mirrors the cli inputSchema. `dryRun=true` short-circuits
  *  the mutation path; the cli still returns a validated-stage shape. */

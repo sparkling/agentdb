@@ -25,7 +25,7 @@ import {
   type GuardedWrite,
   type MutationContext,
   type StoreId,
-} from '../../index';
+} from '../../index.js';
 
 /** Mutation payload for workflow_execute. `workflowId` required; `variables`
  *  merges into the workflow's variables map; `startFromStep` is 0-indexed and

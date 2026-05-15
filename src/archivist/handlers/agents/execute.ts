@@ -29,8 +29,8 @@ import {
   type GuardedWrite,
   type MutationContext,
   type StoreId,
-} from '../../index';
-import type { AgentRecord, AgentStore } from './spawn';
+} from '../../index.js';
+import type { AgentRecord, AgentStore } from './spawn.js';
 
 /**
  * Mutation payload — record-update half of `agent_execute`. The Anthropic

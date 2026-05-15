@@ -28,7 +28,7 @@ import {
   type GuardedWrite,
   type MutationContext,
   type StoreId,
-} from '../../index';
+} from '../../index.js';
 
 /** Broadcast priority — matches the CLI inputSchema enum. */
 export type BroadcastPriority = 'low' | 'normal' | 'high' | 'critical';

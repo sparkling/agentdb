@@ -27,7 +27,7 @@ import {
   type GuardedWrite,
   type MutationContext,
   type StoreId,
-} from '../../index';
+} from '../../index.js';
 
 /** Cognitive pattern enum — matches the cli inputSchema enum (daa-tools.ts:162). */
 export type DaaCognitivePattern =

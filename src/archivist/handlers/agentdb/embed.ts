@@ -19,7 +19,7 @@
 // boundary is wired — this file establishes the registration shape the dispatch
 // path will resolve.
 
-import { registerReadHandler, type GuardedRead, type ReadContext } from '../../index';
+import { registerReadHandler, type GuardedRead, type ReadContext } from '../../index.js';
 
 /** Input mirroring `agentdb-tools.ts:1397-1405` — single required `text` field. */
 export interface AgentdbEmbedQuery {

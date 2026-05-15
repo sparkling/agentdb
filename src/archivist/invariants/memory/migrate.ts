@@ -5,7 +5,7 @@
 // drops rows silently (the failure shape `feedback-data-loss-zero-tolerance` exists
 // to prevent) would replay identically without these invariants.
 
-import type { Invariant } from '../../registration';
+import type { Invariant } from '../../registration.js';
 
 /**
  * memory_migrate intent. Captures the source/destination namespace pair and the

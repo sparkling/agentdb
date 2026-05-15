@@ -27,8 +27,8 @@
 // populate GNNService in-process pattern caches without invoking MutationGuard
 // — those writes die with the process.
 
-import { registerReadHandler, type GuardedRead, type ReadContext } from '../../index';
-import type { RankedResults } from '../memory/search';
+import { registerReadHandler, type GuardedRead, type ReadContext } from '../../index.js';
+import type { RankedResults } from '../memory/search.js';
 
 /**
  * Input payload mirroring the CLI tool's `agentdb_neural_patterns` input shape

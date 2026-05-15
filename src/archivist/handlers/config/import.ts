@@ -26,9 +26,9 @@ import {
   type GuardedWrite,
   type MutationContext,
   type StoreId,
-} from '../../index';
+} from '../../index.js';
 
-import type { ConfigScope } from './set';
+import type { ConfigScope } from './set.js';
 
 /** Mutation payload — mirrors the cli `config_import` inputSchema. `config`
  *  is a free-shape `Record<string, unknown>` (the cli accepts arbitrary JSON);

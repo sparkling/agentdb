@@ -15,5 +15,5 @@
 // handlers are stubs (`_stub: true` placeholder returns, no fs writes) and
 // likewise do not register here.
 
-export * from './report';
-export * from './benchmark';
+export * from './report.js';
+export * from './benchmark.js';

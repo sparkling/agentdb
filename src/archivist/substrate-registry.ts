@@ -30,7 +30,7 @@
 // factories or the backends: it stays a pure routing-policy module so the
 // charter check and the `no-restricted-imports` rule have a small surface.
 
-import type { StoreId } from './types';
+import type { StoreId } from './types.js';
 
 // ── Family taxonomy ──────────────────────────────────────────────────────────
 

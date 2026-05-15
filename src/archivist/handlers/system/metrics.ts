@@ -28,7 +28,7 @@ import {
   type GuardedWrite,
   type MutationContext,
   type StoreId,
-} from '../../index';
+} from '../../index.js';
 
 /** Metrics category — mirrors the CLI inputSchema enum (system-tools.ts:144). */
 export type SystemMetricsCategory =

@@ -6,8 +6,8 @@
 // with raw scores only. Provenance per RankedResult records the contributing storeId and
 // rank so ExplainableRecall can be reconstructed without a second query.
 
-import { registerReadHandler, type GuardedRead, type ReadContext } from '../../index';
-import type { MemoryRecord, RankedResults } from './search';
+import { registerReadHandler, type GuardedRead, type ReadContext } from '../../index.js';
+import type { MemoryRecord, RankedResults } from './search.js';
 
 export interface MemorySearchUnifiedQuery {
   readonly query: string;

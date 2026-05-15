@@ -26,7 +26,7 @@ import type {
   ReadOnlySubstrateHandle,
   SubstrateAccess,
   SubstrateHandle,
-} from './types';
+} from './types.js';
 
 /**
  * Internal factory. Mints a branded `SubstrateAccess` from a raw handle.

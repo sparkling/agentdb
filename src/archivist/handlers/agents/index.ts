@@ -14,8 +14,8 @@
 // read handlers in a sibling module per ADR-0180 §Audit chain — reads are
 // passthroughs (no audit ceremony).
 
-export * from './spawn';
-export * from './terminate';
-export * from './update';
-export * from './execute';
-export * from './pool';
+export * from './spawn.js';
+export * from './terminate.js';
+export * from './update.js';
+export * from './execute.js';
+export * from './pool.js';

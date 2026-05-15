@@ -34,7 +34,7 @@ import {
   type GuardedWrite,
   type MutationContext,
   type StoreId,
-} from '../../index';
+} from '../../index.js';
 
 /** Mutation payload mirroring the cli tool's input shape (hive-mind-tools.ts
  *  inputSchema lines 2854-2860). `graceful` defaults to true and `force`

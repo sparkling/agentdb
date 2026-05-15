@@ -26,7 +26,7 @@ import {
   type GuardedWrite,
   type MutationContext,
   type StoreId,
-} from '../../index';
+} from '../../index.js';
 
 /** Reset target — mirrors the CLI surface's `component` string field.
  *  The cli accepts `'all' | 'metrics' | 'agents' | 'tasks'` but only ever

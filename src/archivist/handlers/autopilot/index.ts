@@ -28,8 +28,8 @@
 //                         it should land under a sibling directory and be
 //                         re-exported.)
 
-export * from './enable';
-export * from './disable';
-export * from './config';
-export * from './reset';
-export * from './learn';
+export * from './enable.js';
+export * from './disable.js';
+export * from './config.js';
+export * from './reset.js';
+export * from './learn.js';

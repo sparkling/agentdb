@@ -28,7 +28,7 @@ import {
   type GuardedWrite,
   type MutationContext,
   type StoreId,
-} from '../../index';
+} from '../../index.js';
 
 /** Execution strategy — matches the cli inputSchema enum (daa-tools.ts:303). */
 export type DaaWorkflowStrategy = 'parallel' | 'sequential' | 'adaptive';

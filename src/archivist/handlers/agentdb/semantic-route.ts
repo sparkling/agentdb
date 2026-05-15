@@ -27,8 +27,8 @@
 // audit, no guard). Cache scope is `'global'` because the router model is process-
 // global rather than namespaced — the input string is the only cache partition.
 
-import { registerReadHandler, type GuardedRead, type ReadContext } from '../../index';
-import type { RankedResults } from '../memory/search';
+import { registerReadHandler, type GuardedRead, type ReadContext } from '../../index.js';
+import type { RankedResults } from '../memory/search.js';
 
 export interface AgentdbSemanticRouteQuery {
   readonly input: string;

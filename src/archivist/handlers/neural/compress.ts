@@ -22,13 +22,13 @@ import {
   registerMutationHandler,
   type GuardedWrite,
   type MutationContext,
-} from '../../index';
+} from '../../index.js';
 import {
   NEURAL_STORE_ID,
   NEURAL_STORE_KEY,
   type NeuralPattern,
   type NeuralStore,
-} from './train';
+} from './train.js';
 
 /** Compression methods — matches the CLI inputSchema enum. */
 export type NeuralCompressMethod = 'quantize' | 'prune' | 'distill';

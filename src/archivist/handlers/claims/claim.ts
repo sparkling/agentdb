@@ -14,7 +14,7 @@ import {
   type GuardedWrite,
   type MutationContext,
   type StoreId,
-} from '../../index';
+} from '../../index.js';
 
 export interface Claimant {
   readonly type: 'human' | 'agent';

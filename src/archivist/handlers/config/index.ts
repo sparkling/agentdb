@@ -3,6 +3,6 @@
 // Importing this module triggers the side-effecting `registerMutationHandler`
 // calls so the registry is populated before dispatch.
 
-export * from './set';
-export * from './reset';
-export * from './import';
+export * from './set.js';
+export * from './reset.js';
+export * from './import.js';

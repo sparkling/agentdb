@@ -6,8 +6,8 @@
 // Guard exceptions materialize as synthetic `veto` verdicts per
 // `feedback-best-effort-must-rethrow-fatals` (fail-closed, not upstream's degraded-mode).
 
-import type { GuardName, GuardOutcome, GuardVerdict } from './guards-types';
-export type { GuardName, GuardOutcome, GuardVerdict } from './guards-types';
+import type { GuardName, GuardOutcome, GuardVerdict } from './guards-types.js';
+export type { GuardName, GuardOutcome, GuardVerdict } from './guards-types.js';
 export type {
   SizeVerdict,
   QualityVerdict,
@@ -15,7 +15,7 @@ export type {
   SchemaVerdict,
   RateLimitVerdict,
   PluginVerdict,
-} from './guards-types';
+} from './guards-types.js';
 
 /**
  * Subset of `MutationContext` exposed to guards. Guards have NO access to

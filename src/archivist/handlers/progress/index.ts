@@ -6,4 +6,4 @@
 // remain read-only on the cli surface (progress-tools.ts) and do not require
 // archivist registration.
 
-export * from './sync';
+export * from './sync.js';

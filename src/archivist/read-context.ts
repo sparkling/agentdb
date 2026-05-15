@@ -5,8 +5,8 @@
 // archivist's dispatch, not via a context property. Cache hints feed the read-path
 // cache-writes persistence-boundary rule (Q3, §Architecture).
 
-import type { ReadOnlySubstrateAccess } from './types';
-import type { ReadCapabilities } from './capabilities';
+import type { ReadOnlySubstrateAccess } from './types.js';
+import type { ReadCapabilities } from './capabilities.js';
 
 /** Read-only cache surface delivered via `ReadContext.cache`. */
 export interface ReadOnlyCache {

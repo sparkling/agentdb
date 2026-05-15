@@ -22,8 +22,8 @@ import {
   type GuardedWrite,
   type MutationContext,
   type StoreId,
-} from '../../index';
-import type { AgentStore } from './spawn';
+} from '../../index.js';
+import type { AgentStore } from './spawn.js';
 
 /**
  * Mutation payload mirroring the CLI tool's `agent_terminate` input shape

@@ -28,7 +28,7 @@ import {
   type GuardedWrite,
   type MutationContext,
   type StoreId,
-} from '../../index';
+} from '../../index.js';
 
 /**
  * Mutation payload mirroring the CLI tool's `agentdb_feedback` input shape

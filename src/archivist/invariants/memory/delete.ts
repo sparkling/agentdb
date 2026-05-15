@@ -5,7 +5,7 @@
 // would replay identically (tautological-replay problem, ADR-0180 §Mutation invariants);
 // these invariants close that gap.
 
-import type { Invariant } from '../../registration';
+import type { Invariant } from '../../registration.js';
 
 /**
  * memory_delete intent. Either `{namespace, key}` (the cli surface) or `{id}` (the

@@ -22,12 +22,12 @@ import {
   registerMutationHandler,
   type GuardedWrite,
   type MutationContext,
-} from '../../index';
+} from '../../index.js';
 import {
   NEURAL_STORE_ID,
   NEURAL_STORE_KEY,
   type NeuralStore,
-} from './train';
+} from './train.js';
 
 /** Optimization targets — matches the CLI inputSchema enum. */
 export type NeuralOptimizeTarget = 'speed' | 'memory' | 'accuracy' | 'balanced';

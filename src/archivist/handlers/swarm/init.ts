@@ -28,7 +28,7 @@ import {
   type GuardedWrite,
   type MutationContext,
   type StoreId,
-} from '../../index';
+} from '../../index.js';
 
 /** Topology variants — mirrors swarm-tools.ts:206-208 (`VALID_TOPOLOGIES`). */
 export type SwarmTopology =

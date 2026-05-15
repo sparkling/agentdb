@@ -32,8 +32,8 @@ import {
   type GuardedWrite,
   type MutationContext,
   type StoreId,
-} from '../../index';
-import type { AgentRecord, AgentStore } from './spawn';
+} from '../../index.js';
+import type { AgentRecord, AgentStore } from './spawn.js';
 
 /** Pool actions — mirrors the CLI inputSchema enum (agent-tools.ts:443-447).
  *  'status' is read-only and routes through dispatchRead at wire-up time. */

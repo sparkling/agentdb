@@ -9,9 +9,9 @@
 // to `MutationContext<true>` whose `child`/`bulk` are typed `never`. Compile-time
 // enforcement of §Performance contract #4 ("hot-path writes are leaf intents").
 
-import type { MutationContext } from './mutation-context';
-import type { ReadContext } from './read-context';
-import type { GuardedRead, GuardedWrite } from './types';
+import type { MutationContext } from './mutation-context.js';
+import type { ReadContext } from './read-context.js';
+import type { GuardedRead, GuardedWrite } from './types.js';
 
 /** Cache scope hint for read handlers (used by archivist's cache-routing). */
 export type CacheScope = 'namespace' | 'store' | 'global';

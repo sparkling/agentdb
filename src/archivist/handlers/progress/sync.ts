@@ -23,7 +23,7 @@ import {
   type GuardedWrite,
   type MutationContext,
   type StoreId,
-} from '../../index';
+} from '../../index.js';
 
 /** Persisted progress snapshot — shape mirrors the cli's `syncProgress()`
  *  output (progress-tools.ts lines 224-235) so consumers of v3-progress.json

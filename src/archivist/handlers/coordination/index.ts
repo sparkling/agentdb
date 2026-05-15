@@ -8,9 +8,9 @@
 // has no mutation handler. If it later gains a read-handler (Phase 6+) it
 // should land under this same directory and be re-exported below.
 
-export * from './topology';
-export * from './load-balance';
-export * from './sync';
-export * from './node';
-export * from './consensus';
-export * from './orchestrate';
+export * from './topology.js';
+export * from './load-balance.js';
+export * from './sync.js';
+export * from './node.js';
+export * from './consensus.js';
+export * from './orchestrate.js';

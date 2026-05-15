@@ -31,7 +31,7 @@ import {
   type GuardedWrite,
   type MutationContext,
   type StoreId,
-} from '../../index';
+} from '../../index.js';
 
 /** Load-balancing algorithm — matches the CLI inputSchema enum. */
 export type LoadBalanceAlgorithm =

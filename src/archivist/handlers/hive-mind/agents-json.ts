@@ -25,7 +25,7 @@ import {
   type GuardedWrite,
   type MutationContext,
   type StoreId,
-} from '../../index';
+} from '../../index.js';
 
 /** Single agent record persisted under agents.json. Matches the structure
  *  produced by hive-mind_spawn / agent_spawn at the cli surface. */

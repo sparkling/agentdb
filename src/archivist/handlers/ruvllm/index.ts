@@ -3,9 +3,9 @@
 // Importing this module triggers the side-effecting `registerMutationHandler`
 // calls so the registry is populated before dispatch.
 
-export * from './hnsw-create';
-export * from './hnsw-add';
-export * from './sona-create';
-export * from './sona-adapt';
-export * from './microlora-create';
-export * from './microlora-adapt';
+export * from './hnsw-create.js';
+export * from './hnsw-add.js';
+export * from './sona-create.js';
+export * from './sona-adapt.js';
+export * from './microlora-create.js';
+export * from './microlora-adapt.js';

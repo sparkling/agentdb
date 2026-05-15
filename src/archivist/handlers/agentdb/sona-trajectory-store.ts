@@ -33,7 +33,7 @@ import {
   type GuardedWrite,
   type MutationContext,
   type StoreId,
-} from '../../index';
+} from '../../index.js';
 
 /**
  * Discriminator for SonaTrajectoryService actions. `'record'` is the

@@ -21,9 +21,9 @@ import {
   type GuardedWrite,
   type MutationContext,
   type StoreId,
-} from '../../index';
+} from '../../index.js';
 
-import type { ConfigScope } from './set';
+import type { ConfigScope } from './set.js';
 
 /** Mutation payload — mirrors the cli `config_reset` inputSchema. `key`
  *  optional: omitted means "reset the whole scope to defaults"; present means

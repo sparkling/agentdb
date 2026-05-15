@@ -40,7 +40,7 @@ import {
   type GuardedWrite,
   type MutationContext,
   type StoreId,
-} from '../../index';
+} from '../../index.js';
 
 /** Per-suite benchmark result — shape mirrors the cli's `Benchmark`
  *  interface (performance-tools.ts:35-46). Retained verbatim so existing

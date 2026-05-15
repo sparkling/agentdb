@@ -32,8 +32,8 @@ import {
   type GuardedWrite,
   type MutationContext,
   type StoreId,
-} from '../../index';
-import type { DaaCognitivePattern } from './agent-create';
+} from '../../index.js';
+import type { DaaCognitivePattern } from './agent-create.js';
 
 /** Action discriminator — matches the cli inputSchema enum (daa-tools.ts:511). */
 export type DaaCognitivePatternAction = 'analyze' | 'change';

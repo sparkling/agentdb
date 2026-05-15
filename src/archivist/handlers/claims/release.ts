@@ -10,8 +10,8 @@ import {
   type GuardedWrite,
   type MutationContext,
   type StoreId,
-} from '../../index';
-import type { Claimant, ClaimsStore } from './claim';
+} from '../../index.js';
+import type { Claimant, ClaimsStore } from './claim.js';
 
 export interface ClaimsReleasePayload {
   readonly issueId: string;

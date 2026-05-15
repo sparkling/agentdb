@@ -100,6 +100,7 @@ export const agentdbFeedbackHandler: GuardedWrite<AgentdbFeedbackPayload> =
           tags: ['feedback', 'fallback'],
           controller: 'memory-store-fallback',
         });
+      });
     },
     {
       invariants: [], // wired by invariants-author per ADR-0180 §Mutation invariants

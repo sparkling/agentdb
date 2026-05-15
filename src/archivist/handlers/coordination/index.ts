@@ -9,12 +9,9 @@
 // should land under this same directory and be re-exported below.
 
 // IMPLEMENTED handlers
+export * from './consensus.js';
 export * from './topology.js';
 export * from './load-balance.js';
 export * from './sync.js';
 export * from './node.js';
 export * from './orchestrate.js';
-
-// STUB handlers — body pending Phase N wire-up; dispatch surfaces
-// `tool not registered` → acceptance skip-accepted.
-//   export * from './consensus.js';

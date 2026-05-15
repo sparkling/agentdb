@@ -8,8 +8,12 @@
 // writes to `.claude-flow/github/store.json`) and so does not require a
 // mutation handler. Per ADR-0180 §Audit chain, reads are passthroughs.
 
+// IMPLEMENTED handlers
 export * from './shared.js';
 export * from './repo-analyze.js';
 export * from './pr-manage.js';
 export * from './issue-track.js';
-export * from './workflow.js';
+
+// STUB handlers — pending Phase N wire-up; dispatch surfaces
+// `tool not registered` → acceptance skip-accepted.
+//   export * from './workflow.js';

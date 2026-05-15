@@ -8,10 +8,10 @@ export * from './agents-json.js';
 export * from './broadcast.js';
 export * from './init.js';
 export * from './memory.js';
+export * from './shutdown.js';
 export * from './spawn.js';
 
 // STUB handlers — pending Phase N wire-up; dispatch surfaces
 // `tool not registered` → acceptance skip-accepted.
 //   export * from './consensus.js';
-//   export * from './shutdown.js';
 //   export * from './status.js';

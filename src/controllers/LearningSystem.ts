@@ -18,22 +18,27 @@
  * - Monte Carlo Tree Search (MCTS)
  * - Model-Based RL
  *
- * ADR-0170 Phase B.6 (2026-05-11): ported from SQLite (better-sqlite3) to
- * PostgreSQL via PostgresBackend. The SQLite code path and the Option F
- * `learning_vec` mirror writes were dead-stripped atomically with this
- * commit. GROUP BY queries were hardened against postgres strictness —
- * every non-aggregated SELECT column appears in GROUP BY (or is wrapped
- * in an aggregate). Date-bucketed aggregates compute the bucket
- * expression verbatim in both SELECT and GROUP BY (postgres does not
- * resolve SELECT aliases inside GROUP BY without a subquery wrapper).
+ * ADR-0181 Item 5 (2026-05-16): reverted from PostgresBackend (pglite, ADR-0170
+ * Phase B.6) to better-sqlite3. Postgres was retired by ADR-0177 (RVF-first
+ * single-node fork); LearningSystem was the last controller still importing it.
+ * The four `learning_*` tables now live in schemas/schema.sql alongside
+ * episodes/skills/hierarchical_memory and are provisioned by AgentDB.loadSchemas
+ * at boot — schemaReady gate is gone. Postgres-specific operators translated:
+ * `((metadata::jsonb)->>'latency_ms')::numeric` -> `CAST(json_extract(metadata,
+ * '$.latency_ms') AS REAL)`; `TO_CHAR(TO_TIMESTAMP(timestamp/1000.0),
+ * 'YYYY-MM-DD')` -> `strftime('%Y-%m-%d', timestamp/1000, 'unixepoch')` (with
+ * the bucket expression repeated verbatim in GROUP BY for SELECT-alias parity);
+ * `RETURNING id` -> `lastInsertRowid`.
  */
 
-import type { PostgresBackend } from '../backends/postgres/PostgresBackend.js';
 import { EmbeddingService } from './EmbeddingService.js';
 import { RuVectorLearning, LearningConfig as GNNConfig } from '../backends/ruvector/RuVectorLearning.js';
 import { SonaTrajectoryService } from '../services/SonaTrajectoryService.js';
 import { GNNService } from '../services/GNNService.js';
 import { getEmbeddingConfig } from '../core/config-chain.js';
+
+// Database type from db-fallback (matches HierarchicalMemory / NightlyLearner pattern)
+type Database = any;
 
 export interface LearningSession {
   id: string;
@@ -85,13 +90,9 @@ let _singleton: InstanceType<typeof LearningSystem> | null = null;
 
 export class LearningSystem {
   // ADR-0076 A4: definite-assignment due to _singleton early-return pattern in ctor
-  private backend!: PostgresBackend;
+  private db!: Database;
   private embedder!: EmbeddingService;
   private activeSessions: Map<string, LearningSession> = new Map();
-  // Schema init is async (postgres exec is async). Public methods await
-  // this before issuing SQL so the constructor stays synchronous and the
-  // singleton-cache pattern is preserved.
-  private schemaReady!: Promise<void>;
 
   // Phase 2: RuVector GNN and Sona integration
   private gnnLearning: RuVectorLearning | null = null;
@@ -102,7 +103,7 @@ export class LearningSystem {
 
   static _resetSingleton(): void { _singleton = null; }
 
-  constructor(backend: PostgresBackend, embedder: EmbeddingService) {
+  constructor(db: Database, embedder: EmbeddingService) {
     if (_singleton) {
       if (process.env.CLAUDE_FLOW_DEBUG) {
         console.warn(`[${this.constructor.name}] Duplicate construction detected — returning existing instance`);
@@ -110,9 +111,8 @@ export class LearningSystem {
       return _singleton as any;
     }
     _singleton = this;
-    this.backend = backend;
+    this.db = db;
     this.embedder = embedder;
-    this.schemaReady = this.initializeSchema();
     this.initializeRuVectorEnhancements().catch(err => {
       console.warn('[LearningSystem] RuVector enhancements unavailable:', err.message);
     });
@@ -179,73 +179,6 @@ export class LearningSystem {
   }
 
   /**
-   * Initialize database schema for learning system (PostgreSQL dialect).
-   *
-   * backend.initialize() is idempotent — the first controller to touch the
-   * shared PostgresBackend pays the cluster-warm-up cost; subsequent
-   * controllers no-op. The returned promise is stored as `schemaReady`
-   * and awaited by every public method before issuing SQL.
-   */
-  private async initializeSchema(): Promise<void> {
-    await this.backend.initialize();
-    await this.backend.exec(`
-      CREATE TABLE IF NOT EXISTS learning_sessions (
-        id TEXT PRIMARY KEY,
-        user_id TEXT NOT NULL,
-        session_type TEXT NOT NULL,
-        config TEXT NOT NULL,
-        start_time BIGINT NOT NULL,
-        end_time BIGINT,
-        status TEXT NOT NULL,
-        metadata TEXT
-      );
-
-      CREATE INDEX IF NOT EXISTS idx_learning_sessions_user ON learning_sessions(user_id);
-      CREATE INDEX IF NOT EXISTS idx_learning_sessions_status ON learning_sessions(status);
-
-      CREATE TABLE IF NOT EXISTS learning_experiences (
-        id BIGSERIAL PRIMARY KEY,
-        session_id TEXT NOT NULL,
-        state TEXT NOT NULL,
-        action TEXT NOT NULL,
-        reward REAL NOT NULL,
-        next_state TEXT,
-        success INTEGER NOT NULL,
-        timestamp BIGINT NOT NULL,
-        metadata TEXT,
-        FOREIGN KEY (session_id) REFERENCES learning_sessions(id) ON DELETE CASCADE
-      );
-
-      CREATE INDEX IF NOT EXISTS idx_learning_experiences_session ON learning_experiences(session_id);
-      CREATE INDEX IF NOT EXISTS idx_learning_experiences_reward ON learning_experiences(reward);
-
-      CREATE TABLE IF NOT EXISTS learning_policies (
-        id BIGSERIAL PRIMARY KEY,
-        session_id TEXT NOT NULL,
-        state_action_pairs TEXT NOT NULL,
-        q_values TEXT NOT NULL,
-        visit_counts TEXT NOT NULL,
-        avg_rewards TEXT NOT NULL,
-        version INTEGER NOT NULL,
-        created_at BIGINT NOT NULL DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT,
-        FOREIGN KEY (session_id) REFERENCES learning_sessions(id) ON DELETE CASCADE
-      );
-
-      CREATE INDEX IF NOT EXISTS idx_learning_policies_session ON learning_policies(session_id);
-
-      CREATE TABLE IF NOT EXISTS learning_state_embeddings (
-        id BIGSERIAL PRIMARY KEY,
-        session_id TEXT NOT NULL,
-        state TEXT NOT NULL,
-        embedding BYTEA NOT NULL,
-        FOREIGN KEY (session_id) REFERENCES learning_sessions(id) ON DELETE CASCADE
-      );
-
-      CREATE INDEX IF NOT EXISTS idx_learning_state_embeddings_session ON learning_state_embeddings(session_id);
-    `);
-  }
-
-  /**
    * Start a new learning session
    */
   async startSession(
@@ -253,7 +186,6 @@ export class LearningSystem {
     sessionType: LearningSession['sessionType'],
     config: LearningConfig
   ): Promise<string> {
-    await this.schemaReady;
     const sessionId = `session-${Date.now()}-${Math.random().toString(36).substring(7)}`;
 
     const session: LearningSession = {
@@ -266,17 +198,16 @@ export class LearningSystem {
     };
 
     // Store session in database
-    await this.backend.query(
+    this.db.prepare(
       `INSERT INTO learning_sessions (id, user_id, session_type, config, start_time, status)
-       VALUES ($1, $2, $3, $4, $5, $6)`,
-      [
-        session.id,
-        session.userId,
-        session.sessionType,
-        JSON.stringify(session.config),
-        session.startTime,
-        session.status,
-      ],
+       VALUES (?, ?, ?, ?, ?, ?)`,
+    ).run(
+      session.id,
+      session.userId,
+      session.sessionType,
+      JSON.stringify(session.config),
+      session.startTime,
+      session.status,
     );
 
     // Cache in memory
@@ -290,7 +221,6 @@ export class LearningSystem {
    * End a learning session and save final policy
    */
   async endSession(sessionId: string): Promise<void> {
-    await this.schemaReady;
     const session = this.activeSessions.get(sessionId) || await this.getSession(sessionId);
 
     if (!session) {
@@ -307,12 +237,11 @@ export class LearningSystem {
     await this.savePolicy(sessionId);
 
     // Update session status
-    await this.backend.query(
+    this.db.prepare(
       `UPDATE learning_sessions
-       SET status = 'completed', end_time = $1
-       WHERE id = $2`,
-      [endTime, sessionId],
-    );
+       SET status = 'completed', end_time = ?
+       WHERE id = ?`,
+    ).run(endTime, sessionId);
 
     // Update memory cache
     session.endTime = endTime;
@@ -328,7 +257,6 @@ export class LearningSystem {
    * Predict next action with confidence scores
    */
   async predict(sessionId: string, state: string): Promise<ActionPrediction> {
-    await this.schemaReady;
     const session = this.activeSessions.get(sessionId) || await this.getSession(sessionId);
 
     if (!session) {
@@ -386,7 +314,6 @@ export class LearningSystem {
    * Submit feedback for learning
    */
   async submitFeedback(feedback: ActionFeedback): Promise<void> {
-    await this.schemaReady;
     const session = this.activeSessions.get(feedback.sessionId) || await this.getSession(feedback.sessionId);
 
     if (!session) {
@@ -394,19 +321,18 @@ export class LearningSystem {
     }
 
     // Store experience in database
-    await this.backend.query(
+    this.db.prepare(
       `INSERT INTO learning_experiences (
         session_id, state, action, reward, next_state, success, timestamp
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-      [
-        feedback.sessionId,
-        feedback.state,
-        feedback.action,
-        feedback.reward,
-        feedback.nextState ?? null,
-        feedback.success ? 1 : 0,
-        feedback.timestamp,
-      ],
+      ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      feedback.sessionId,
+      feedback.state,
+      feedback.action,
+      feedback.reward,
+      feedback.nextState ?? null,
+      feedback.success ? 1 : 0,
+      feedback.timestamp,
     );
 
     // Update policy incrementally based on algorithm
@@ -424,7 +350,6 @@ export class LearningSystem {
     batchSize: number,
     learningRate: number
   ): Promise<TrainingResult> {
-    await this.schemaReady;
     const session = this.activeSessions.get(sessionId) || await this.getSession(sessionId);
 
     if (!session) {
@@ -434,13 +359,11 @@ export class LearningSystem {
     const startTime = Date.now();
 
     // Get all experiences for this session
-    const expResult = await this.backend.query(
+    const experiences = this.db.prepare(
       `SELECT * FROM learning_experiences
-       WHERE session_id = $1
+       WHERE session_id = ?
        ORDER BY timestamp ASC`,
-      [sessionId],
-    );
-    const experiences = expResult.rows as any[];
+    ).all(sessionId) as any[];
 
     if (experiences.length === 0) {
       throw new Error(`No training data available for session: ${sessionId}`);
@@ -503,11 +426,9 @@ export class LearningSystem {
    * Get session from database
    */
   private async getSession(sessionId: string): Promise<LearningSession | null> {
-    const result = await this.backend.query(
-      `SELECT * FROM learning_sessions WHERE id = $1`,
-      [sessionId],
-    );
-    const row = result.rows[0] as any;
+    const row = this.db.prepare(
+      `SELECT * FROM learning_sessions WHERE id = ?`,
+    ).get(sessionId) as any;
 
     if (!row) return null;
 
@@ -528,15 +449,13 @@ export class LearningSystem {
    */
   private async getStateEmbedding(sessionId: string, state: string): Promise<Float32Array> {
     // Check if embedding exists
-    const existingResult = await this.backend.query(
+    const existing = this.db.prepare(
       `SELECT embedding FROM learning_state_embeddings
-       WHERE session_id = $1 AND state = $2`,
-      [sessionId, state],
-    );
-    const existing = existingResult.rows[0] as any;
+       WHERE session_id = ? AND state = ?`,
+    ).get(sessionId, state) as any;
 
     if (existing) {
-      // pglite/pg return BYTEA as a Node Buffer / Uint8Array; normalize.
+      // SQLite returns BLOB as a Node Buffer; reinterpret bytes as Float32Array.
       const raw = existing.embedding;
       const buf = raw instanceof Buffer ? raw : Buffer.from(raw);
       return new Float32Array(buf.buffer, buf.byteOffset, buf.byteLength / 4);
@@ -546,11 +465,10 @@ export class LearningSystem {
     const embedding = await this.embedder.embed(state);
 
     // Store embedding
-    await this.backend.query(
+    this.db.prepare(
       `INSERT INTO learning_state_embeddings (session_id, state, embedding)
-       VALUES ($1, $2, $3)`,
-      [sessionId, state, Buffer.from(embedding.buffer)],
-    );
+       VALUES (?, ?, ?)`,
+    ).run(sessionId, state, Buffer.from(embedding.buffer));
 
     return embedding;
   }
@@ -559,14 +477,12 @@ export class LearningSystem {
    * Get latest policy for session
    */
   private async getLatestPolicy(sessionId: string): Promise<any> {
-    const result = await this.backend.query(
+    const policy = this.db.prepare(
       `SELECT * FROM learning_policies
-       WHERE session_id = $1
+       WHERE session_id = ?
        ORDER BY version DESC
        LIMIT 1`,
-      [sessionId],
-    );
-    const policy = result.rows[0] as any;
+    ).get(sessionId) as any;
 
     if (!policy) {
       // Return empty policy
@@ -596,12 +512,10 @@ export class LearningSystem {
     policy: any
   ): Promise<Array<{ action: string; score: number }>> {
     // Get possible actions from past experiences
-    const actionsResult = await this.backend.query(
+    const actions = (this.db.prepare(
       `SELECT DISTINCT action FROM learning_experiences
-       WHERE session_id = $1`,
-      [session.id],
-    );
-    const actions = (actionsResult.rows as any[]).map(row => row.action as string);
+       WHERE session_id = ?`,
+    ).all(session.id) as any[]).map(row => row.action as string);
 
     if (actions.length === 0) {
       // Default actions if none exist
@@ -764,26 +678,23 @@ export class LearningSystem {
   private async savePolicy(sessionId: string): Promise<void> {
     const policy = await this.getLatestPolicy(sessionId);
 
-    const verResult = await this.backend.query(
+    const currentVersion = this.db.prepare(
       `SELECT MAX(version) as max_version FROM learning_policies
-       WHERE session_id = $1`,
-      [sessionId],
-    );
-    const currentVersion = verResult.rows[0] as any;
+       WHERE session_id = ?`,
+    ).get(sessionId) as any;
     const version = (currentVersion?.max_version != null ? Number(currentVersion.max_version) : 0) + 1;
 
-    await this.backend.query(
+    this.db.prepare(
       `INSERT INTO learning_policies (
         session_id, state_action_pairs, q_values, visit_counts, avg_rewards, version
-      ) VALUES ($1, $2, $3, $4, $5, $6)`,
-      [
-        sessionId,
-        JSON.stringify(policy.stateActionPairs || {}),
-        JSON.stringify(policy.qValues || {}),
-        JSON.stringify(policy.visitCounts || {}),
-        JSON.stringify(policy.avgRewards || {}),
-        version,
-      ],
+      ) VALUES (?, ?, ?, ?, ?, ?)`,
+    ).run(
+      sessionId,
+      JSON.stringify(policy.stateActionPairs || {}),
+      JSON.stringify(policy.qValues || {}),
+      JSON.stringify(policy.visitCounts || {}),
+      JSON.stringify(policy.avgRewards || {}),
+      version,
     );
   }
 
@@ -792,14 +703,12 @@ export class LearningSystem {
    */
   private async calculateConvergenceRate(sessionId: string): Promise<number> {
     // Get policy versions
-    const result = await this.backend.query(
+    const versions = this.db.prepare(
       `SELECT version, q_values FROM learning_policies
-       WHERE session_id = $1
+       WHERE session_id = ?
        ORDER BY version DESC
        LIMIT 10`,
-      [sessionId],
-    );
-    const versions = result.rows as any[];
+    ).all(sessionId) as any[];
 
     if (versions.length < 2) return 0;
 
@@ -859,10 +768,12 @@ export class LearningSystem {
   /**
    * Get learning performance metrics with time windows and trends
    *
-   * GROUP BY hardening (Phase B.6): every non-aggregate column in SELECT
-   * appears in GROUP BY. `trends` uses a single computed bucket expression
-   * repeated verbatim in GROUP BY (postgres does not let you reference a
-   * SELECT alias from GROUP BY without a subquery).
+   * SQLite dialect (post-Item-5): JSON access uses `json_extract(metadata,
+   * '$.latency_ms')` (JSON1 extension, built into better-sqlite3 ≥8). Date
+   * bucket uses `strftime('%Y-%m-%d', timestamp/1000, 'unixepoch')` and the
+   * expression is repeated verbatim in GROUP BY for parity with the postgres
+   * port (postgres requires it; SQLite is lenient — repeating it makes both
+   * dialects valid against the same shape).
    */
   async getMetrics(options: {
     sessionId?: string;
@@ -870,42 +781,37 @@ export class LearningSystem {
     includeTrends?: boolean;
     groupBy?: 'task' | 'session' | 'skill';
   }): Promise<any> {
-    await this.schemaReady;
     const { sessionId, timeWindowDays = 7, includeTrends = true, groupBy = 'task' } = options;
 
     const cutoffTimestamp = Date.now() - (timeWindowDays * 24 * 60 * 60 * 1000);
 
-    // Base query filters — built with positional $N placeholders
-    let whereClause = 'WHERE timestamp >= $1';
+    // Base query filters — built with positional `?` placeholders
+    let whereClause = 'WHERE timestamp >= ?';
     const params: any[] = [cutoffTimestamp];
 
     if (sessionId) {
-      whereClause += ' AND session_id = $2';
+      whereClause += ' AND session_id = ?';
       params.push(sessionId);
     }
 
-    // Overall metrics — port of `json_extract(metadata, '$.latency_ms')` to
-    // `((metadata::jsonb)->>'latency_ms')::numeric`. `metadata` is a JSON-
-    // serialized TEXT column; cast to jsonb at read time.
-    const overallResult = await this.backend.query(
+    // Overall metrics — `metadata` is a JSON-serialized TEXT column; JSON1's
+    // json_extract returns TEXT, CAST to REAL for AVG().
+    const overallStats = this.db.prepare(
       `SELECT
         COUNT(*) as total_episodes,
         AVG(reward) as avg_reward,
         AVG(CASE WHEN success = 1 THEN 1.0 ELSE 0.0 END) as success_rate,
         MIN(reward) as min_reward,
         MAX(reward) as max_reward,
-        AVG(CASE WHEN metadata IS NOT NULL THEN ((metadata::jsonb)->>'latency_ms')::numeric ELSE NULL END) as avg_latency_ms
+        AVG(CASE WHEN metadata IS NOT NULL THEN CAST(json_extract(metadata, '$.latency_ms') AS REAL) ELSE NULL END) as avg_latency_ms
       FROM learning_experiences
       ${whereClause}`,
-      params,
-    );
-    const overallStats = overallResult.rows[0] as any;
+    ).get(...params) as any;
 
-    // Group by metrics — task/session aggregations. Every non-aggregate
-    // column in SELECT (`state` / `session_id`) appears verbatim in GROUP BY.
+    // Group by metrics — task/session aggregations.
     let groupedMetrics: any[] = [];
     if (groupBy === 'task') {
-      const r = await this.backend.query(
+      groupedMetrics = this.db.prepare(
         `SELECT
           state as group_key,
           COUNT(*) as count,
@@ -916,11 +822,9 @@ export class LearningSystem {
         GROUP BY state
         ORDER BY count DESC
         LIMIT 20`,
-        params,
-      );
-      groupedMetrics = r.rows as any[];
+      ).all(...params) as any[];
     } else if (groupBy === 'session') {
-      const r = await this.backend.query(
+      groupedMetrics = this.db.prepare(
         `SELECT
           session_id as group_key,
           COUNT(*) as count,
@@ -931,46 +835,38 @@ export class LearningSystem {
         GROUP BY session_id
         ORDER BY count DESC
         LIMIT 20`,
-        params,
-      );
-      groupedMetrics = r.rows as any[];
+      ).all(...params) as any[];
     }
 
-    // Trend analysis — port of SQLite `DATE(timestamp / 1000, 'unixepoch')`.
-    // The bucket expression appears verbatim in both SELECT and GROUP BY
-    // (postgres does not resolve SELECT aliases inside GROUP BY without
-    // a subquery wrapper).
+    // Trend analysis — date bucket expression repeated verbatim in SELECT
+    // and GROUP BY (postgres-parity, always valid in SQLite).
     let trends: any[] = [];
     if (includeTrends) {
-      const r = await this.backend.query(
+      trends = this.db.prepare(
         `SELECT
-          TO_CHAR(TO_TIMESTAMP(timestamp / 1000.0), 'YYYY-MM-DD') as date_bucket,
+          strftime('%Y-%m-%d', timestamp/1000, 'unixepoch') as date_bucket,
           COUNT(*) as count,
           AVG(reward) as avg_reward,
           AVG(CASE WHEN success = 1 THEN 1.0 ELSE 0.0 END) as success_rate
         FROM learning_experiences
         ${whereClause}
-        GROUP BY TO_CHAR(TO_TIMESTAMP(timestamp / 1000.0), 'YYYY-MM-DD')
+        GROUP BY strftime('%Y-%m-%d', timestamp/1000, 'unixepoch')
         ORDER BY date_bucket ASC`,
-        params,
-      );
-      trends = r.rows as any[];
+      ).all(...params) as any[];
     }
 
     // Policy improvement metrics
     let policyVersions: any[] = [];
     if (sessionId) {
-      const r = await this.backend.query(
+      policyVersions = this.db.prepare(
         `SELECT
           version,
           created_at,
           q_values
         FROM learning_policies
-        WHERE session_id = $1
+        WHERE session_id = ?
         ORDER BY version ASC`,
-        [sessionId],
-      );
-      policyVersions = r.rows as any[];
+      ).all(sessionId) as any[];
     }
 
     let policyImprovement = 0;
@@ -1031,7 +927,6 @@ export class LearningSystem {
     transferType?: 'episodes' | 'skills' | 'causal_edges' | 'all';
     maxTransfers?: number;
   }): Promise<any> {
-    await this.schemaReady;
     const {
       sourceSession,
       targetSession,
@@ -1059,16 +954,14 @@ export class LearningSystem {
 
     // Transfer episodes
     if (transferType === 'episodes' || transferType === 'all') {
-      const sourceFilter = sourceSession ? 'session_id = $1' : 'state LIKE $1';
+      const sourceFilter = sourceSession ? 'session_id = ?' : 'state LIKE ?';
       const sourceArg = sourceSession ?? `%${sourceTask}%`;
-      const r = await this.backend.query(
+      const sourceEpisodes = this.db.prepare(
         `SELECT * FROM learning_experiences
          WHERE ${sourceFilter}
          ORDER BY reward DESC
-         LIMIT $2`,
-        [sourceArg, maxTransfers],
-      );
-      const sourceEpisodes = r.rows as any[];
+         LIMIT ?`,
+      ).all(sourceArg, maxTransfers) as any[];
 
       for (const episode of sourceEpisodes) {
         // Check similarity if transferring between tasks
@@ -1089,20 +982,19 @@ export class LearningSystem {
         }
 
         // Insert transferred episode
-        await this.backend.query(
+        this.db.prepare(
           `INSERT INTO learning_experiences (
             session_id, state, action, reward, next_state, success, timestamp, metadata
-          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-          [
-            targetSession ?? episode.session_id,
-            targetTask ?? episode.state,
-            episode.action,
-            episode.reward,
-            episode.next_state,
-            episode.success,
-            Date.now(),
-            JSON.stringify({ transferred_from: episode.id }),
-          ],
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        ).run(
+          targetSession ?? episode.session_id,
+          targetTask ?? episode.state,
+          episode.action,
+          episode.reward,
+          episode.next_state,
+          episode.success,
+          Date.now(),
+          JSON.stringify({ transferred_from: episode.id }),
         );
 
         transferred.episodes++;
@@ -1135,25 +1027,22 @@ export class LearningSystem {
 
       if (transferredQValues > 0) {
         // Save updated target policy
-        const verResult = await this.backend.query(
-          `SELECT MAX(version) as max_version FROM learning_policies WHERE session_id = $1`,
-          [targetSession],
-        );
-        const verRow = verResult.rows[0] as any;
+        const verRow = this.db.prepare(
+          `SELECT MAX(version) as max_version FROM learning_policies WHERE session_id = ?`,
+        ).get(targetSession) as any;
         const version = (verRow?.max_version != null ? Number(verRow.max_version) : 0);
 
-        await this.backend.query(
+        this.db.prepare(
           `INSERT INTO learning_policies (
             session_id, state_action_pairs, q_values, visit_counts, avg_rewards, version
-          ) VALUES ($1, $2, $3, $4, $5, $6)`,
-          [
-            targetSession,
-            JSON.stringify(targetPolicy.stateActionPairs || {}),
-            JSON.stringify(targetPolicy.qValues || {}),
-            JSON.stringify(targetPolicy.visitCounts || {}),
-            JSON.stringify(targetPolicy.avgRewards || {}),
-            version + 1,
-          ],
+          ) VALUES (?, ?, ?, ?, ?, ?)`,
+        ).run(
+          targetSession,
+          JSON.stringify(targetPolicy.stateActionPairs || {}),
+          JSON.stringify(targetPolicy.qValues || {}),
+          JSON.stringify(targetPolicy.visitCounts || {}),
+          JSON.stringify(targetPolicy.avgRewards || {}),
+          version + 1,
         );
 
         transferred.skills = transferredQValues;
@@ -1181,7 +1070,6 @@ export class LearningSystem {
     includeEvidence?: boolean;
     includeCausal?: boolean;
   }): Promise<any> {
-    await this.schemaReady;
     const {
       query,
       k = 5,
@@ -1195,12 +1083,11 @@ export class LearningSystem {
     const queryEmbed = await this.embedder.embed(query);
 
     // Find similar past experiences
-    const expResult = await this.backend.query(
+    const allExperiences = this.db.prepare(
       `SELECT * FROM learning_experiences
        ORDER BY timestamp DESC
        LIMIT 100`,
-    );
-    const allExperiences = expResult.rows as any[];
+    ).all() as any[];
 
     const rankedExperiences: any[] = [];
     for (const exp of allExperiences) {
@@ -1259,20 +1146,19 @@ export class LearningSystem {
     recommendations.sort((a, b) => b.confidence - a.confidence);
 
     // Causal reasoning chains (if enabled). causal_edges is owned by
-    // CausalMemoryGraph (separate Phase B port); the table may not exist on
-    // a fresh LearningSystem-only test instance — tolerate that with an
+    // CausalMemoryGraph (separate controller); the table may not exist on a
+    // fresh LearningSystem-only test instance — tolerate that with an
     // empty-result fallback. This is not a silent failure: the controller
-    // has no authoritative schema ownership of causal_edges, and the
-    // query is best-effort context for explainability.
+    // has no authoritative schema ownership of causal_edges, and the query
+    // is best-effort context for explainability.
     let causalChains: any[] = [];
     if (includeCausal) {
       try {
-        const r = await this.backend.query(
+        causalChains = this.db.prepare(
           `SELECT * FROM causal_edges
            ORDER BY uplift DESC
            LIMIT 5`,
-        );
-        causalChains = r.rows as any[];
+        ).all() as any[];
       } catch {
         causalChains = [];
       }
@@ -1315,7 +1201,6 @@ export class LearningSystem {
     latencyMs?: number;
     metadata?: any;
   }): Promise<number> {
-    await this.schemaReady;
     const {
       sessionId,
       toolName,
@@ -1333,33 +1218,31 @@ export class LearningSystem {
     const state = `tool:${toolName}|${action}`;
     const nextState = stateAfter ? JSON.stringify(stateAfter) : null;
 
-    // Store as learning experience. RETURNING gives us the BIGSERIAL id
-    // (replaces SQLite's result.lastInsertRowid).
-    const result = await this.backend.query(
+    // Store as learning experience. lastInsertRowid replaces postgres'
+    // RETURNING id (BIGSERIAL).
+    const result = this.db.prepare(
       `INSERT INTO learning_experiences (
         session_id, state, action, reward, next_state, success, timestamp, metadata
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-      RETURNING id`,
-      [
-        sessionId,
-        state,
-        outcome,
-        reward,
-        nextState,
-        success ? 1 : 0,
-        Date.now(),
-        JSON.stringify({
-          toolName,
-          action,
-          stateBefore,
-          stateAfter,
-          latencyMs,
-          ...metadata,
-        }),
-      ],
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      sessionId,
+      state,
+      outcome,
+      reward,
+      nextState,
+      success ? 1 : 0,
+      Date.now(),
+      JSON.stringify({
+        toolName,
+        action,
+        stateBefore,
+        stateAfter,
+        latencyMs,
+        ...metadata,
+      }),
     );
 
-    const insertedId = Number((result.rows[0] as any).id);
+    const insertedId = Number(result.lastInsertRowid);
     console.log(`✅ Experience recorded: tool=${toolName}, reward=${reward}, success=${success}`);
     return insertedId;
   }
@@ -1368,8 +1251,7 @@ export class LearningSystem {
    * Calculate reward signal with shaping based on multiple factors
    *
    * Async because the optional causal-impact adjustment reads from
-   * `causal_edges` (owned by CausalMemoryGraph). Callers in MCP and the
-   * unit suite were updated alongside this port (Phase B.6).
+   * `causal_edges` (owned by CausalMemoryGraph).
    */
   async calculateReward(options: {
     episodeId?: number;
@@ -1438,17 +1320,14 @@ export class LearningSystem {
     }
 
     // Causal impact adjustment. causal_edges is owned by CausalMemoryGraph
-    // (separate Phase B port); tolerate its absence in test-only contexts.
+    // (separate controller); tolerate its absence in test-only contexts.
     if (includeCausal && episodeId) {
       try {
-        await this.schemaReady;
-        const r = await this.backend.query(
+        const causalEdges = this.db.prepare(
           `SELECT AVG(uplift) as avg_uplift
            FROM causal_edges
-           WHERE from_memory_id = $1 OR to_memory_id = $1`,
-          [episodeId],
-        );
-        const causalEdges = r.rows[0] as any;
+           WHERE from_memory_id = ? OR to_memory_id = ?`,
+        ).get(episodeId, episodeId) as any;
         if (causalEdges?.avg_uplift != null) {
           reward += Number(causalEdges.avg_uplift) * 0.1; // 10% weight for causal impact
         }

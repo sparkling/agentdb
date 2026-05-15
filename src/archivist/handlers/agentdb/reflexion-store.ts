@@ -58,15 +58,52 @@ const STORE_ID = 'agentdb_reflexion_store' as StoreId;
 // the timeout semantics in the migrated path). The cli branch stays in
 // place until the dispatch boundary is wired through; this handler is the
 // registration shape the dispatch path will resolve.
+// ADR-0181 Phase 6 wire-up — port of cli `agentdb-tools.ts:1003`. Primary
+// path: ReflexionMemory controller writes via `storeEpisode` (v3) or `store`
+// (legacy) through the ReflexionStoreWriter capability (2-second timeout
+// preserved cli-side). Fallback path: substrate.withWrite RVF when controller
+// is unwired.
 export const storeReflexionHandler: GuardedWrite<AgentdbReflexionStorePayload> =
   registerMutationHandler<AgentdbReflexionStorePayload>(
     'agentdb_reflexion_store',
-    async (ctx: MutationContext<false>, _payload: AgentdbReflexionStorePayload): Promise<void> => {
-      await ctx.substrate.withWrite({ storeId: STORE_ID }, async (_handle) => {
-        throw new Error(
-          'archivist: agentdb_reflexion_store handler body pending Phase 6 wire-up; ' +
-          'callers currently route through forks/ruflo/v3/@claude-flow/cli/src/mcp-tools/agentdb-tools.ts agentdb_reflexion-store handler',
-        );
+    async (ctx: MutationContext<false>, payload: AgentdbReflexionStorePayload): Promise<void> => {
+      const writer = ctx.capabilities.requireReflexionStoreWriter();
+
+      await ctx.substrate.withWrite({ storeId: STORE_ID }, async (handle) => {
+        const result = await writer.storeEpisode({
+          sessionId: payload.session_id,
+          task: payload.task,
+          reward: payload.reward,
+          success: payload.success,
+        });
+
+        if (result && result.success) return;
+        if (result && !result.success && result.error && !/not available|not wired|not initialized|missing.*method|timed out/i.test(result.error)) {
+          throw new Error(`archivist: agentdb_reflexion_store — Reflexion rejected: ${result.error}`);
+        }
+
+        // Fallback: controller unwired / missing method / timed out. RVF
+        // persistence ensures the episode is observable.
+        const scorer = ctx.capabilities.requireEmbeddingScorer();
+        const embedding = await scorer.embed(payload.task);
+        const id = `reflexion-${payload.session_id}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+        const rvfHandle = handle as { rvf?: {
+          insertAsync(id: string, embedding: Float32Array, metadata?: Record<string, unknown>): Promise<void>;
+        } };
+        if (!rvfHandle.rvf || typeof rvfHandle.rvf.insertAsync !== 'function') {
+          throw new Error(
+            'archivist: agentdb_reflexion_store — RVF substrate handle missing `rvf.insertAsync`.',
+          );
+        }
+        await rvfHandle.rvf.insertAsync(id, embedding, {
+          namespace: 'reflexion',
+          sessionId: payload.session_id,
+          task: payload.task,
+          reward: payload.reward,
+          success: payload.success,
+          tags: ['reflexion', 'episode', 'fallback'],
+          controller: 'memory-store-fallback',
+        });
       });
     },
     {

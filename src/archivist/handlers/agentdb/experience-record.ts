@@ -66,15 +66,53 @@ const STORE_ID = 'agentdb_experience_record' as StoreId;
 // silent fallback). The cli branch stays in place until the dispatch
 // boundary is wired through; this handler is the registration shape the
 // dispatch path will resolve.
+// ADR-0181 Phase 6 wire-up — port of cli `agentdb-tools.ts:1797`. Primary
+// path: LearningSystem controller — capability's `recordExperience` calls
+// `startSession()` FIRST (FK to `learning_sessions(id)`) then
+// `recordExperience({action: task, input, output, reward, success})` (ADR-0090
+// B5 / ADR-0082). Fallback: RVF.
 export const recordExperienceHandler: GuardedWrite<AgentdbExperienceRecordPayload> =
   registerMutationHandler<AgentdbExperienceRecordPayload>(
     'agentdb_experience_record',
-    async (ctx: MutationContext<false>, _payload: AgentdbExperienceRecordPayload): Promise<void> => {
-      await ctx.substrate.withWrite({ storeId: STORE_ID }, async (_handle) => {
-        throw new Error(
-          'archivist: agentdb_experience_record handler body pending Phase 6 wire-up; ' +
-          'callers currently route through forks/ruflo/v3/@claude-flow/cli/src/mcp-tools/agentdb-tools.ts agentdb_experience_record handler',
-        );
+    async (ctx: MutationContext<false>, payload: AgentdbExperienceRecordPayload): Promise<void> => {
+      const task = payload.task;
+      const input = payload.input ?? '';
+      const output = payload.output ?? '';
+      const reward = payload.reward ?? 0.5;
+      const success = payload.success ?? false;
+      const writer = ctx.capabilities.requireLearningSystemWriter();
+
+      await ctx.substrate.withWrite({ storeId: STORE_ID }, async (handle) => {
+        const result = await writer.recordExperience({ task, input, output, reward, success });
+
+        if (result && result.success) return;
+        if (result && !result.success && result.error && !/not available|not wired|not initialized|missing.*method/i.test(result.error)) {
+          throw new Error(`archivist: agentdb_experience_record — LearningSystem rejected: ${result.error}`);
+        }
+
+        // Fallback: controller unwired. RVF persistence ensures observability.
+        const scorer = ctx.capabilities.requireEmbeddingScorer();
+        const embedded = `${task}\n${input}\n${output}`;
+        const embedding = await scorer.embed(embedded);
+        const id = `experience-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+        const rvfHandle = handle as { rvf?: {
+          insertAsync(id: string, embedding: Float32Array, metadata?: Record<string, unknown>): Promise<void>;
+        } };
+        if (!rvfHandle.rvf || typeof rvfHandle.rvf.insertAsync !== 'function') {
+          throw new Error(
+            'archivist: agentdb_experience_record — RVF substrate handle missing `rvf.insertAsync`.',
+          );
+        }
+        await rvfHandle.rvf.insertAsync(id, embedding, {
+          namespace: 'experience',
+          task,
+          input,
+          output,
+          reward,
+          success,
+          tags: ['experience', 'learning', 'fallback'],
+          controller: 'memory-store-fallback',
+        });
       });
     },
     {

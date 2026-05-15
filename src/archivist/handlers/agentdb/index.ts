@@ -24,17 +24,17 @@ export * from './causal-recall.js';
 export * from './neural-patterns.js';
 export * from './semantic-route.js';
 
-// STUB handlers — bodies throw `pending Phase N wire-up`. Registering them
-// would surface that throw at cli dispatch sites that flipped in Phase 5,
-// breaking acceptance checks. Excluded from registration; cli dispatch will
-// see `archivist: tool not registered '<name>'` which the acceptance
-// harness's `_expect_mcp_body` skip-accept whitelist matches (ADR-0082
-// narrow). Re-add each line below as the corresponding handler body lands
-// (Phase 6+):
-//   export * from './feedback.js';                // TODO Phase 3 wire-up
-//   export * from './pattern-store.js';           // TODO Phase 3 wire-up
-//   export * from './reflexion-store.js';         // TODO Phase 3 wire-up
-//   export * from './skill-create.js';            // TODO Phase 3 wire-up
-//   export * from './hierarchical-store.js';      // TODO Phase 3 wire-up
-//   export * from './sona-trajectory-store.js';   // TODO Phase 3 wire-up
-//   export * from './experience-record.js';       // TODO Phase 3 wire-up
+// ADR-0181 Phase 6 wire-up — bodies now port to call narrow writer
+// capabilities (ReasoningBankWriter / SkillLibraryWriter / ReflexionStoreWriter /
+// HierarchicalMemoryWriter / LearningSystemWriter / SonaTrajectoryWriter /
+// FeedbackRecorder) with RVF substrate.withWrite fallback when the underlying
+// cli controller is unwired. Each handler honours ADR-0082 no-silent-failure:
+// explicit controller errors (success:false + error not matching
+// unwired-pattern regex) throw rather than silently coalesce.
+export * from './feedback.js';
+export * from './pattern-store.js';
+export * from './reflexion-store.js';
+export * from './skill-create.js';
+export * from './hierarchical-store.js';
+export * from './sona-trajectory-store.js';
+export * from './experience-record.js';

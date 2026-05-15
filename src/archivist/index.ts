@@ -32,7 +32,14 @@ import {
   makeMutationCapabilities,
   makeReadCapabilities,
   type EmbeddingScorer,
+  type FeedbackRecorder,
+  type HierarchicalMemoryWriter,
+  type LearningSystemWriter,
   type PatternReader,
+  type ReasoningBankWriter,
+  type ReflexionStoreWriter,
+  type SkillLibraryWriter,
+  type SonaTrajectoryWriter,
   type TaskRouter,
 } from './capabilities.js';
 import {
@@ -100,11 +107,25 @@ export type {
 // capability, never the backend object (see `capabilities.ts`).
 export type {
   EmbeddingScorer,
+  FeedbackRecorder,
+  FeedbackWriteResult,
+  HierarchicalMemoryWriter,
+  HierarchicalWriteResult,
+  LearningSystemWriter,
+  LearningWriteResult,
   MutationCapabilities,
   PatternHit,
   PatternReader,
   ReadCapabilities,
+  ReasoningBankWriter,
+  ReasoningBankWriteResult,
+  ReflexionStoreWriter,
+  ReflexionWriteResult,
   RouteDecision,
+  SkillLibraryWriter,
+  SkillLibraryWriteResult,
+  SonaTrajectoryWriter,
+  SonaTrajectoryWriteResult,
   TaskRouter,
 } from './capabilities.js';
 export type {
@@ -246,6 +267,54 @@ export interface ArchivistInitConfig {
    * that gap re-tags `TODO(F4-3-callsite)` (see pattern-search.ts).
    */
   readonly patternReaderFactory?: () => PatternReader;
+  /**
+   * Lazy `ReasoningBankWriter` capability factory (ADR-0181 Phase 6 wire-up).
+   * Adapts the cli's `storePattern(...)` path
+   * (`agentdb-orchestration.ts:16` → `routePatternOp({ type:'store' })`) down
+   * to the narrow `ReasoningBankWriter` surface. Threaded onto
+   * `MutationContext.capabilities.reasoningBankWriter` — closes
+   * `handlers/agentdb/pattern-store.ts` wire-up.
+   */
+  readonly reasoningBankWriterFactory?: () => ReasoningBankWriter;
+  /**
+   * Lazy `SkillLibraryWriter` capability factory (Phase 6). Adapts the cli's
+   * `agentdb_skill_create` controller path (`agentdb-tools.ts:1650`) down to
+   * the narrow surface. Threaded onto
+   * `MutationContext.capabilities.skillLibraryWriter`.
+   */
+  readonly skillLibraryWriterFactory?: () => SkillLibraryWriter;
+  /**
+   * Lazy `ReflexionStoreWriter` capability factory (Phase 6). Adapts the cli's
+   * `agentdb_reflexion-store` controller path (`agentdb-tools.ts:1003`) down
+   * to the narrow surface.
+   */
+  readonly reflexionStoreWriterFactory?: () => ReflexionStoreWriter;
+  /**
+   * Lazy `HierarchicalMemoryWriter` capability factory (Phase 6). Adapts the
+   * cli's `hierarchicalStore(...)` path (`agentdb-orchestration.ts:269`) down
+   * to the narrow surface.
+   */
+  readonly hierarchicalMemoryWriterFactory?: () => HierarchicalMemoryWriter;
+  /**
+   * Lazy `LearningSystemWriter` capability factory (Phase 6). Adapts the cli's
+   * `agentdb_experience_record` controller path (`agentdb-tools.ts:1797`)
+   * down to the narrow surface — including the FK-priming `startSession()`
+   * call (ADR-0090 B5 / ADR-0082).
+   */
+  readonly learningSystemWriterFactory?: () => LearningSystemWriter;
+  /**
+   * Lazy `SonaTrajectoryWriter` capability factory (Phase 6). Adapts the cli's
+   * `agentdb_sona_trajectory_store` `'record'` action path
+   * (`agentdb-tools.ts:2039`) down to the narrow surface.
+   */
+  readonly sonaTrajectoryWriterFactory?: () => SonaTrajectoryWriter;
+  /**
+   * Lazy `FeedbackRecorder` capability factory (Phase 6). Adapts the cli's
+   * `recordFeedback(...)` path (`agentdb-orchestration.ts:85` →
+   * `routeFeedbackOp({ type:'record' })`) — fans out across LearningSystem +
+   * ReasoningBank controllers — down to the narrow surface.
+   */
+  readonly feedbackRecorderFactory?: () => FeedbackRecorder;
 }
 
 /**
@@ -315,6 +384,13 @@ export class Archivist {
   private taskRouter?: TaskRouter;
   private embeddingScorer?: EmbeddingScorer;
   private patternReader?: PatternReader;
+  private reasoningBankWriter?: ReasoningBankWriter;
+  private skillLibraryWriter?: SkillLibraryWriter;
+  private reflexionStoreWriter?: ReflexionStoreWriter;
+  private hierarchicalMemoryWriter?: HierarchicalMemoryWriter;
+  private learningSystemWriter?: LearningSystemWriter;
+  private sonaTrajectoryWriter?: SonaTrajectoryWriter;
+  private feedbackRecorder?: FeedbackRecorder;
 
   /**
    * Idempotent (the `initialized` guard is load-bearing — dispatch calls this on
@@ -380,6 +456,13 @@ export class Archivist {
     this.taskRouter = config.taskRouterFactory?.();
     this.embeddingScorer = config.embeddingScorerFactory?.();
     this.patternReader = config.patternReaderFactory?.();
+    this.reasoningBankWriter = config.reasoningBankWriterFactory?.();
+    this.skillLibraryWriter = config.skillLibraryWriterFactory?.();
+    this.reflexionStoreWriter = config.reflexionStoreWriterFactory?.();
+    this.hierarchicalMemoryWriter = config.hierarchicalMemoryWriterFactory?.();
+    this.learningSystemWriter = config.learningSystemWriterFactory?.();
+    this.sonaTrajectoryWriter = config.sonaTrajectoryWriterFactory?.();
+    this.feedbackRecorder = config.feedbackRecorderFactory?.();
 
     // FS-JSON stores are intentionally NOT pre-built — see `getSubstrate()`'s
     // lazy `mintLazy` closure. The `if (this.initialized) return` guard above
@@ -756,6 +839,13 @@ export class Archivist {
       capabilities: makeMutationCapabilities({
         taskRouter: this.taskRouter,
         embeddingScorer: this.embeddingScorer,
+        reasoningBankWriter: this.reasoningBankWriter,
+        skillLibraryWriter: this.skillLibraryWriter,
+        reflexionStoreWriter: this.reflexionStoreWriter,
+        hierarchicalMemoryWriter: this.hierarchicalMemoryWriter,
+        learningSystemWriter: this.learningSystemWriter,
+        sonaTrajectoryWriter: this.sonaTrajectoryWriter,
+        feedbackRecorder: this.feedbackRecorder,
       }),
       bulkDispatch: async () => {
         throw new Error('archivist: bulk dispatch not yet wired (Phase 4 substrate seam)');

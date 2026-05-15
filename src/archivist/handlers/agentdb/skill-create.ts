@@ -57,15 +57,53 @@ const STORE_ID = 'agentdb_skill_create' as StoreId;
 // rejection (cli line 1680, ADR-0082 no-silent-failure). The cli branch
 // stays in place until the dispatch boundary is wired through; this handler
 // is the registration shape the dispatch path will resolve.
+// ADR-0181 Phase 6 wire-up — port of cli `agentdb-tools.ts:1650`. Primary path:
+// SkillLibrary controller creates via `createSkill({...})` (v3 API) or
+// `promote(...)` (legacy) — both probed by the SkillLibraryWriter capability.
+// Fallback path: substrate.withWrite RVF when the controller is unwired (null
+// return). Explicit controller errors surface as throws (ADR-0082).
 export const createSkillHandler: GuardedWrite<AgentdbSkillCreatePayload> =
   registerMutationHandler<AgentdbSkillCreatePayload>(
     'agentdb_skill_create',
-    async (ctx: MutationContext<false>, _payload: AgentdbSkillCreatePayload): Promise<void> => {
-      await ctx.substrate.withWrite({ storeId: STORE_ID }, async (_handle) => {
-        throw new Error(
-          'archivist: agentdb_skill_create handler body pending Phase 6 wire-up; ' +
-          'callers currently route through forks/ruflo/v3/@claude-flow/cli/src/mcp-tools/agentdb-tools.ts agentdb_skill_create handler',
-        );
+    async (ctx: MutationContext<false>, payload: AgentdbSkillCreatePayload): Promise<void> => {
+      const name = payload.name;
+      const description = payload.description ?? '';
+      const code = payload.code ?? '';
+      const successRate = payload.success_rate ?? 0.5;
+      const writer = ctx.capabilities.requireSkillLibraryWriter();
+
+      await ctx.substrate.withWrite({ storeId: STORE_ID }, async (handle) => {
+        const result = await writer.createSkill({ name, description, code, successRate });
+
+        if (result && result.success) return;
+        if (result && !result.success && result.error && !/not available|not wired|not initialized|missing.*method/i.test(result.error)) {
+          throw new Error(`archivist: agentdb_skill_create — SkillLibrary rejected: ${result.error}`);
+        }
+
+        // Fallback: controller unwired or missing methods. Write to RVF so
+        // the skill remains observable through memory_search.
+        const scorer = ctx.capabilities.requireEmbeddingScorer();
+        const indexed = `${name}\n${description}\n${code}`;
+        const embedding = await scorer.embed(indexed);
+        const id = `skill-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+        const rvfHandle = handle as { rvf?: {
+          insertAsync(id: string, embedding: Float32Array, metadata?: Record<string, unknown>): Promise<void>;
+        } };
+        if (!rvfHandle.rvf || typeof rvfHandle.rvf.insertAsync !== 'function') {
+          throw new Error(
+            'archivist: agentdb_skill_create — RVF substrate handle missing `rvf.insertAsync`. ' +
+            'The cli must call `ensureRvfWired()` before dispatching skill-create fallback writes.',
+          );
+        }
+        await rvfHandle.rvf.insertAsync(id, embedding, {
+          namespace: 'skill',
+          name,
+          description,
+          code,
+          successRate,
+          tags: ['skill', 'fallback'],
+          controller: 'memory-store-fallback',
+        });
       });
     },
     {

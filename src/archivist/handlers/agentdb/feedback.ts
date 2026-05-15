@@ -54,16 +54,52 @@ const STORE_ID = 'agentdb_feedback' as StoreId;
 // via the substrate primitive). The cli's controller-level writes collapse
 // to a single `ctx.substrate.withWrite` here because the substrate owns
 // the lock + audit semantics.
+// ADR-0181 Phase 6 wire-up — port of cli `agentdb-tools.ts:311`. Primary
+// path: FeedbackRecorder fans out across LearningSystem + ReasoningBank via
+// `routeFeedbackOp({type:'record'})`. Fallback: RVF persistence under
+// namespace `'feedback'` so the audit trail is not lost when controllers are
+// unwired.
 export const agentdbFeedbackHandler: GuardedWrite<AgentdbFeedbackPayload> =
   registerMutationHandler<AgentdbFeedbackPayload>(
     'agentdb_feedback',
-    async (ctx: MutationContext<false>, _payload: AgentdbFeedbackPayload): Promise<void> => {
-      await ctx.substrate.withWrite({ storeId: STORE_ID }, async (_handle) => {
-        throw new Error(
-          'archivist: agentdb_feedback handler body pending Phase 6 wire-up; ' +
-          'callers currently route through forks/ruflo/v3/@claude-flow/cli/src/mcp-tools/agentdb-tools.ts agentdb_feedback handler',
-        );
-      });
+    async (ctx: MutationContext<false>, payload: AgentdbFeedbackPayload): Promise<void> => {
+      const taskId = payload.taskId;
+      const success = payload.success === true;
+      const quality = payload.quality ?? 0.85;
+      const agent = payload.agent;
+      const recorder = ctx.capabilities.requireFeedbackRecorder();
+
+      await ctx.substrate.withWrite({ storeId: STORE_ID }, async (handle) => {
+        const result = await recorder.recordFeedback({ taskId, success, quality, agent });
+
+        if (result && result.success) return;
+        if (result && !result.success && result.error && !/not available|not wired|not initialized|missing.*method/i.test(result.error)) {
+          throw new Error(`archivist: agentdb_feedback — controllers rejected: ${result.error}`);
+        }
+
+        // Fallback: controllers unwired. RVF persistence so the feedback
+        // record survives.
+        const scorer = ctx.capabilities.requireEmbeddingScorer();
+        const content = `feedback:${taskId} success=${success} quality=${quality}${agent ? ` agent=${agent}` : ''}`;
+        const embedding = await scorer.embed(content);
+        const id = `feedback-${taskId}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+        const rvfHandle = handle as { rvf?: {
+          insertAsync(id: string, embedding: Float32Array, metadata?: Record<string, unknown>): Promise<void>;
+        } };
+        if (!rvfHandle.rvf || typeof rvfHandle.rvf.insertAsync !== 'function') {
+          throw new Error(
+            'archivist: agentdb_feedback — RVF substrate handle missing `rvf.insertAsync`.',
+          );
+        }
+        await rvfHandle.rvf.insertAsync(id, embedding, {
+          namespace: 'feedback',
+          taskId,
+          success,
+          quality,
+          agent,
+          tags: ['feedback', 'fallback'],
+          controller: 'memory-store-fallback',
+        });
     },
     {
       invariants: [], // wired by invariants-author per ADR-0180 §Mutation invariants

@@ -127,6 +127,192 @@ export interface PatternHit {
   readonly score: number;
 }
 
+// ── ADR-0181 Phase 6 stub-body wire-up capabilities ──────────────────────────
+//
+// Each of the writer capabilities below is the narrow surface ONE Phase 6
+// handler ports its cli body onto. The contract pattern is uniform:
+//   - Method name + payload mirror the cli orchestration helper
+//     (`forks/ruflo/v3/@claude-flow/cli/src/mcp-tools/agentdb-orchestration.ts`).
+//   - Return shape carries `{ success, controller, error? }` so the handler can
+//     branch on controller-availability (matches ADR-0093 F4 / ADR-0162 Batch E
+//     hand-port semantics — when the controller is wired, success carries the
+//     primary table write; when it returns `null` / `success:false`, the handler
+//     falls back to substrate.withWrite RVF persistence).
+//   - Return `null` from the capability call (vs an envelope with
+//     `success:false`) means "controller not present in this process" —
+//     handlers MUST treat null as the fallback trigger. An envelope with
+//     `success:false` + `error` means the controller ran and refused the
+//     write; handlers MUST surface that as a throw (ADR-0082 no-silent-failure).
+//
+// Each capability is OPTIONAL per the laziness rationale at the top of this
+// file; a handler that dispatches needing an unwired writer fails loud at the
+// `require*` accessor on the `MutationCapabilities` bundle.
+
+/**
+ * Narrow surface for the ReasoningBank pattern-store path —
+ * `handlers/agentdb/pattern-store.ts` (Phase 6 wire-up). Backed at the cli
+ * wiring point by `storePattern(...)` (`agentdb-orchestration.ts:16`) which
+ * routes through `routePatternOp({ type: 'store', ... })` — primary persistence
+ * in the `reasoning_patterns` SQLite table when the ReasoningBank controller is
+ * wired, fallthrough to memory_store RVF when it is not.
+ */
+export interface ReasoningBankWriter {
+  storePattern(input: {
+    readonly pattern: string;
+    readonly type: string;
+    readonly confidence: number;
+  }): Promise<ReasoningBankWriteResult | null>;
+}
+
+export interface ReasoningBankWriteResult {
+  readonly success: boolean;
+  readonly patternId: string;
+  readonly controller: string;
+  readonly error?: string;
+}
+
+/**
+ * Narrow surface for the SkillLibrary creation path —
+ * `handlers/agentdb/skill-create.ts` (Phase 6 wire-up). Backed at the cli
+ * wiring point by an adapter over `agentdb-tools.ts` `agentdb_skill_create`
+ * controller path — prefers `createSkill({ name, description, code,
+ * successRate })` (v3 API), falls back to `promote(...)` for legacy
+ * controllers.
+ */
+export interface SkillLibraryWriter {
+  createSkill(input: {
+    readonly name: string;
+    readonly description: string;
+    readonly code: string;
+    readonly successRate: number;
+  }): Promise<SkillLibraryWriteResult | null>;
+}
+
+export interface SkillLibraryWriteResult {
+  readonly success: boolean;
+  readonly skillId: string;
+  readonly controller: string;
+  readonly error?: string;
+}
+
+/**
+ * Narrow surface for the ReflexionMemory episode-store path —
+ * `handlers/agentdb/reflexion-store.ts` (Phase 6 wire-up). Backed at the cli
+ * wiring point by an adapter over `agentdb-tools.ts` `agentdb_reflexion-store`
+ * controller path — probes `storeEpisode` (v3) then `store` (legacy) via
+ * `getCallableMethod`, with a 2-second timeout enforced cli-side.
+ */
+export interface ReflexionStoreWriter {
+  storeEpisode(input: {
+    readonly sessionId: string;
+    readonly task: string;
+    readonly reward: number;
+    readonly success: boolean;
+  }): Promise<ReflexionWriteResult | null>;
+}
+
+export interface ReflexionWriteResult {
+  readonly success: boolean;
+  readonly episodeId: string;
+  readonly controller: string;
+  readonly error?: string;
+}
+
+/**
+ * Narrow surface for the HierarchicalMemory tier-store path —
+ * `handlers/agentdb/hierarchical-store.ts` (Phase 6 wire-up). Backed at the cli
+ * wiring point by `hierarchicalStore(...)` (`agentdb-orchestration.ts:269`).
+ */
+export interface HierarchicalMemoryWriter {
+  storeHierarchical(input: {
+    readonly key: string;
+    readonly value: string;
+    readonly tier: 'working' | 'episodic' | 'semantic';
+  }): Promise<HierarchicalWriteResult | null>;
+}
+
+export interface HierarchicalWriteResult {
+  readonly success: boolean;
+  readonly id?: string;
+  readonly key: string;
+  readonly tier: string;
+  readonly controller?: string;
+  readonly error?: string;
+}
+
+/**
+ * Narrow surface for the LearningSystem experience-record path —
+ * `handlers/agentdb/experience-record.ts` (Phase 6 wire-up). Backed at the cli
+ * wiring point by an adapter over `agentdb-tools.ts` `agentdb_experience_record`
+ * controller path — calls `startSession()` first (FK requirement on
+ * `learning_experiences.session_id`) then `recordExperience({ action, input,
+ * output, reward, success })`.
+ */
+export interface LearningSystemWriter {
+  recordExperience(input: {
+    readonly task: string;
+    readonly input: string;
+    readonly output: string;
+    readonly reward: number;
+    readonly success: boolean;
+  }): Promise<LearningWriteResult | null>;
+}
+
+export interface LearningWriteResult {
+  readonly success: boolean;
+  readonly experienceId: string;
+  readonly controller: string;
+  readonly error?: string;
+}
+
+/**
+ * Narrow surface for the SonaTrajectoryService record path —
+ * `handlers/agentdb/sona-trajectory-store.ts` (Phase 6 wire-up, 'record'
+ * action only). Backed at the cli wiring point by an adapter over
+ * `agentdb-tools.ts` `agentdb_sona_trajectory_store` controller path —
+ * resolves SonaTrajectoryService and calls `recordTrajectory({ pattern,
+ * agentType, type, reward })`. The controller is pure-compute (in-memory
+ * RL store, no SQLite persistence) — that is by design (cli L2031-2037).
+ */
+export interface SonaTrajectoryWriter {
+  recordTrajectory(input: {
+    readonly pattern: string;
+    readonly agentType: string;
+    readonly type: string;
+    readonly reward: number;
+  }): Promise<SonaTrajectoryWriteResult | null>;
+}
+
+export interface SonaTrajectoryWriteResult {
+  readonly success: boolean;
+  readonly trajectoryId?: string;
+  readonly controller: string;
+  readonly error?: string;
+}
+
+/**
+ * Narrow surface for the multi-controller feedback fan-out —
+ * `handlers/agentdb/feedback.ts` (Phase 6 wire-up). Backed at the cli wiring
+ * point by `recordFeedback(...)` (`agentdb-orchestration.ts:85`) which routes
+ * through `routeFeedbackOp({ type: 'record', ... })` fanning out across
+ * LearningSystem + ReasoningBank controllers.
+ */
+export interface FeedbackRecorder {
+  recordFeedback(input: {
+    readonly taskId: string;
+    readonly success: boolean;
+    readonly quality: number;
+    readonly agent?: string;
+  }): Promise<FeedbackWriteResult | null>;
+}
+
+export interface FeedbackWriteResult {
+  readonly success: boolean;
+  readonly controller: string;
+  readonly updated: number;
+  readonly error?: string;
+}
+
 /**
  * The capability bundle threaded onto `MutationContext` (ADR-0180 F4-2 Phase C).
  * Every field is OPTIONAL — `initialize(config)` wires whatever subset of
@@ -140,6 +326,13 @@ export interface PatternHit {
 export interface MutationCapabilities {
   readonly taskRouter?: TaskRouter;
   readonly embeddingScorer?: EmbeddingScorer;
+  readonly reasoningBankWriter?: ReasoningBankWriter;
+  readonly skillLibraryWriter?: SkillLibraryWriter;
+  readonly reflexionStoreWriter?: ReflexionStoreWriter;
+  readonly hierarchicalMemoryWriter?: HierarchicalMemoryWriter;
+  readonly learningSystemWriter?: LearningSystemWriter;
+  readonly sonaTrajectoryWriter?: SonaTrajectoryWriter;
+  readonly feedbackRecorder?: FeedbackRecorder;
   /**
    * Fail-loud accessor for `taskRouter`. Handlers call
    * `ctx.capabilities.requireTaskRouter()` instead of `ctx.capabilities
@@ -149,6 +342,20 @@ export interface MutationCapabilities {
   requireTaskRouter(): TaskRouter;
   /** Fail-loud accessor for `embeddingScorer`. See `requireTaskRouter`. */
   requireEmbeddingScorer(): EmbeddingScorer;
+  /** Fail-loud accessor for `reasoningBankWriter`. */
+  requireReasoningBankWriter(): ReasoningBankWriter;
+  /** Fail-loud accessor for `skillLibraryWriter`. */
+  requireSkillLibraryWriter(): SkillLibraryWriter;
+  /** Fail-loud accessor for `reflexionStoreWriter`. */
+  requireReflexionStoreWriter(): ReflexionStoreWriter;
+  /** Fail-loud accessor for `hierarchicalMemoryWriter`. */
+  requireHierarchicalMemoryWriter(): HierarchicalMemoryWriter;
+  /** Fail-loud accessor for `learningSystemWriter`. */
+  requireLearningSystemWriter(): LearningSystemWriter;
+  /** Fail-loud accessor for `sonaTrajectoryWriter`. */
+  requireSonaTrajectoryWriter(): SonaTrajectoryWriter;
+  /** Fail-loud accessor for `feedbackRecorder`. */
+  requireFeedbackRecorder(): FeedbackRecorder;
 }
 
 /**
@@ -186,6 +393,20 @@ export interface CapabilityFactories {
   readonly embeddingScorerFactory?: () => EmbeddingScorer;
   /** Lazy `PatternReader` — adapts the ReasoningBank patterns-table fusion read down to the narrow surface. */
   readonly patternReaderFactory?: () => PatternReader;
+  /** Lazy `ReasoningBankWriter` — adapts the cli `storePattern(...)` path. */
+  readonly reasoningBankWriterFactory?: () => ReasoningBankWriter;
+  /** Lazy `SkillLibraryWriter` — adapts the cli `agentdb_skill_create` controller path. */
+  readonly skillLibraryWriterFactory?: () => SkillLibraryWriter;
+  /** Lazy `ReflexionStoreWriter` — adapts the cli `agentdb_reflexion-store` controller path. */
+  readonly reflexionStoreWriterFactory?: () => ReflexionStoreWriter;
+  /** Lazy `HierarchicalMemoryWriter` — adapts the cli `hierarchicalStore(...)` path. */
+  readonly hierarchicalMemoryWriterFactory?: () => HierarchicalMemoryWriter;
+  /** Lazy `LearningSystemWriter` — adapts the cli `agentdb_experience_record` controller path. */
+  readonly learningSystemWriterFactory?: () => LearningSystemWriter;
+  /** Lazy `SonaTrajectoryWriter` — adapts the cli `agentdb_sona_trajectory_store` record path. */
+  readonly sonaTrajectoryWriterFactory?: () => SonaTrajectoryWriter;
+  /** Lazy `FeedbackRecorder` — adapts the cli `recordFeedback(...)` path. */
+  readonly feedbackRecorderFactory?: () => FeedbackRecorder;
 }
 
 /**
@@ -199,10 +420,24 @@ export interface CapabilityFactories {
 export function makeMutationCapabilities(resolved: {
   readonly taskRouter?: TaskRouter;
   readonly embeddingScorer?: EmbeddingScorer;
+  readonly reasoningBankWriter?: ReasoningBankWriter;
+  readonly skillLibraryWriter?: SkillLibraryWriter;
+  readonly reflexionStoreWriter?: ReflexionStoreWriter;
+  readonly hierarchicalMemoryWriter?: HierarchicalMemoryWriter;
+  readonly learningSystemWriter?: LearningSystemWriter;
+  readonly sonaTrajectoryWriter?: SonaTrajectoryWriter;
+  readonly feedbackRecorder?: FeedbackRecorder;
 }): MutationCapabilities {
   return {
     taskRouter: resolved.taskRouter,
     embeddingScorer: resolved.embeddingScorer,
+    reasoningBankWriter: resolved.reasoningBankWriter,
+    skillLibraryWriter: resolved.skillLibraryWriter,
+    reflexionStoreWriter: resolved.reflexionStoreWriter,
+    hierarchicalMemoryWriter: resolved.hierarchicalMemoryWriter,
+    learningSystemWriter: resolved.learningSystemWriter,
+    sonaTrajectoryWriter: resolved.sonaTrajectoryWriter,
+    feedbackRecorder: resolved.feedbackRecorder,
     requireTaskRouter(): TaskRouter {
       if (!resolved.taskRouter) {
         throw new Error(
@@ -220,6 +455,69 @@ export function makeMutationCapabilities(resolved: {
         );
       }
       return resolved.embeddingScorer;
+    },
+    requireReasoningBankWriter(): ReasoningBankWriter {
+      if (!resolved.reasoningBankWriter) {
+        throw new Error(
+          'archivist: this handler needs the ReasoningBankWriter capability, but no reasoningBankWriterFactory ' +
+            'was supplied to initialize() — pass { reasoningBankWriterFactory } in ArchivistInitConfig',
+        );
+      }
+      return resolved.reasoningBankWriter;
+    },
+    requireSkillLibraryWriter(): SkillLibraryWriter {
+      if (!resolved.skillLibraryWriter) {
+        throw new Error(
+          'archivist: this handler needs the SkillLibraryWriter capability, but no skillLibraryWriterFactory ' +
+            'was supplied to initialize() — pass { skillLibraryWriterFactory } in ArchivistInitConfig',
+        );
+      }
+      return resolved.skillLibraryWriter;
+    },
+    requireReflexionStoreWriter(): ReflexionStoreWriter {
+      if (!resolved.reflexionStoreWriter) {
+        throw new Error(
+          'archivist: this handler needs the ReflexionStoreWriter capability, but no reflexionStoreWriterFactory ' +
+            'was supplied to initialize() — pass { reflexionStoreWriterFactory } in ArchivistInitConfig',
+        );
+      }
+      return resolved.reflexionStoreWriter;
+    },
+    requireHierarchicalMemoryWriter(): HierarchicalMemoryWriter {
+      if (!resolved.hierarchicalMemoryWriter) {
+        throw new Error(
+          'archivist: this handler needs the HierarchicalMemoryWriter capability, but no hierarchicalMemoryWriterFactory ' +
+            'was supplied to initialize() — pass { hierarchicalMemoryWriterFactory } in ArchivistInitConfig',
+        );
+      }
+      return resolved.hierarchicalMemoryWriter;
+    },
+    requireLearningSystemWriter(): LearningSystemWriter {
+      if (!resolved.learningSystemWriter) {
+        throw new Error(
+          'archivist: this handler needs the LearningSystemWriter capability, but no learningSystemWriterFactory ' +
+            'was supplied to initialize() — pass { learningSystemWriterFactory } in ArchivistInitConfig',
+        );
+      }
+      return resolved.learningSystemWriter;
+    },
+    requireSonaTrajectoryWriter(): SonaTrajectoryWriter {
+      if (!resolved.sonaTrajectoryWriter) {
+        throw new Error(
+          'archivist: this handler needs the SonaTrajectoryWriter capability, but no sonaTrajectoryWriterFactory ' +
+            'was supplied to initialize() — pass { sonaTrajectoryWriterFactory } in ArchivistInitConfig',
+        );
+      }
+      return resolved.sonaTrajectoryWriter;
+    },
+    requireFeedbackRecorder(): FeedbackRecorder {
+      if (!resolved.feedbackRecorder) {
+        throw new Error(
+          'archivist: this handler needs the FeedbackRecorder capability, but no feedbackRecorderFactory ' +
+            'was supplied to initialize() — pass { feedbackRecorderFactory } in ArchivistInitConfig',
+        );
+      }
+      return resolved.feedbackRecorder;
     },
   };
 }

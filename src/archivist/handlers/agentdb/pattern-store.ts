@@ -48,24 +48,64 @@ export interface AgentdbPatternStorePayload {
 
 const STORE_ID = 'agentdb_pattern_store' as StoreId;
 
-// TODO(ADR-0180 Phase 6 wire-up): port the body of agentdb-tools.ts
-// `agentdb_pattern-store` handler — (a) resolve the ReasoningBank controller
-// via ctx.substrate; (b) call `storePattern({ pattern, type, confidence })`;
-// (c) on null result, fall back to `memory_store` write under the `'pattern'`
-// namespace with tags `[type, 'reasoning-pattern', 'fallback']` and
-// `controller: 'memory-store-fallback'` provenance so the audit entry records
-// which path persisted the write (ADR-0082 no-silent-failure). The cli branch
-// stays in place until the dispatch boundary is wired through; this handler
-// is the registration shape the dispatch path will resolve.
+// ADR-0181 Phase 6 wire-up — port of cli `agentdb-tools.ts:215`. Primary path:
+// ReasoningBank controller writes to `reasoning_patterns` SQLite table via
+// the narrow `ReasoningBankWriter` capability. Fallback path: substrate.withWrite
+// RVF insert under the `'pattern'` namespace when the controller is unwired
+// (null return) — surfaces `controller:'memory-store-fallback'` on the
+// substrate metadata so audit entries record which path persisted the write
+// (ADR-0093 F4 / ADR-0162 Batch E hand-port semantics). ADR-0082
+// no-silent-failure: an EXPLICIT error from the controller (`success:false` +
+// `error` not matching "not available/wired/initialized") propagates as a
+// throw instead of silent RVF coalescing.
 export const storePatternHandler: GuardedWrite<AgentdbPatternStorePayload> =
   registerMutationHandler<AgentdbPatternStorePayload>(
     'agentdb_pattern_store',
-    async (ctx: MutationContext<false>, _payload: AgentdbPatternStorePayload): Promise<void> => {
-      await ctx.substrate.withWrite({ storeId: STORE_ID }, async (_handle) => {
-        throw new Error(
-          'archivist: agentdb_pattern_store handler body pending Phase 6 wire-up; ' +
-          'callers currently route through forks/ruflo/v3/@claude-flow/cli/src/mcp-tools/agentdb-tools.ts agentdb_pattern-store handler',
-        );
+    async (ctx: MutationContext<false>, payload: AgentdbPatternStorePayload): Promise<void> => {
+      const pattern = payload.pattern;
+      const type = payload.type ?? 'general';
+      const confidence = payload.confidence ?? 0.8;
+      const writer = ctx.capabilities.requireReasoningBankWriter();
+
+      await ctx.substrate.withWrite({ storeId: STORE_ID }, async (handle) => {
+        const result = await writer.storePattern({ pattern, type, confidence });
+
+        if (result && result.success) {
+          // ReasoningBank controller persisted to reasoning_patterns SQLite
+          // table. Done — no RVF write needed for the primary path.
+          return;
+        }
+        if (result && !result.success && result.error && !/not available|not wired|not initialized/i.test(result.error)) {
+          // Controller ran and refused the write with a real error —
+          // surface it loudly per ADR-0082.
+          throw new Error(`archivist: agentdb_pattern_store — ReasoningBank rejected: ${result.error}`);
+        }
+
+        // Fallback: controller not wired or returned null. Write to RVF under
+        // the 'pattern' namespace so the entry remains observable through
+        // memory_search (ADR-0093 F4 hand-port). Generate an embedding via
+        // the cli-wired EmbeddingScorer capability so vector lookup works
+        // (ADR-0069 unified 768-dim model).
+        const scorer = ctx.capabilities.requireEmbeddingScorer();
+        const embedding = await scorer.embed(pattern);
+        const id = `pattern-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+        const rvfHandle = handle as { rvf?: {
+          insertAsync(id: string, embedding: Float32Array, metadata?: Record<string, unknown>): Promise<void>;
+        } };
+        if (!rvfHandle.rvf || typeof rvfHandle.rvf.insertAsync !== 'function') {
+          throw new Error(
+            'archivist: agentdb_pattern_store — RVF substrate handle missing `rvf.insertAsync`. ' +
+            'The cli must call `ensureRvfWired()` before dispatching pattern-store fallback writes.',
+          );
+        }
+        await rvfHandle.rvf.insertAsync(id, embedding, {
+          namespace: 'pattern',
+          content: pattern,
+          type,
+          confidence,
+          tags: [type, 'reasoning-pattern', 'fallback'],
+          controller: 'memory-store-fallback',
+        });
       });
     },
     {

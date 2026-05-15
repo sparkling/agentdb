@@ -53,16 +53,21 @@ const STORE_ID = 'daa' as StoreId;
 // `withDAALock` over the JSON-store mirror collapses into the single
 // `ctx.substrate.withWrite`.
 //
-// SCOPE NOTE: the cli's PRIMARY write is the `routeMemoryOp('store', namespace
-// 'daa-knowledge', tags=[domain, sourceId, ...targetIds])` AgentDB tail-call
-// (daa-tools.ts:414-424) — a write into a SEPARATE substrate (the AgentDB
-// vector store, registered under its own `memory_store` mutation). It is NOT
-// part of the daa JSON-store mutation and is intentionally not ported here; it
-// lands as a guarded post-write follow-up when the cli dispatch boundary is
-// wired, kept outside this withWrite so an AgentDB miss does not roll back the
-// JSON-store mirror (and vice versa) — matching the cli's existing try/catch
-// independence. The JSON-store mirror written below is the complete daa-store
-// body for this handler.
+// SCOPE NOTE (updated post-Phase 5): the cli's prior PRIMARY write to
+// `routeMemoryOp('store', namespace 'daa-knowledge', tags=[domain, sourceId,
+// ...targetIds])` (formerly at daa-tools.ts:414-424) was DELETED in Phase 5
+// (`feedback-no-fallbacks` — the try/catch silently swallowed every cross-
+// substrate write error). The cli code at daa-tools.ts:477-483 documents
+// the deletion. The JSON-store mirror written below is now the SOLE
+// authoritative write for this handler — the original "primary write" /
+// "mirror" terminology no longer applies because the AgentDB write is gone.
+//
+// ADR-0181 Phase 5 DA-memo CF#2: a future vector-searchable knowledge-share
+// index belongs in the archivist as either a registered handler invariant
+// on this handler (audit-chain native) or a separate registered mutation
+// composed at the cli boundary. NOT a try/catch wrapper at the cli boundary,
+// ever — that's what was removed and why. Same design rationale as the
+// daa_agent_adapt handler — see agent-adapt.ts SCOPE NOTE for detail.
 export const daaKnowledgeShareHandler: GuardedWrite<DaaKnowledgeSharePayload> =
   registerMutationHandler<DaaKnowledgeSharePayload>(
     'daa_knowledge_share',

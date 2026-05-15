@@ -51,15 +51,27 @@ const STORE_ID = 'daa' as StoreId;
 // `ctx.substrate.withWrite` because the substrate primitive owns the lock
 // semantics.
 //
-// SCOPE NOTE: the cli's post-lock `routeMemoryOp('store', namespace
-// 'daa-feedback')` tail-call (daa-tools.ts:262-277) is a write into a
-// SEPARATE substrate (the AgentDB vector store, registered under its own
-// `memory_store` mutation). It is NOT part of the daa JSON-store mutation and
-// is intentionally not ported here — it lands as a guarded post-write
-// follow-up when the cli dispatch boundary is wired, kept outside this
-// withWrite so an AgentDB miss cannot roll back the already-committed agent
-// metrics. The JSON-store metrics mutation below is the complete daa-store
-// body for this handler.
+// SCOPE NOTE (updated post-Phase 5): the cli's prior post-lock
+// `routeMemoryOp('store', namespace 'daa-feedback')` tail-call (formerly at
+// daa-tools.ts:262-277) was DELETED in Phase 5 (`feedback-no-fallbacks` —
+// the try/catch silently swallowed every cross-substrate write error). The
+// cli code at daa-tools.ts:283-291 documents the deletion. The JSON-store
+// metrics mutation below is now the SOLE write for this handler.
+//
+// ADR-0181 Phase 5 DA-memo CF#2: a future vector-searchable adaptation-event
+// index belongs in the archivist as either:
+//   (a) a registered handler invariant on this handler that mirrors the
+//       applied state into a vector substrate (audit-chain native, single
+//       intent → applied transition), OR
+//   (b) a separate registered mutation (`daa_adaptation_event_record` or
+//       similar) dispatched by callers that want the cross-substrate write,
+//       composed at the cli boundary using two dispatches that the audit
+//       chain ties to one parent context.
+//
+// Either path is its own design scope (cross-substrate semantics — fail-loud
+// vs eventual-consistency, batch vs synchronous, key-collation strategy)
+// and not part of the Phase 5 closure. NOT a try/catch wrapper at the cli
+// boundary, ever — that's what was removed and why.
 export const daaAgentAdaptHandler: GuardedWrite<DaaAgentAdaptPayload> =
   registerMutationHandler<DaaAgentAdaptPayload>(
     'daa_agent_adapt',

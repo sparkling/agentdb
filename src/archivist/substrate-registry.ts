@@ -151,6 +151,7 @@ export function classifyStore(storeId: StoreId): SubstrateFamily {
 
 const FS_JSON_PATH_OVERRIDES: ReadonlyMap<string, string> = new Map([
   // hive-mind family (two co-resident files per ADR-0180 §Migration Phase 4)
+  ['hive-mind_init', 'hive-mind/state.json'],
   ['hive-mind_spawn', 'hive-mind/state.json'],
   ['hive-mind_shutdown', 'hive-mind/state.json'],
   ['hive-mind_broadcast', 'hive-mind/state.json'],

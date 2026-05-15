@@ -91,7 +91,12 @@ export const memoryHiveMindHandler: GuardedWrite<HiveMindMemoryPayload> =
   registerMutationHandler<HiveMindMemoryPayload>(
     'hive-mind_memory',
     async (ctx: MutationContext<false>, payload: HiveMindMemoryPayload): Promise<void> => {
-      if (!payload.key) {
+      // `list` is the only action whose payload variant carries no `key` —
+      // the TS discriminated-union narrows `payload.key` away for it, which
+      // is exactly the bug this guard now fixes. For the three keyed
+      // actions (`get` / `set` / `delete`), an empty/undefined key is a
+      // malformed payload and we fail loud per `feedback-no-fallbacks`.
+      if (payload.action !== 'list' && !payload.key) {
         throw new Error(`hive-mind_memory: \`key\` is required for action '${payload.action}'`);
       }
 

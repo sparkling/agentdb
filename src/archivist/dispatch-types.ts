@@ -93,6 +93,7 @@ import type { SessionEndPayload } from './handlers/hooks/session-end.js';
 import type { AgentsJsonPayload } from './handlers/hive-mind/agents-json.js';
 import type { HiveMindBroadcastPayload } from './handlers/hive-mind/broadcast.js';
 import type { HiveMindConsensusPayload } from './handlers/hive-mind/consensus.js';
+import type { HiveMindInitPayload } from './handlers/hive-mind/init.js';
 import type { HiveMindMemoryPayload } from './handlers/hive-mind/memory.js';
 import type { HiveMindShutdownPayload } from './handlers/hive-mind/shutdown.js';
 import type { HiveMindSpawnPayload } from './handlers/hive-mind/spawn.js';
@@ -265,6 +266,7 @@ export interface ToolPayloadMap {
   readonly 'hive-mind_agents': AgentsJsonPayload;
   readonly 'hive-mind_broadcast': HiveMindBroadcastPayload;
   readonly 'hive-mind_consensus': HiveMindConsensusPayload;
+  readonly 'hive-mind_init': HiveMindInitPayload;
   readonly 'hive-mind_memory': HiveMindMemoryPayload;
   readonly 'hive-mind_shutdown': HiveMindShutdownPayload;
   readonly 'hive-mind_spawn': HiveMindSpawnPayload;

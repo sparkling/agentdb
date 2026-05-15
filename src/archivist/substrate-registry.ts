@@ -104,6 +104,14 @@ const SQLITE_CARVE_OUT_STORE_IDS: ReadonlySet<string> = new Set([
   'agentdb_learner_run',
   'agentdb_learning_predict',
   'agentdb_pattern_search',
+  // ADR-0181 Phase 5 fix (phase5-agentdb caught the gap): these two handlers
+  // use `ctx.substrate.query<T>({ predicate: { sql: ... } })` for re-embed +
+  // cosine-rerank against SQLite carve-out tables (episodes/episode_embeddings
+  // for reflexion-retrieve.ts L171; skills/skill_embeddings for skill-search.ts
+  // L171). Without them in the carve-out roster, classifyStore() falls through
+  // to fs-json which throws on .query() — runtime dispatch failure.
+  'agentdb_reflexion_retrieve',
+  'agentdb_skill_search',
 ]);
 
 // ── Classification ───────────────────────────────────────────────────────────
@@ -148,8 +156,18 @@ const FS_JSON_PATH_OVERRIDES: ReadonlyMap<string, string> = new Map([
   ['hive-mind_broadcast', 'hive-mind/state.json'],
   ['hive-mind_consensus', 'hive-mind/state.json'],
   ['hive-mind_memory', 'hive-mind/state.json'],
-  ['hive-mind_agents', 'agents.json'],
-  ['agent_spawn', 'agents.json'],
+  // agents store — single store.json shared by `hive-mind_agents` (the
+  // task_*/hive-mind_* cross-store agent-sync target) and `agent_spawn` (the
+  // agent_* lifecycle store). Mirrors the cli `agent-tools.ts`
+  // `.claude-flow/agents/store.json` layout (AGENT_DIR='agents' +
+  // AGENT_FILE='store.json' at agent-tools.ts:16-17). Without these overrides
+  // the substrate falls back to flat `.claude-flow/agents.json` while the
+  // cli's `loadAgentStore()` reads `.claude-flow/agents/store.json` — flips
+  // for task_complete / task_assign / agent_* / hive-mind_* would silently
+  // diverge on-disk state from the cli's read path. (ADR-0181 Phase 5
+  // path-alignment — same shape as the claims/tasks/workflow/neural entries.)
+  ['hive-mind_agents', 'agents/store.json'],
+  ['agent_spawn', 'agents/store.json'],
   // coordination family — single store.json (topology.ts:19)
   ['coordination_topology', 'coordination/store.json'],
   ['coordination_consensus', 'coordination/store.json'],
@@ -198,6 +216,25 @@ const FS_JSON_PATH_OVERRIDES: ReadonlyMap<string, string> = new Map([
   // (`STORE_ID = 'daa'` in handlers/daa/*.ts); mirrors the cli `daa-tools.ts`
   // `.claude-flow/daa/store.json` layout (STORAGE_DIR + DAA_DIR + DAA_FILE).
   ['daa', 'daa/store.json'],
+  // tasks family — single store.json shared by all seven FS-JSON task_*
+  // handlers (`STORE_ID = 'tasks'` in handlers/tasks/*.ts); mirrors the cli
+  // `task-tools.ts` `.claude-flow/tasks/store.json` layout (STORAGE_DIR +
+  // TASK_DIR + TASK_FILE = '.claude-flow' + 'tasks' + 'store.json'). Without
+  // this entry the substrate falls back to flat `.claude-flow/tasks.json`
+  // while the cli's post-dispatch envelope re-reads at
+  // `.claude-flow/tasks/store.json` and returns stale empty state. (ADR-0181
+  // Phase 5 path-alignment — same shape as the claims/workflow/neural
+  // entries below.)
+  ['tasks', 'tasks/store.json'],
+  // claims family — single claims.json shared by all eight FS-JSON claims_*
+  // mutation handlers (`STORE_ID = 'claims'` in handlers/claims/*.ts); mirrors
+  // the cli `claims-tools.ts` `.claude-flow/claims/claims.json` layout
+  // (`CLAIMS_DIR = '.claude-flow/claims'` + `CLAIMS_FILE = 'claims.json'`).
+  // Without this entry the substrate falls back to flat `.claude-flow/claims.json`
+  // while the cli's 4 read-only tools (claims_list/stealable/load/board) keep
+  // reading `.claude-flow/claims/claims.json` — post-dispatch envelope reads
+  // would return stale empty state. (ADR-0181 Phase 5 path-alignment.)
+  ['claims', 'claims/claims.json'],
   // system family — single metrics.json shared by the three system_* mutation
   // handlers (`STORE_ID = 'system_metrics'` in handlers/system/{metrics,health,
   // reset}.ts); mirrors the cli `system-tools.ts` `.claude-flow/system/metrics.json`

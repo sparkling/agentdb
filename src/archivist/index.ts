@@ -44,6 +44,7 @@ import {
   type RegisterReadOpts,
 } from './registration.js';
 import type { MutationHandlerFn, HotPathMutationHandlerFn, ReadHandlerFn } from './registration.js';
+import type { ToolPayloadMap } from './dispatch-types.js';
 import type { AuditEntry, AuditState, InvariantVerdict } from './audit-types.js';
 import { writeThroughEntry } from './audit-writer.js';
 import { getSharedHotPathQueue } from './hot-path-writer.js';
@@ -126,6 +127,14 @@ export type {
   RegisterMutationOpts,
   RegisterReadOpts,
 } from './registration.js';
+
+// --- Typed dispatch surface (ADR-0181 Phase 5, F4-3 cli delegation) ---
+// `ToolPayloadMap` is the literal-keyed map from registered MCP tool name →
+// payload type. `Archivist.dispatch` / `Archivist.dispatchRead` carry a typed
+// overload on top of this so cli call sites get compile-time tool-name and
+// payload-shape verification. Adding a handler requires extending the map in
+// `dispatch-types.ts`; the unit test there is the drift gate.
+export type { ToolName, ToolPayloadMap } from './dispatch-types.js';
 
 // --- Public registration HOFs ---
 export { registerMutationHandler, registerReadHandler } from './registration.js';
@@ -250,6 +259,26 @@ export class Archivist {
   private initialized = false;
 
   /**
+   * ADR-0181 Phase 5 DA-L1 guard. `dispatch()` / `dispatchRead()` each call
+   * `await this.initialize()` defensively (line 590 / 638 below) — that
+   * makes those entry points safe to call from inside the class but UNSAFE
+   * as a contract: a host-process caller who dispatches before its own
+   * `initialize(config)` race-wins with an empty config, the per-process
+   * archivist ends up with `projectRoot: process.cwd()`, no audit-log path,
+   * and no capability factories.
+   *
+   * `hasRealConfig` flips only when `initialize(config)` was called with a
+   * truthy `config.projectRoot` — the marker that a host process (cli,
+   * daemon, hook-handler) supplied a real config. The empty-default
+   * `initialize({})` does NOT flip it, so the dispatch guards below catch
+   * the race deterministically: the dispatching call site sees a
+   * fail-loud throw pointing at `initProcessArchivist()`, not a silent
+   * misconfiguration that surfaces hours later as a wrong-projectRoot
+   * audit-log path.
+   */
+  private hasRealConfig = false;
+
+  /**
    * The substrate registry (ADR-0180 §Architecture · Substrate). Built by
    * `initialize()`; consulted by the dispatch path via `getSubstrate()`. RVF +
    * SQLite carve-out families are pre-registered with shared backend instances;
@@ -312,6 +341,17 @@ export class Archivist {
   async initialize(config: ArchivistInitConfig = {}): Promise<void> {
     if (this.initialized) return;
 
+    // ADR-0181 Phase 5 DA-L1: only a config with a real projectRoot satisfies
+    // the dispatch-guard contract. The empty-default `initialize({})` path
+    // (entered defensively from `dispatch` / `dispatchRead`) does NOT flip
+    // `hasRealConfig` — it just sets `initialized` so the no-op idempotency
+    // holds, but the dispatch guards below still throw fail-loud. This is
+    // what catches a worker that imported `getProcessArchivist()` and
+    // dispatched before the host process's `initProcessArchivist()` ran.
+    if (config.projectRoot) {
+      this.hasRealConfig = true;
+    }
+
     this.projectRoot = config.projectRoot ?? process.cwd();
 
     // RVF family: one shared SubstrateAccess over the RvfBackend (the backend is
@@ -345,6 +385,60 @@ export class Archivist {
     // lazy `mintLazy` closure. The `if (this.initialized) return` guard above
     // makes the whole method idempotent.
     this.initialized = true;
+  }
+
+  /**
+   * Post-`initialize()` RVF substrate installer (ADR-0181 Phase 5 lazy-init).
+   *
+   * The cli process must skip eager `rvfBackend` wiring at `initialize()` time
+   * because constructing the `MemoryRvfAdapter` requires awaiting
+   * `ensureRouter()` (memory-router cold-start = HNSW build + ONNX load), which
+   * regressed `t1-6-empty-search` 33× and (via memory-router's own
+   * project-root walk) broke `adr0100-e-sentinel-pri` in Phase 4. Phase 5
+   * keeps `initialize()` substrate-free for the cli and defers the RVF wiring
+   * to the first dispatch that needs it; this setter is how the cli's
+   * `ensureRvfWired()` helper installs the adapter at that point.
+   *
+   * Idempotency contract (`feedback-no-fallbacks`): a second call THROWS, it
+   * does NOT silently re-wrap or no-op. The caller (cli-side memoized
+   * promise) is responsible for ensuring single-installation; if the
+   * archivist sees a second `setRvfBackend` it means two independent wirers
+   * raced — surface that loudly rather than coalescing.
+   */
+  setRvfBackend(backend: VectorBackendAsync): void {
+    if (this.rvfSubstrate) {
+      throw new Error(
+        'archivist: setRvfBackend called twice — RVF substrate is already installed. ' +
+          'The cli-side ensureRvfWired() helper must memoize its installer promise so ' +
+          'concurrent dispatches share one wire-up.',
+      );
+    }
+    this.rvfSubstrate = makeRvfSubstrate(backend);
+  }
+
+  /**
+   * Post-`initialize()` SQLite substrate installer (ADR-0181 Phase 5 lazy-init).
+   *
+   * Symmetric to `setRvfBackend`: the cli defers `better-sqlite3` open from
+   * `initialize()` time so a markerless cwd does not create `.claude-flow/`
+   * (ADR-0069 Bug #3 invariant — the marker check belongs at the cli call
+   * site, not here). The cli's `ensureSqliteWired()` helper performs the
+   * marker gate + open and threads the resulting handle in via this setter.
+   *
+   * Idempotency contract: same as `setRvfBackend` — second call throws. The
+   * 5 PERMANENT_SQLITE_CARVE_OUT controllers (ADR-0166) all share the one
+   * handle, so re-wiring would either leak the prior handle or split the
+   * carve-out across two databases; either is unacceptable.
+   */
+  setSqliteDb(db: BetterSqlite3.Database): void {
+    if (this.sqliteSubstrate) {
+      throw new Error(
+        'archivist: setSqliteDb called twice — SQLite carve-out substrate is already installed. ' +
+          'The cli-side ensureSqliteWired() helper must memoize its installer promise so ' +
+          'concurrent dispatches share one wire-up.',
+      );
+    }
+    this.sqliteSubstrate = makeSqliteSubstrate(db);
   }
 
   /**
@@ -510,9 +604,30 @@ export class Archivist {
    * `scope.storeId` through `getSubstrate()` to the real RVF / SQLite / FS-JSON
    * backend wired by `initialize(config)`. A storeId whose family has no backend
    * fails loud in `getSubstrate()` — never a silent no-op (`feedback-no-fallbacks`).
+   *
+   * Typed overload (ADR-0181 Phase 5, F4-3): the `<K extends keyof
+   * ToolPayloadMap>` form gives cli call sites compile-time tool-name and
+   * payload-shape verification — a typo (`'memry_store'`) or mismatched payload
+   * (`dispatch('memory_store', {})`) fails at `tsc`, not at runtime. The
+   * fallback string-typed overload below is preserved for callers that have
+   * not yet flipped to the typed form — it remains type-safe (`payload:
+   * unknown` rejects under `noImplicitAny`-style narrowing) but provides no
+   * tool-name verification. New callers should prefer the typed form.
    */
+  dispatch<K extends keyof ToolPayloadMap>(tool: K, payload: ToolPayloadMap[K]): Promise<unknown>;
+  /** @deprecated Use the typed `dispatch<K extends keyof ToolPayloadMap>(tool, payload)` overload. */
+  dispatch(toolName: string, payload: unknown): Promise<unknown>;
   async dispatch(toolName: string, payload: unknown): Promise<unknown> {
     await this.initialize();
+    if (!this.hasRealConfig) {
+      throw new Error(
+        `archivist: dispatch('${toolName}') called on an archivist that was never initialized with a real config — ` +
+          `call initProcessArchivist() (cli) / equivalent host-process bootstrap (daemon, hook-handler) before any ` +
+          `MCP tool reaches the per-process archivist. This guard catches the empty-default initialize({}) race ` +
+          `(ADR-0181 Phase 5 DA-L1) — a silent first-call-wins would leave the archivist with projectRoot=process.cwd() ` +
+          `and no audit-log path, surfacing as wrong-root audit entries hours later.`,
+      );
+    }
     const lookup = getRegistration(toolName);
     if (!lookup) {
       throw new Error(`archivist: no handler registered for tool '${toolName}'`);
@@ -549,9 +664,26 @@ export class Archivist {
    * throws for an operation its family cannot honor (fs-json/sqlite
    * `vectorSearch`, rvf `query`) — a documented misroute error, not a silent
    * no-op (`feedback-no-fallbacks`).
+   *
+   * Typed overload (ADR-0181 Phase 5, F4-3): the `<K extends keyof
+   * ToolPayloadMap>` form mirrors `dispatch` — call sites get compile-time
+   * tool-name and payload-shape verification. The fallback string-typed
+   * overload below is preserved for transitional callers.
    */
+  dispatchRead<K extends keyof ToolPayloadMap>(tool: K, payload: ToolPayloadMap[K]): Promise<unknown>;
+  /** @deprecated Use the typed `dispatchRead<K extends keyof ToolPayloadMap>(tool, payload)` overload. */
+  dispatchRead(toolName: string, payload: unknown): Promise<unknown>;
   async dispatchRead(toolName: string, payload: unknown): Promise<unknown> {
     await this.initialize();
+    if (!this.hasRealConfig) {
+      throw new Error(
+        `archivist: dispatchRead('${toolName}') called on an archivist that was never initialized with a real config — ` +
+          `call initProcessArchivist() (cli) / equivalent host-process bootstrap (daemon, hook-handler) before any ` +
+          `MCP tool reaches the per-process archivist. This guard catches the empty-default initialize({}) race ` +
+          `(ADR-0181 Phase 5 DA-L1) — a silent first-call-wins would leave the archivist with projectRoot=process.cwd() ` +
+          `and no audit-log path, surfacing as wrong-root audit entries hours later.`,
+      );
+    }
     const lookup = getRegistration(toolName);
     if (!lookup) {
       throw new Error(`archivist: no handler registered for tool '${toolName}'`);

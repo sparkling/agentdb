@@ -23,6 +23,10 @@ export * from './embed.js';
 export * from './causal-recall.js';
 export * from './neural-patterns.js';
 export * from './semantic-route.js';
+// ADR-0181 Item 2 (2026-05-15): GNNService telemetry split out from
+// agentdb_neural_patterns into its own dispatched handler — every action of
+// the legacy cli tool now goes through dispatch (no per-action bypass).
+export * from './gnn-stats.js';
 
 // ADR-0181 Phase 6 wire-up — bodies port to call narrow writer capabilities
 // (ReasoningBankWriter / SkillLibraryWriter / etc.) with substrate.withWrite

@@ -33,11 +33,13 @@ import {
   makeReadCapabilities,
   type EmbeddingScorer,
   type FeedbackRecorder,
+  type GNNTelemetryReader,
   type HierarchicalMemoryWriter,
   type LearningSystemWriter,
   type PatternReader,
   type ReasoningBankWriter,
   type ReflexionStoreWriter,
+  type SemanticRouteReader,
   type SkillLibraryWriter,
   type SonaTrajectoryWriter,
   type TaskRouter,
@@ -110,6 +112,7 @@ export type {
   EmbeddingScorer,
   FeedbackRecorder,
   FeedbackWriteResult,
+  GNNTelemetryReader,
   HierarchicalMemoryWriter,
   HierarchicalWriteResult,
   LearningSystemWriter,
@@ -123,6 +126,7 @@ export type {
   ReflexionStoreWriter,
   ReflexionWriteResult,
   RouteDecision,
+  SemanticRouteReader,
   SkillLibraryWriter,
   SkillLibraryWriteResult,
   SonaTrajectoryWriter,
@@ -316,6 +320,34 @@ export interface ArchivistInitConfig {
    * ReasoningBank controllers — down to the narrow surface.
    */
   readonly feedbackRecorderFactory?: () => FeedbackRecorder;
+  /**
+   * Lazy `GNNTelemetryReader` capability factory (ADR-0181 Item 2 wire-up,
+   * 2026-05-15). Adapts the cli's `getController('gnnService')` telemetry
+   * surface down to the narrow `GNNTelemetryReader`. Threaded onto
+   * `ReadContext.capabilities.gnnTelemetryReader` — used by the
+   * `agentdb_gnn_stats` handler so the b5 `adr0090-b5-gnnService` probe
+   * receives `{success:true, controller:"gnnService", engine, count}` instead
+   * of the pre-Item-2 fail-loud throw.
+   *
+   * Adapter MUST resolve the controller PER CALL (no module/closure caching),
+   * matching the per-call resolution discipline `taskRouterFactory` already
+   * follows for `routeTask(...)`.
+   */
+  readonly gnnTelemetryReaderFactory?: () => GNNTelemetryReader;
+  /**
+   * Lazy `SemanticRouteReader` capability factory (ADR-0181 Item 2 wire-up,
+   * 2026-05-15). Adapts the cli's `getController('semanticRouter').route(...)`
+   * path down to the narrow `SemanticRouteReader`. Threaded onto
+   * `ReadContext.capabilities.semanticRouteReader` — used by the
+   * `agentdb_semantic_route` handler's controller-first branch so the b5
+   * `adr0090-b5-semanticRouter` probe sees the routes that
+   * `agentdb_semantic_add_route` persists into the in-memory Map +
+   * `.claude-flow/semantic-routes.json`.
+   *
+   * Adapter MUST resolve the controller PER CALL (per-call resolution
+   * discipline; see `gnnTelemetryReaderFactory` rationale above).
+   */
+  readonly semanticRouteReaderFactory?: () => SemanticRouteReader;
 }
 
 /**
@@ -392,6 +424,8 @@ export class Archivist {
   private learningSystemWriter?: LearningSystemWriter;
   private sonaTrajectoryWriter?: SonaTrajectoryWriter;
   private feedbackRecorder?: FeedbackRecorder;
+  private gnnTelemetryReader?: GNNTelemetryReader;
+  private semanticRouteReader?: SemanticRouteReader;
 
   /**
    * Idempotent (the `initialized` guard is load-bearing — dispatch calls this on
@@ -473,6 +507,8 @@ export class Archivist {
     this.learningSystemWriter = config.learningSystemWriterFactory?.();
     this.sonaTrajectoryWriter = config.sonaTrajectoryWriterFactory?.();
     this.feedbackRecorder = config.feedbackRecorderFactory?.();
+    this.gnnTelemetryReader = config.gnnTelemetryReaderFactory?.();
+    this.semanticRouteReader = config.semanticRouteReaderFactory?.();
 
     // FS-JSON stores are intentionally NOT pre-built — see `getSubstrate()`'s
     // lazy `mintLazy` closure. The `if (this.initialized) return` guard above
@@ -910,6 +946,8 @@ export class Archivist {
       capabilities: makeReadCapabilities({
         embeddingScorer: this.embeddingScorer,
         patternReader: this.patternReader,
+        gnnTelemetryReader: this.gnnTelemetryReader,
+        semanticRouteReader: this.semanticRouteReader,
       }),
     });
     return await handler(ctx, payload);

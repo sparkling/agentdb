@@ -115,16 +115,18 @@ export const neuralPatternsHandler: GuardedRead<AgentdbNeuralPatternsQuery, Agen
       const action = payload.action ?? 'stats';
 
       if (action === 'stats') {
-        // GNNService telemetry has no substrate read — see ESCAPE-HATCH in the
-        // module header. Failing loud rather than returning empty telemetry
-        // honours `feedback-no-fallbacks`: silent stats would let the cli's
-        // ADR-0090 B5 acceptance check pass via the wrong path.
+        // ADR-0181 Item 2 (2026-05-15) — `'stats'` moved to its own dispatched
+        // handler (`agentdb_gnn_stats`) so GNNService telemetry flows through
+        // the `GNNTelemetryReader` capability surface instead of bypassing
+        // dispatch. Reaching this branch means a caller (cli wrapper or
+        // direct dispatch) sent `action:'stats'` to the wrong handler; fail
+        // loud (`feedback-no-fallbacks`) so the regression surfaces
+        // immediately rather than silently returning empty telemetry.
         throw new Error(
-          "archivist: agentdb_neural_patterns 'stats' action is not substrate-backed — " +
-            'GNNService telemetry (engineType/initialized/cachedPatterns) lives on the ' +
-            'controller, not in the persisted vector store. Until ReadCapabilities ' +
-            'threads a GNNService capability, the cli agentdb_neural_patterns handler ' +
-            'remains authoritative for the stats action.',
+          "archivist: agentdb_neural_patterns 'stats' action moved to its own " +
+            "dispatched handler — call dispatchRead('agentdb_gnn_stats', { pattern, type }) " +
+            'instead. (ADR-0181 Item 2 2026-05-15: telemetry split-out so every action ' +
+            'of the legacy cli tool flows through dispatch.)',
         );
       }
 

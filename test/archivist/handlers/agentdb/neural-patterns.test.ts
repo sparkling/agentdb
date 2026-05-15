@@ -168,7 +168,11 @@ describe('agentdb_neural_patterns handler (ADR-0181 Phase 4 W3)', () => {
   });
 
   describe("action: 'stats'", () => {
-    it('throws fail-loud — stats is GNNService-only, not substrate-backed (escape-hatch)', async () => {
+    // ADR-0181 Item 2 (2026-05-15) — `'stats'` moved to its own dispatched
+    // handler (`agentdb_gnn_stats`). Reaching this branch means a caller sent
+    // `action:'stats'` to the wrong handler; the throw now redirects to the
+    // new handler instead of saying "not substrate-backed".
+    it('throws fail-loud directing callers to the agentdb_gnn_stats handler', async () => {
       const { access } = makeRvfReadFake([]);
       await expect(
         withTestReadContext(
@@ -176,7 +180,7 @@ describe('agentdb_neural_patterns handler (ADR-0181 Phase 4 W3)', () => {
           { action: 'stats' },
           { substrate: access },
         ),
-      ).rejects.toThrow(/not substrate-backed/i);
+      ).rejects.toThrow(/agentdb_gnn_stats/i);
     });
 
     it("throws fail-loud when action defaults to 'stats' (action omitted)", async () => {
@@ -187,7 +191,7 @@ describe('agentdb_neural_patterns handler (ADR-0181 Phase 4 W3)', () => {
           {},
           { substrate: access },
         ),
-      ).rejects.toThrow(/not substrate-backed/i);
+      ).rejects.toThrow(/agentdb_gnn_stats/i);
     });
   });
 

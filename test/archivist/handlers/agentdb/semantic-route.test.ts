@@ -16,7 +16,10 @@
 import { describe, it, expect } from 'vitest';
 import { withTestReadContext } from '../../../../src/archivist/testing/index.js';
 import { semanticRouteHandler } from '../../../../src/archivist/handlers/agentdb/semantic-route.js';
-import type { EmbeddingScorer } from '../../../../src/archivist/capabilities.js';
+import type {
+  EmbeddingScorer,
+  SemanticRouteReader,
+} from '../../../../src/archivist/capabilities.js';
 import type { StoreId, SubstrateAccess, SubstrateHandle } from '../../../../src/archivist/types.js';
 
 interface FakeHit {
@@ -203,5 +206,120 @@ describe('agentdb_semantic_route handler (ADR-0181 Phase 4 W3)', () => {
     );
 
     expect(result).toEqual([]);
+  });
+
+  // ── ADR-0181 Item 2 (2026-05-15) — controller-first branch tests ──────────
+
+  describe('SemanticRouteReader controller-first branch', () => {
+    function makeStubReader(
+      result: { route: string; confidence: number; metadata?: Record<string, unknown> } | null,
+    ): SemanticRouteReader & { calls: ReadonlyArray<string> } {
+      const calls: string[] = [];
+      return {
+        async route(input) {
+          calls.push(input);
+          return result;
+        },
+        get calls() {
+          return calls;
+        },
+      };
+    }
+
+    it('returns a one-element RankedResults when the SemanticRouter returns a route', async () => {
+      const reader = makeStubReader({ route: 'b5-probe-auth', confidence: 0.87 });
+      const { access } = makeRvfReadFake([]);
+
+      const { result } = await withTestReadContext(
+        semanticRouteHandler,
+        { input: 'JWT authentication with refresh token rotation' },
+        { substrate: access, semanticRouteReader: reader },
+      );
+
+      expect(reader.calls).toEqual(['JWT authentication with refresh token rotation']);
+      expect(result).toHaveLength(1);
+      expect(result[0]).toEqual({
+        item: { route: 'b5-probe-auth', confidence: 0.87 },
+        score: 0.87,
+        provenance: {
+          storeId: 'semantic-router',
+          matchType: 'semantic',
+          rawScore: 0.87,
+          rank: 1,
+          matchedField: 'input',
+        },
+      });
+    });
+
+    it('preserves metadata when the SemanticRouter result carries extras', async () => {
+      const reader = makeStubReader({
+        route: 'memory-search',
+        confidence: 0.63,
+        metadata: { namespace: 'tenant-a', tags: ['fast'] },
+      });
+
+      const { result } = await withTestReadContext(
+        semanticRouteHandler,
+        { input: 'find me the latest plan' },
+        { semanticRouteReader: reader },
+      );
+
+      expect(result).toHaveLength(1);
+      expect(result[0].item).toEqual({
+        route: 'memory-search',
+        confidence: 0.63,
+        metadata: { namespace: 'tenant-a', tags: ['fast'] },
+      });
+    });
+
+    it('returns an empty array when the SemanticRouter returns null (no synthetic substrate fallback)', async () => {
+      const reader = makeStubReader(null);
+      const { access, calls: substrateCalls } = makeRvfReadFake([
+        // Even if we DID hit the substrate, this hit would alter the result —
+        // the assertion that result is `[]` proves the substrate path is NOT
+        // taken when the controller-first branch is active.
+        { id: 'unrelated', similarity: 0.99 },
+      ]);
+
+      const { result } = await withTestReadContext(
+        semanticRouteHandler,
+        { input: 'cold start' },
+        { substrate: access, semanticRouteReader: reader },
+      );
+
+      expect(result).toEqual([]);
+      // The controller-first branch must NOT fall through to vectorSearch
+      // when the reader is wired — null is the canonical empty signal, not a
+      // trigger for the substrate path.
+      expect(substrateCalls).toHaveLength(0);
+    });
+
+    it('controller-first branch precedes the substrate vectorSearch path even when an EmbeddingScorer is also wired', async () => {
+      const reader = makeStubReader({ route: 'controller-pick', confidence: 0.5 });
+      const scorer = makeEmbeddingScorerStub(new Float32Array([1]));
+      const { access, calls: substrateCalls } = makeRvfReadFake([
+        // A substrate hit for an "unrelated-route" would shadow the
+        // controller pick if the substrate path executed. The expectation
+        // below proves the controller branch wins.
+        { id: 'unrelated-route', similarity: 0.99, metadata: { route: 'substrate-pick', confidence: 0.99 } },
+      ]);
+
+      const { result } = await withTestReadContext(
+        semanticRouteHandler,
+        { input: 'q' },
+        {
+          substrate: access,
+          embeddingScorer: scorer,
+          semanticRouteReader: reader,
+        },
+      );
+
+      expect(result).toHaveLength(1);
+      expect(result[0].item.route).toBe('controller-pick');
+      expect(substrateCalls).toHaveLength(0);
+      // The scorer must NOT be invoked either — the controller branch is
+      // pure-controller, no embed cost.
+      expect(scorer.embedCalls).toHaveLength(0);
+    });
   });
 });

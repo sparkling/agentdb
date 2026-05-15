@@ -31,6 +31,7 @@ import type { AgentdbFeedbackPayload } from './handlers/agentdb/feedback.js';
 import type { AgentdbFilteredSearchQuery } from './handlers/agentdb/filtered-search.js';
 import type { AgentdbHierarchicalRecallQuery } from './handlers/agentdb/hierarchical-recall.js';
 import type { AgentdbHierarchicalStorePayload } from './handlers/agentdb/hierarchical-store.js';
+import type { AgentdbGnnStatsQuery } from './handlers/agentdb/gnn-stats.js';
 import type { AgentdbNeuralPatternsQuery } from './handlers/agentdb/neural-patterns.js';
 import type { AgentdbPatternSearchQuery } from './handlers/agentdb/pattern-search.js';
 import type { AgentdbPatternStorePayload } from './handlers/agentdb/pattern-store.js';
@@ -168,6 +169,7 @@ export interface ToolPayloadMap {
   readonly agentdb_filtered_search: AgentdbFilteredSearchQuery;
   readonly agentdb_hierarchical_recall: AgentdbHierarchicalRecallQuery;
   readonly agentdb_hierarchical_store: AgentdbHierarchicalStorePayload;
+  readonly agentdb_gnn_stats: AgentdbGnnStatsQuery;
   readonly agentdb_neural_patterns: AgentdbNeuralPatternsQuery;
   readonly agentdb_pattern_search: AgentdbPatternSearchQuery;
   readonly agentdb_pattern_store: AgentdbPatternStorePayload;

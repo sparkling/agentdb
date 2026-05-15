@@ -68,6 +68,48 @@ export const semanticRouteHandler: GuardedRead<AgentdbSemanticRouteQuery, Ranked
   registerReadHandler<AgentdbSemanticRouteQuery, RankedResults<SemanticRouteHit>>(
     'agentdb_semantic_route',
     async (ctx: ReadContext, payload: AgentdbSemanticRouteQuery): Promise<RankedResults<SemanticRouteHit>> => {
+      // ADR-0181 Item 2 (2026-05-15) — controller-first branch.
+      //
+      // The cli `agentdb_semantic_add_route` tool persists routes to (a) the
+      // SemanticRouter's in-memory `Map<string, RouteConfig>` and (b)
+      // `.claude-flow/semantic-routes.json` (re-hydrated on construction at
+      // controller-registry.ts:1412-1432). Routes are NOT written to the RVF
+      // `agentdb_route` substrate today — substrate-backed route persistence
+      // is future-ADR scope.
+      //
+      // When the `SemanticRouteReader` capability is wired (cli adapter at
+      // archivist-init.ts `makeCliSemanticRouteReader`), reach the
+      // SemanticRouter via the narrow surface and lift its single-pick result
+      // into the canonical `RankedResults<SemanticRouteHit>` shape. Empty
+      // result (`null`) → empty array; the cli wrapper at agentdb-tools.ts
+      // :778 already handles `top` undefined as `{success:false, route:null,
+      // error:'No route matched'}`.
+      //
+      // The substrate `vectorSearch` path BELOW is reserved for the future
+      // RVF-backed-route ADR. Until then it would always return [] (no writes
+      // populate the store) — bypassing it is the only honest behaviour.
+      if (ctx.capabilities.semanticRouteReader) {
+        const reader = ctx.capabilities.requireSemanticRouteReader();
+        const result = await reader.route(payload.input);
+        if (!result) return [];
+        const item: SemanticRouteHit = result.metadata
+          ? { route: result.route, confidence: result.confidence, metadata: result.metadata }
+          : { route: result.route, confidence: result.confidence };
+        return [
+          {
+            item,
+            score: result.confidence,
+            provenance: {
+              storeId: 'semantic-router',
+              matchType: 'semantic',
+              rawScore: result.confidence,
+              rank: 1,
+              matchedField: 'input',
+            },
+          },
+        ];
+      }
+
       const embedder = ctx.capabilities.requireEmbeddingScorer();
       const vector = await embedder.embed(payload.input);
       const topK = payload.topK ?? DEFAULT_TOP_K;

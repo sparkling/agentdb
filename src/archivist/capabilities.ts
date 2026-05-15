@@ -127,6 +127,70 @@ export interface PatternHit {
   readonly score: number;
 }
 
+/**
+ * GNNService telemetry capability — narrow READ surface for the
+ * `agentdb_gnn_stats` handler (`handlers/agentdb/gnn-stats.ts`). Backed at the
+ * cli wiring point by an adapter over `getController('gnnService')`. The
+ * adapter MUST resolve the controller PER CALL (not cached at module/closure
+ * scope) so a controller swap mid-process is observed at the next dispatch —
+ * matches the resolution discipline established by the Phase 7 r1 → r2 lesson
+ * (cached handles split cli-vs-archivist state).
+ *
+ * GNNService has no SQLite persistence (compute-only — controller-registry.ts
+ * :1707-1717), so this capability surfaces in-process telemetry rather than a
+ * substrate read. The `agentdb_neural_patterns` `'similar'` action stays
+ * substrate-backed via `ctx.substrate.vectorSearch` against
+ * `agentdb_pattern_store`; `'stats'` is split out to its own dispatched handler
+ * so neither bypasses dispatch (b5-queen verdict 2026-05-15 — option (a)).
+ */
+export interface GNNTelemetryReader {
+  /**
+   * Return GNNService telemetry: engine type (`native` / `js` / `unknown`),
+   * initialised flag, count of cached patterns, and optional config snapshot.
+   * Implementation reads off `getController('gnnService')` per call.
+   */
+  getStats(): Promise<{
+    readonly engine: string;
+    readonly initialized: boolean;
+    readonly count: number;
+    readonly config?: unknown;
+  }>;
+}
+
+/**
+ * SemanticRouter route-lookup capability — narrow READ surface for the
+ * `agentdb_semantic_route` handler (`handlers/agentdb/semantic-route.ts`).
+ * Backed at the cli wiring point by an adapter over
+ * `getController('semanticRouter').route(input)`. Same per-call resolution
+ * discipline as `GNNTelemetryReader` above.
+ *
+ * SemanticRouter holds routes in an in-memory `Map<string, RouteConfig>` plus
+ * an optional `@ruvector/router` native handle. The `agentdb_semantic_add_route`
+ * cli tool persists each addition to `.claude-flow/semantic-routes.json`;
+ * `controller-registry.ts:1412-1432` re-hydrates the router from that file on
+ * construction so subsequent CLI subprocesses see the same routes. The handler
+ * reaches this surface BEFORE any substrate `vectorSearch` path — substrate-
+ * backed route persistence is future-ADR scope.
+ */
+export interface SemanticRouteReader {
+  /**
+   * Route a query to the best-matching named route. Returns `null` when no
+   * route matches (legitimate empty result — e.g. fresh router with no
+   * `addRoute` calls); otherwise returns `{ route, confidence, metadata? }`
+   * mirroring SemanticRouter's `route(input)` shape (services/SemanticRouter.ts).
+   *
+   * NULL means "router has no matching route". The handler lifts a non-null
+   * result into a one-element `RankedResults<SemanticRouteHit>` and returns
+   * `[]` on null — matches the cli wrapper's existing empty-array handling at
+   * agentdb-tools.ts:778 (`top` undefined → `{success:false, route:null}`).
+   */
+  route(input: string): Promise<{
+    readonly route: string;
+    readonly confidence: number;
+    readonly metadata?: Record<string, unknown>;
+  } | null>;
+}
+
 // ── ADR-0181 Phase 6 stub-body wire-up capabilities ──────────────────────────
 //
 // Each of the writer capabilities below is the narrow surface ONE Phase 6
@@ -314,6 +378,40 @@ export interface FeedbackWriteResult {
 }
 
 /**
+ * Narrow surface for the CausalMemoryGraph edge-recording path —
+ * `handlers/agentdb/causal-edge.ts` (ADR-0181 Item 3 wire-up, 2026-05-16).
+ * Backed at the cli wiring point by `recordCausalEdge(...)`
+ * (`agentdb-orchestration.ts:150`) which delegates to `routeCausalOp({ type:
+ * 'edge', ... })` — that helper tries `getController('causalGraph').addEdge`
+ * first and, when the controller is unwired (today's state — ADR-0147 R7
+ * gap on string→numeric memoryId mapping), falls through to a router-fallback
+ * `memory_store` write under namespace `'causal-edges'`.
+ *
+ * String-shaped payload mirrors the cli tool's `agentdb_causal-edge` input
+ * (`agentdb-tools.ts:344-378`); the controller-side numeric/enum signature is
+ * NOT exposed here because the cli call-site never has those values.
+ *
+ * Adapter MUST resolve `recordCausalEdge` via deferred dynamic import per call
+ * (no module/closure caching) so a controller swap mid-process is observed at
+ * the next dispatch — `routeCausalOp` itself awaits `ensureRegistry()` per
+ * call.
+ */
+export interface CausalGraphWriter {
+  recordEdge(input: {
+    readonly sourceId: string;
+    readonly targetId: string;
+    readonly relation: string;
+    readonly weight?: number;
+  }): Promise<CausalGraphWriteResult | null>;
+}
+
+export interface CausalGraphWriteResult {
+  readonly success: boolean;
+  readonly controller: string;
+  readonly error?: string;
+}
+
+/**
  * The capability bundle threaded onto `MutationContext` (ADR-0180 F4-2 Phase C).
  * Every field is OPTIONAL — `initialize(config)` wires whatever subset of
  * factories was supplied. A handler reaching for an unwired capability fails
@@ -333,6 +431,7 @@ export interface MutationCapabilities {
   readonly learningSystemWriter?: LearningSystemWriter;
   readonly sonaTrajectoryWriter?: SonaTrajectoryWriter;
   readonly feedbackRecorder?: FeedbackRecorder;
+  readonly causalGraphWriter?: CausalGraphWriter;
   /**
    * Fail-loud accessor for `taskRouter`. Handlers call
    * `ctx.capabilities.requireTaskRouter()` instead of `ctx.capabilities
@@ -356,6 +455,8 @@ export interface MutationCapabilities {
   requireSonaTrajectoryWriter(): SonaTrajectoryWriter;
   /** Fail-loud accessor for `feedbackRecorder`. */
   requireFeedbackRecorder(): FeedbackRecorder;
+  /** Fail-loud accessor for `causalGraphWriter`. */
+  requireCausalGraphWriter(): CausalGraphWriter;
 }
 
 /**
@@ -368,10 +469,16 @@ export interface MutationCapabilities {
 export interface ReadCapabilities {
   readonly embeddingScorer?: EmbeddingScorer;
   readonly patternReader?: PatternReader;
+  readonly gnnTelemetryReader?: GNNTelemetryReader;
+  readonly semanticRouteReader?: SemanticRouteReader;
   /** Fail-loud accessor for `embeddingScorer`. See `MutationCapabilities.requireTaskRouter`. */
   requireEmbeddingScorer(): EmbeddingScorer;
   /** Fail-loud accessor for `patternReader`. See `MutationCapabilities.requireTaskRouter`. */
   requirePatternReader(): PatternReader;
+  /** Fail-loud accessor for `gnnTelemetryReader`. See `MutationCapabilities.requireTaskRouter`. */
+  requireGnnTelemetryReader(): GNNTelemetryReader;
+  /** Fail-loud accessor for `semanticRouteReader`. See `MutationCapabilities.requireTaskRouter`. */
+  requireSemanticRouteReader(): SemanticRouteReader;
 }
 
 /**
@@ -407,6 +514,10 @@ export interface CapabilityFactories {
   readonly sonaTrajectoryWriterFactory?: () => SonaTrajectoryWriter;
   /** Lazy `FeedbackRecorder` — adapts the cli `recordFeedback(...)` path. */
   readonly feedbackRecorderFactory?: () => FeedbackRecorder;
+  /** Lazy `GNNTelemetryReader` — adapts the cli `getController('gnnService')` telemetry surface. */
+  readonly gnnTelemetryReaderFactory?: () => GNNTelemetryReader;
+  /** Lazy `SemanticRouteReader` — adapts the cli `getController('semanticRouter').route(...)` path. */
+  readonly semanticRouteReaderFactory?: () => SemanticRouteReader;
 }
 
 /**
@@ -530,10 +641,14 @@ export function makeMutationCapabilities(resolved: {
 export function makeReadCapabilities(resolved: {
   readonly embeddingScorer?: EmbeddingScorer;
   readonly patternReader?: PatternReader;
+  readonly gnnTelemetryReader?: GNNTelemetryReader;
+  readonly semanticRouteReader?: SemanticRouteReader;
 }): ReadCapabilities {
   return {
     embeddingScorer: resolved.embeddingScorer,
     patternReader: resolved.patternReader,
+    gnnTelemetryReader: resolved.gnnTelemetryReader,
+    semanticRouteReader: resolved.semanticRouteReader,
     requireEmbeddingScorer(): EmbeddingScorer {
       if (!resolved.embeddingScorer) {
         throw new Error(
@@ -551,6 +666,24 @@ export function makeReadCapabilities(resolved: {
         );
       }
       return resolved.patternReader;
+    },
+    requireGnnTelemetryReader(): GNNTelemetryReader {
+      if (!resolved.gnnTelemetryReader) {
+        throw new Error(
+          'archivist: this handler needs the GNNTelemetryReader capability, but no gnnTelemetryReaderFactory ' +
+            'was supplied to initialize() — pass { gnnTelemetryReaderFactory } in ArchivistInitConfig',
+        );
+      }
+      return resolved.gnnTelemetryReader;
+    },
+    requireSemanticRouteReader(): SemanticRouteReader {
+      if (!resolved.semanticRouteReader) {
+        throw new Error(
+          'archivist: this handler needs the SemanticRouteReader capability, but no semanticRouteReaderFactory ' +
+            'was supplied to initialize() — pass { semanticRouteReaderFactory } in ArchivistInitConfig',
+        );
+      }
+      return resolved.semanticRouteReader;
     },
   };
 }

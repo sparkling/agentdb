@@ -31,7 +31,9 @@ import {
   makeMutationCapabilities,
   makeReadCapabilities,
   type EmbeddingScorer,
+  type GNNTelemetryReader,
   type PatternReader,
+  type SemanticRouteReader,
   type TaskRouter,
 } from '../capabilities.js';
 import { type AuditNode, treeDepth } from './audit-tree.js';
@@ -147,11 +149,15 @@ export interface WithTestReadContextOpts {
   /**
    * Narrow capability handles for `ctx.capabilities` (ADR-0180 F4-2 Phase C).
    * Read-side bundle: `embeddingScorer` (query re-embed) + `patternReader`
-   * (SQLite carve-out fusion read). Omitted capabilities fail loud at the
+   * (SQLite carve-out fusion read) + `gnnTelemetryReader` (GNNService
+   * telemetry, ADR-0181 Item 2) + `semanticRouteReader` (SemanticRouter
+   * route lookup, ADR-0181 Item 2). Omitted capabilities fail loud at the
    * `require*` accessor, as production does.
    */
   readonly embeddingScorer?: EmbeddingScorer;
   readonly patternReader?: PatternReader;
+  readonly gnnTelemetryReader?: GNNTelemetryReader;
+  readonly semanticRouteReader?: SemanticRouteReader;
 }
 
 // ---------------------------------------------------------------------------
@@ -558,6 +564,8 @@ export async function withTestReadContext<T, R>(
     capabilities: makeReadCapabilities({
       embeddingScorer: opts?.embeddingScorer,
       patternReader: opts?.patternReader,
+      gnnTelemetryReader: opts?.gnnTelemetryReader,
+      semanticRouteReader: opts?.semanticRouteReader,
     }),
   };
 

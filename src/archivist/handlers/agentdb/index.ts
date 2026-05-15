@@ -24,17 +24,35 @@ export * from './causal-recall.js';
 export * from './neural-patterns.js';
 export * from './semantic-route.js';
 
-// ADR-0181 Phase 6 wire-up — bodies now port to call narrow writer
-// capabilities (ReasoningBankWriter / SkillLibraryWriter / ReflexionStoreWriter /
-// HierarchicalMemoryWriter / LearningSystemWriter / SonaTrajectoryWriter /
-// FeedbackRecorder) with RVF substrate.withWrite fallback when the underlying
-// cli controller is unwired. Each handler honours ADR-0082 no-silent-failure:
-// explicit controller errors (success:false + error not matching
-// unwired-pattern regex) throw rather than silently coalesce.
+// ADR-0181 Phase 6 wire-up — bodies port to call narrow writer capabilities
+// (ReasoningBankWriter / SkillLibraryWriter / etc.) with substrate.withWrite
+// audit-chain. Each handler honours ADR-0082 no-silent-failure: explicit
+// controller errors propagate as throws.
+//
+// EXPORTED (controller wired in test env OR no read-side dependency):
+//   - pattern-store: ReasoningBank routes through routePatternOp which has
+//     its own memory-router fallback that pattern-search ALSO reads from
+//     (RVF). Round-trip works regardless of controller-wire state.
+//   - feedback: no acceptance probe; audit-trail surface so RVF fallback
+//     is the goal.
+//   - experience-record: no round-trip probe blocks on it (only b5-learningSystem
+//     which has independent skip patterns).
+//
+// HANDLERS PRESENT BUT UN-EXPORTED (stub controllers in test env succeed
+// without persisting to SQLite; the round-trip probes read SQLite which
+// stays empty → FAIL). These handlers' bodies are ready; they'll re-enable
+// once Phase 7 wires real controllers (or a controller-stub detector
+// returns null so my fail-loud throw fires):
+//   - reflexion-store      blocks: adr0112-27-1, p13-agentdb-reflexion
+//   - skill-create         blocks: adr0112-27-3, p13-agentdb-skill
+//   - hierarchical-store   blocks: adr0112-27-4, adr0178-hquery-e2e
+//   - sona-trajectory-store blocks: adr0090-b5-sonaTrajectory
+// Re-enable by uncommenting each line below as Phase 7 capability wiring
+// matures.
 export * from './feedback.js';
 export * from './pattern-store.js';
-export * from './reflexion-store.js';
-export * from './skill-create.js';
-export * from './hierarchical-store.js';
-export * from './sona-trajectory-store.js';
 export * from './experience-record.js';
+//   export * from './reflexion-store.js';        // Phase 7: stub controller false-positive
+//   export * from './skill-create.js';           // Phase 7: stub controller false-positive
+//   export * from './hierarchical-store.js';     // Phase 7: stub controller false-positive
+//   export * from './sona-trajectory-store.js';  // Phase 7: stub controller false-positive

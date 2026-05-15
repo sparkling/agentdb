@@ -18,6 +18,13 @@ export type {
 export { RuVectorBackend } from './ruvector/RuVectorBackend.js';
 export { RuVectorLearning } from './ruvector/RuVectorLearning.js';
 export { HNSWLibBackend } from './hnswlib/HNSWLibBackend.js';
+// ADR-0181 Phase 1: the archivist's `ArchivistInitConfig.rvfBackend` is typed
+// against this concrete class, so host processes that wire a real RVF substrate
+// must be able to import it. Previously it was only reachable internally via
+// `factory.ts`'s lazy loader. `RvfConfig` rides along — it is `RvfBackend`'s
+// constructor argument type.
+export { RvfBackend } from './rvf/RvfBackend.js';
+export type { RvfConfig } from './rvf/RvfBackend.js';
 
 // Factory and detection
 export {

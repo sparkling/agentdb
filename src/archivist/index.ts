@@ -145,6 +145,17 @@ export { registerMutationHandler, registerReadHandler } from './registration';
 export { writeMultiFileAtomic } from './substrates/fs-json-store';
 export type { MultiFileTarget, MultiFileWriteResult } from './substrates/fs-json-store';
 
+// --- Audit-log path setter (ADR-0181 Phase 1) ---
+// audit-writer.ts keeps `auditPath` as a process-global, defaulting to
+// `process.cwd()/.claude-flow/data/archivist-audit.jsonl`. Each host process
+// (cli / daemon / hook-handler) resolves its project root explicitly and must
+// point the audit writer at the SAME root it passes as `ArchivistInitConfig
+// .projectRoot` — otherwise the FS-JSON stores and the shared append-only audit
+// log (ADR-0180 §15) land under different roots and the multi-process audit
+// chain fragments. `setAuditLogPath()` is the host-facing seam for that; it must
+// be called before the first dispatch (it throws once the audit fd is open).
+export { setAuditLogPath } from './audit-writer';
+
 /**
  * Construction-time wiring for `Archivist.initialize()` (ADR-0180 §Architecture
  * · Init). The archivist does not *own* the substrate backends — it receives

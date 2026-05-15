@@ -319,6 +319,129 @@ function joinPath(...segments: ReadonlyArray<string>): string {
     .join('/');
 }
 
+// ── Path-alignment validation (ADR-0181 Phase 5 DA-memo CF#6) ────────────────
+//
+// FS_JSON_PATH_OVERRIDES has been the source of four documented mismatch
+// incidents (Phase 2's queen-audit caught one; Phase 5 caught three more —
+// claims/tasks/hive-mind_agents/agent_spawn). Same shape every time: cli
+// `loadXxxStore()` direct FS read uses `.claude-flow/<family>/<file>.json`
+// while the archivist `withWrite({storeId})` resolves to flat
+// `.claude-flow/<storeId>.json` because the storeId has no override entry.
+// Post-dispatch envelope reads stale empty state.
+//
+// Cross-package introspection (compare archivist's resolved path to the cli's
+// `loadXxxStore` path) is impractical from inside this module. What IS
+// practical at register-time / init-time is structural validation of every
+// override entry: catches typos, accidental absolute paths, path-traversal
+// attempts, and entries whose value drifts away from the conventional
+// `<family>/<file>.json` shape.
+//
+// `auditFsJsonPathOverrides()` below returns a structured report so callers
+// (Archivist.initialize, tests) can decide between throw / log / aggregate.
+// Strict callers throw on any violation per `feedback-no-fallbacks`.
+
+export interface PathAlignmentViolation {
+  readonly storeId: string;
+  readonly relPath: string;
+  readonly map: 'claude-flow' | 'project-root';
+  readonly reason:
+    | 'empty-relative-path'
+    | 'absolute-path'
+    | 'path-traversal'
+    | 'leading-or-trailing-slash'
+    | 'backslash-separator';
+}
+
+export interface PathAlignmentReport {
+  readonly checked: number;
+  readonly violations: ReadonlyArray<PathAlignmentViolation>;
+}
+
+/**
+ * Pure structural inspector for a single override entry. Exported so tests
+ * can exercise every violation branch without having to mutate the private
+ * `FS_JSON_PATH_OVERRIDES` constant.
+ */
+export function inspectOverrideEntry(
+  storeId: string,
+  rel: string,
+  map: 'claude-flow' | 'project-root',
+): PathAlignmentViolation | null {
+  if (rel.length === 0) {
+    return { storeId, relPath: rel, map, reason: 'empty-relative-path' };
+  }
+  // Absolute path is wrong — fsJsonPathFor would lose the projectRoot prefix
+  // on POSIX (joinPath strips leading `/`) but on Windows the resolution is
+  // ambiguous. Either way it indicates a bad override.
+  if (rel.startsWith('/') || /^[A-Za-z]:[\\/]/.test(rel)) {
+    return { storeId, relPath: rel, map, reason: 'absolute-path' };
+  }
+  if (rel.startsWith('/') || rel.endsWith('/')) {
+    return { storeId, relPath: rel, map, reason: 'leading-or-trailing-slash' };
+  }
+  if (rel.includes('\\')) {
+    return { storeId, relPath: rel, map, reason: 'backslash-separator' };
+  }
+  // `..` segments would let an override escape `.claude-flow/` (or the project
+  // root). The few legitimate outside-`.claude-flow/` paths are explicitly
+  // routed through FS_JSON_PATH_OVERRIDES_PROJECT_ROOT instead.
+  const segments = rel.split('/');
+  if (segments.some((s) => s === '..')) {
+    return { storeId, relPath: rel, map, reason: 'path-traversal' };
+  }
+  return null;
+}
+
+/**
+ * Audit every entry in `FS_JSON_PATH_OVERRIDES` and
+ * `FS_JSON_PATH_OVERRIDES_PROJECT_ROOT` for structural well-formedness.
+ *
+ * Catches: typos producing absolute paths, leading/trailing slashes that
+ * confuse `joinPath`, backslash separators, `..` segments that would escape
+ * the project root, and empty values.
+ *
+ * Does NOT catch: cli/archivist path divergence (cross-package introspection
+ * isn't practical here — that gap belongs to a manifest test or a per-PR
+ * cli-side audit). The four documented Phase-2/Phase-5 incidents would NOT
+ * have been caught by structural validation; this guard catches the next
+ * class of bug, not the prior one.
+ */
+export function auditFsJsonPathOverrides(): PathAlignmentReport {
+  const violations: PathAlignmentViolation[] = [];
+  let checked = 0;
+
+  for (const [storeId, rel] of FS_JSON_PATH_OVERRIDES) {
+    checked++;
+    const v = inspectOverrideEntry(storeId, rel, 'claude-flow');
+    if (v) violations.push(v);
+  }
+  for (const [storeId, rel] of FS_JSON_PATH_OVERRIDES_PROJECT_ROOT) {
+    checked++;
+    const v = inspectOverrideEntry(storeId, rel, 'project-root');
+    if (v) violations.push(v);
+  }
+
+  return { checked, violations };
+}
+
+/**
+ * Convenience wrapper for `Archivist.initialize()` startup-check use:
+ * audits both override maps and throws fail-loud (per
+ * `feedback-no-fallbacks`) if any violation is found. The thrown message
+ * lists every violation so the operator sees the full picture in one
+ * stack — not "fix one, restart, fix the next."
+ */
+export function assertFsJsonPathOverridesAligned(): void {
+  const report = auditFsJsonPathOverrides();
+  if (report.violations.length === 0) return;
+  const lines = report.violations.map(
+    (v) => `  - storeId='${v.storeId}' (${v.map}) relPath='${v.relPath}': ${v.reason}`,
+  );
+  throw new Error(
+    `archivist: FS_JSON_PATH_OVERRIDES startup-alignment check failed (${report.violations.length}/${report.checked} violations):\n${lines.join('\n')}`,
+  );
+}
+
 // ── Registry container ───────────────────────────────────────────────────────
 
 /**

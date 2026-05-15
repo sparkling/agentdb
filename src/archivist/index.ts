@@ -61,6 +61,7 @@ import { makeRvfSubstrate } from './substrates/rvf-store.js';
 import { makeSqliteSubstrate } from './substrates/sqlite-store.js';
 import {
   SubstrateRegistry,
+  assertFsJsonPathOverridesAligned,
   fsJsonPathFor,
   type SubstrateFamily,
 } from './substrate-registry.js';
@@ -426,6 +427,15 @@ export class Archivist {
     // dispatched before the host process's `initProcessArchivist()` ran.
     if (config.projectRoot) {
       this.hasRealConfig = true;
+      // ADR-0181 Phase 5 DA-memo CF#6: structural startup-alignment check on
+      // FS_JSON_PATH_OVERRIDES. Catches typos / accidental absolutes /
+      // path-traversal that would otherwise surface hours later as silent
+      // wrong-file writes. Only runs on the real-config path so the
+      // defensive `initialize({})` from dispatch/dispatchRead does not gate
+      // on a structural concern that has nothing to do with the per-process
+      // bootstrap race. Throws fail-loud per `feedback-no-fallbacks` if any
+      // override entry is malformed.
+      assertFsJsonPathOverridesAligned();
     }
 
     this.projectRoot = config.projectRoot ?? process.cwd();

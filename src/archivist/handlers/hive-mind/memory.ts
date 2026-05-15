@@ -151,6 +151,36 @@ export const memoryHiveMindHandler: GuardedWrite<HiveMindMemoryPayload> =
         const now = Date.now();
         let mutated = false;
 
+        // ADR-0122 (T4) legacy-shape migration — mirrors the cli's
+        // `migrateSharedMemoryShape` (hive-mind-tools.ts:1058). Pre-T4
+        // hives stored raw values directly under `sharedMemory[key]` (a
+        // string or any non-dict primitive). T4 wraps every entry in a
+        // typed `MemoryEntry` (`{value, type, ttlMs, expiresAt, createdAt,
+        // updatedAt}`). On every mutating dispatch we walk the map and
+        // upgrade any non-dict entry to the typed shape (`type: 'system'`,
+        // permanent TTL) so a subsequent on-disk read sees only typed
+        // entries — without this, the cli flat-init's pre-injected legacy
+        // entries would round-trip through dispatch unchanged and the
+        // `adr0122-legacy-migration` acceptance check would fail.
+        const shared = (state.sharedMemory ?? {}) as Record<string, unknown>;
+        for (const [k, v] of Object.entries(shared)) {
+          if (v !== null && typeof v === 'object' && !Array.isArray(v) &&
+              'value' in (v as Record<string, unknown>) &&
+              'type' in (v as Record<string, unknown>)) {
+            continue; // already a typed entry
+          }
+          shared[k] = {
+            value: v,
+            type: 'system',
+            ttlMs: null,
+            expiresAt: null,
+            createdAt: now,
+            updatedAt: now,
+          };
+          mutated = true;
+        }
+        state.sharedMemory = shared as typeof state.sharedMemory;
+
         switch (payload.action) {
           case 'set': {
             const prior = state.sharedMemory[payload.key];

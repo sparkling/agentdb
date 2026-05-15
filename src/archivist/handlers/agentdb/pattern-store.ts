@@ -32,6 +32,7 @@ import {
   type MutationContext,
   type StoreId,
 } from '../../index.js';
+import { patternStoreInvariants } from '../../invariants/agentdb/pattern-store.js';
 
 /**
  * Mutation payload mirroring the CLI tool's `agentdb_pattern-store` input
@@ -109,7 +110,7 @@ export const storePatternHandler: GuardedWrite<AgentdbPatternStorePayload> =
       });
     },
     {
-      invariants: [], // wired by invariants-author per ADR-0180 §Mutation invariants
+      invariants: patternStoreInvariants,
       cacheScope: 'namespace',
     },
   );

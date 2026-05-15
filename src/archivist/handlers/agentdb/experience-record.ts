@@ -33,6 +33,7 @@ import {
   type MutationContext,
   type StoreId,
 } from '../../index.js';
+import { experienceRecordInvariants } from '../../invariants/agentdb/experience-record.js';
 
 /**
  * Mutation payload mirroring the CLI tool's `agentdb_experience_record`
@@ -99,7 +100,7 @@ export const recordExperienceHandler: GuardedWrite<AgentdbExperienceRecordPayloa
       });
     },
     {
-      invariants: [], // wired by invariants-author per ADR-0180 §Mutation invariants
+      invariants: experienceRecordInvariants,
       cacheScope: 'namespace',
     },
   );

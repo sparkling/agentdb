@@ -36,6 +36,7 @@ import {
   type MutationContext,
   type StoreId,
 } from '../../index.js';
+import { storeInvariants } from '../../invariants/memory/store.js';
 
 export interface MemoryStorePayload {
   readonly namespace: string;
@@ -221,7 +222,7 @@ export const storeMemoryHandler: GuardedWrite<MemoryStorePayload> =
       });
     },
     {
-      invariants: [], // wired by invariants-author per ADR-0180 §Mutation invariants
+      invariants: storeInvariants,
       cacheScope: 'namespace',
     },
   );

@@ -18,6 +18,7 @@ import {
   type StoreId,
 } from '../../index.js';
 import type { TaskRecord, TaskStore } from './shared.js';
+import { createInvariants } from '../../invariants/tasks/create.js';
 
 export interface TaskCreatePayload {
   readonly type: string;
@@ -70,7 +71,7 @@ export const taskCreateHandler: GuardedWrite<TaskCreatePayload> =
       });
     },
     {
-      invariants: [],
+      invariants: createInvariants,
       cacheScope: 'store',
     },
   );

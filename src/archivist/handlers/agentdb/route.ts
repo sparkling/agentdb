@@ -36,6 +36,7 @@ import {
   type StoreId,
 } from '../../index.js';
 import type { RvfSubstrateHandle } from '../../substrates/rvf-store.js';
+import { routeInvariants } from '../../invariants/agentdb/route.js';
 
 /**
  * Mutation payload mirroring the CLI tool's `agentdb_route` input shape
@@ -129,7 +130,7 @@ export const agentdbRouteHandler: GuardedWrite<AgentdbRoutePayload> =
       });
     },
     {
-      invariants: [],
+      invariants: routeInvariants,
       cacheScope: 'namespace',
     },
   );

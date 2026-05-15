@@ -3,6 +3,7 @@
 // Importing this module triggers the side-effecting `registerMutationHandler`
 // calls so the registry is populated before dispatch.
 
+export * from './shared.js';
 export * from './hnsw-create.js';
 export * from './hnsw-add.js';
 export * from './sona-create.js';

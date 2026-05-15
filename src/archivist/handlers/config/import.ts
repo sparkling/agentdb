@@ -29,6 +29,12 @@ import {
 } from '../../index.js';
 
 import type { ConfigScope } from './set.js';
+import {
+  type ConfigStore,
+  DEFAULT_CONFIG,
+  filterDangerousKeys,
+  normalizeConfigStore,
+} from './config-store.js';
 
 /** Mutation payload — mirrors the cli `config_import` inputSchema. `config`
  *  is a free-shape `Record<string, unknown>` (the cli accepts arbitrary JSON);
@@ -44,22 +50,95 @@ export interface ConfigImportPayload {
 
 const STORE_ID = 'config' as StoreId;
 
-// TODO(ADR-0180 Phase 5 wire-up): port the body of config-tools.ts
-// `config_import` callsite once the dispatch boundary is wired through cli.
-// The cli's load/validate/mutate/save pair collapses to a single
-// `ctx.substrate.withWrite`. The three legacy-shape guards (scoped-import
-// rejection, top-level `values` / `scopes` rejection, dangerous-key filter)
-// port verbatim because they're correctness gates — not durability concerns
-// the substrate owns.
+/** Is `v` a non-empty plain object? Used by the legacy-shape import guards. */
+function isNonEmptyObject(v: unknown): boolean {
+  return (
+    v !== undefined &&
+    v !== null &&
+    typeof v === 'object' &&
+    !Array.isArray(v) &&
+    Object.keys(v as Record<string, unknown>).length > 0
+  );
+}
+
+// Ported from cli/src/mcp-tools/config-tools.ts `config_import` handler
+// (lines 591-672). The cli's load/validate/mutate/save pair collapses to a
+// single `ctx.substrate.withWrite` — the substrate primitive supplies the
+// O_EXCL lock.
+//
+// The three legacy-shape guards port verbatim (`feedback-no-fallbacks` —
+// correctness gates, all fail loud):
+//   • scoped imports against a legacy file are rejected (BUG-A mirror — the
+//     legacy persist path only writes `values`, so the scope would drop).
+//   • a default-scope import payload carrying a non-empty top-level `values`
+//     or `scopes` key is rejected against a legacy file (would inject an
+//     MCP-shape hybrid into the nested init tree). Empty `{}` is a no-op,
+//     allowed.
+//   • `__proto__` / `constructor` / `prototype` keys filtered via
+//     `filterDangerousKeys` before any assign.
 export const configImportHandler: GuardedWrite<ConfigImportPayload> =
   registerMutationHandler<ConfigImportPayload>(
     'config_import',
-    async (ctx: MutationContext<false>, _payload: ConfigImportPayload): Promise<void> => {
-      await ctx.substrate.withWrite({ storeId: STORE_ID }, async (_handle) => {
-        throw new Error(
-          'archivist: config_import handler body pending Phase 5 wire-up; ' +
-          'callers currently route through forks/ruflo/v3/@claude-flow/cli/src/mcp-tools/config-tools.ts config_import handler',
-        );
+    async (ctx: MutationContext<false>, payload: ConfigImportPayload): Promise<void> => {
+      if (
+        payload.config === undefined ||
+        payload.config === null ||
+        typeof payload.config !== 'object' ||
+        Array.isArray(payload.config)
+      ) {
+        throw new Error("config_import: 'config' is required and must be an object");
+      }
+
+      const config = filterDangerousKeys(payload.config);
+      const scope = payload.scope || 'default';
+      const merge = payload.merge !== false;
+
+      await ctx.substrate.withWrite({ storeId: STORE_ID }, async (handle) => {
+        const raw = await handle.read<unknown>({ storeId: STORE_ID, key: 'root' });
+        const store: ConfigStore = normalizeConfigStore(raw);
+
+        // Guard 1 (BUG-A mirror): a legacy file cannot persist scoped values.
+        if (scope !== 'default' && store.shape === 'legacy') {
+          throw new Error(
+            'config_import: scope imports require MCP shape — legacy ' +
+              '(init-generated) config.json cannot persist scoped values',
+          );
+        }
+
+        // Guard 2: a legacy file rejects a payload carrying a non-empty
+        // top-level `values` / `scopes` key (would corrupt the nested tree).
+        if (store.shape === 'legacy') {
+          const scopesIsNonEmpty = isNonEmptyObject(config.scopes);
+          const valuesIsNonEmpty = isNonEmptyObject(config.values);
+          if (scopesIsNonEmpty || valuesIsNonEmpty) {
+            const offending = [
+              scopesIsNonEmpty ? '`scopes`' : null,
+              valuesIsNonEmpty ? '`values`' : null,
+            ]
+              .filter(Boolean)
+              .join(' / ');
+            throw new Error(
+              `config_import: legacy config.json rejects import payloads carrying a ` +
+                `top-level ${offending} key — would corrupt the nested tree`,
+            );
+          }
+        }
+
+        if (scope === 'default') {
+          if (merge) {
+            Object.assign(store.values, config);
+          } else {
+            store.values = { ...DEFAULT_CONFIG, ...config };
+          }
+        } else {
+          if (!store.scopes[scope] || !merge) {
+            store.scopes[scope] = {};
+          }
+          Object.assign(store.scopes[scope], config);
+        }
+
+        store.updatedAt = new Date().toISOString();
+        await handle.write({ storeId: STORE_ID, key: 'root', payload: store });
       });
     },
     {

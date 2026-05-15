@@ -23,6 +23,7 @@ import {
   type MutationContext,
   type StoreId,
 } from '../../index.js';
+import type { WorkflowStore } from './shared.js';
 
 /** Mutation payload for workflow_cancel. `workflowId` required;
  *  `reason` is recorded on the workflow record as `error`. */
@@ -33,21 +34,38 @@ export interface WorkflowCancelPayload {
 
 const STORE_ID = 'workflow_cancel' as StoreId;
 
-// TODO(ADR-0180 Phase 5 wire-up): port the body of workflow-tools.ts
-// `workflow_cancel` handler once the dispatch boundary is wired through cli.
-// The cli's load → guard-not-terminal → flip status → set error → set
-// completedAt → skip remaining steps → save sequence collapses to a single
+// Ported from workflow-tools.ts `workflow_cancel` handler. The cli's
+// load → guard-not-terminal → flip status → set error → set completedAt →
+// skip remaining steps → save sequence collapses to a single
 // `ctx.substrate.withWrite`. The "not-found" and "already-finished" guards
-// become typed verdicts in the audit chain.
+// throw fail-loud (the cli returned error shapes; under the void mutation
+// contract an unsatisfiable precondition is a thrown error).
 export const cancelWorkflowHandler: GuardedWrite<WorkflowCancelPayload> =
   registerMutationHandler<WorkflowCancelPayload>(
     'workflow_cancel',
-    async (ctx: MutationContext<false>, _payload: WorkflowCancelPayload): Promise<void> => {
-      await ctx.substrate.withWrite({ storeId: STORE_ID }, async (_handle) => {
-        throw new Error(
-          'archivist: workflow_cancel handler body pending Phase 5 wire-up; ' +
-          'callers currently route through cli/src/mcp-tools/workflow-tools.ts workflow_cancel handler',
-        );
+    async (ctx: MutationContext<false>, payload: WorkflowCancelPayload): Promise<void> => {
+      await ctx.substrate.withWrite({ storeId: STORE_ID }, async (handle) => {
+        const current = await handle.read<WorkflowStore>({ storeId: STORE_ID, key: 'root' });
+        const store: WorkflowStore = current ?? { workflows: {}, templates: {}, version: '3.0.0' };
+
+        const workflow = store.workflows[payload.workflowId];
+        if (!workflow) {
+          throw new Error(`archivist: workflow_cancel — workflow not found: ${payload.workflowId}`);
+        }
+        if (workflow.status === 'completed' || workflow.status === 'failed') {
+          throw new Error(
+            `archivist: workflow_cancel — workflow already finished (status: ${workflow.status}): ${payload.workflowId}`,
+          );
+        }
+
+        workflow.status = 'failed';
+        workflow.error = payload.reason ?? 'Cancelled by user';
+        workflow.completedAt = new Date().toISOString();
+        for (let i = workflow.currentStep; i < workflow.steps.length; i++) {
+          workflow.steps[i].status = 'skipped';
+        }
+
+        await handle.write({ storeId: STORE_ID, key: 'root', payload: store });
       });
     },
     {

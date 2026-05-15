@@ -24,6 +24,7 @@ import {
   type MutationContext,
   type StoreId,
 } from '../../index.js';
+import type { WorkflowStore } from './shared.js';
 
 /** Mutation payload for workflow_delete. `workflowId` required. */
 export interface WorkflowDeletePayload {
@@ -32,20 +33,30 @@ export interface WorkflowDeletePayload {
 
 const STORE_ID = 'workflow_delete' as StoreId;
 
-// TODO(ADR-0180 Phase 5 wire-up): port the body of workflow-tools.ts
-// `workflow_delete` handler once the dispatch boundary is wired through cli.
-// The cli's load → guard-exists → guard-not-running → delete → save sequence
-// collapses to a single `ctx.substrate.withWrite`. The "not-found" and
-// "running" guards become typed verdicts in the audit chain.
+// Ported from workflow-tools.ts `workflow_delete` handler. The cli's
+// load → guard-exists → guard-not-running → delete → save sequence collapses
+// to a single `ctx.substrate.withWrite`. The "not-found" and "running" guards
+// throw fail-loud under the void mutation contract.
 export const deleteWorkflowHandler: GuardedWrite<WorkflowDeletePayload> =
   registerMutationHandler<WorkflowDeletePayload>(
     'workflow_delete',
-    async (ctx: MutationContext<false>, _payload: WorkflowDeletePayload): Promise<void> => {
-      await ctx.substrate.withWrite({ storeId: STORE_ID }, async (_handle) => {
-        throw new Error(
-          'archivist: workflow_delete handler body pending Phase 5 wire-up; ' +
-          'callers currently route through cli/src/mcp-tools/workflow-tools.ts workflow_delete handler',
-        );
+    async (ctx: MutationContext<false>, payload: WorkflowDeletePayload): Promise<void> => {
+      await ctx.substrate.withWrite({ storeId: STORE_ID }, async (handle) => {
+        const current = await handle.read<WorkflowStore>({ storeId: STORE_ID, key: 'root' });
+        const store: WorkflowStore = current ?? { workflows: {}, templates: {}, version: '3.0.0' };
+
+        const workflow = store.workflows[payload.workflowId];
+        if (!workflow) {
+          throw new Error(`archivist: workflow_delete — workflow not found: ${payload.workflowId}`);
+        }
+        if (workflow.status === 'running') {
+          throw new Error(
+            `archivist: workflow_delete — cannot delete running workflow: ${payload.workflowId}`,
+          );
+        }
+
+        delete store.workflows[payload.workflowId];
+        await handle.write({ storeId: STORE_ID, key: 'root', payload: store });
       });
     },
     {

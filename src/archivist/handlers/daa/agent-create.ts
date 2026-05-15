@@ -57,22 +57,92 @@ export interface DaaAgentCreatePayload {
 
 const STORE_ID = 'daa' as StoreId;
 
-// TODO(ADR-0180 Phase 5 wire-up): port the body of daa-tools.ts
-// `daa_agent_create` callsite (load store → mint DAAAgent with defaults →
-// store.agents[id] = agent → save store) once the dispatch boundary is wired
-// through cli. The cli's outer `withDAALock` collapses to a single
-// `ctx.substrate.withWrite` because the substrate primitive owns the lock
-// semantics (ADR-0129 B1 race-fix preserved under the substrate's O_EXCL
-// sentinel).
+/** Persisted DAA agent record — mirrors `DAAAgent` at daa-tools.ts:21-37. */
+interface DaaAgentRecord {
+  id: string;
+  name: string;
+  type: string;
+  status: 'active' | 'idle' | 'learning' | 'terminated';
+  cognitivePattern: string;
+  learningRate: number;
+  memory: boolean;
+  capabilities: string[];
+  metrics: { tasksCompleted: number; successRate: number; adaptations: number };
+  createdAt: string;
+  lastActivity: string;
+}
+
+/** Persisted DAA workflow record — mirrors `DAAWorkflow` at daa-tools.ts:39-46. */
+interface DaaWorkflowRecord {
+  id: string;
+  name: string;
+  status: 'pending' | 'running' | 'completed' | 'failed';
+  steps: Array<{ name: string; status: string; output?: string }>;
+  strategy: string;
+  createdAt: string;
+}
+
+/**
+ * Persisted DAA knowledge record. The cli's `DAAStore.knowledge` field type
+ * (daa-tools.ts:51) names only `{ domain, content, sharedBy, timestamp }`, but
+ * the `knowledgeEntry` the cli actually writes (daa-tools.ts:404-410) also
+ * carries `targetAgents` — TS structural typing lets the wider object assign
+ * into the narrower field. This type matches what the cli persists to disk so
+ * the handler round-trips the on-disk shape faithfully.
+ */
+export interface DaaKnowledgeRecord {
+  domain: string;
+  content: unknown;
+  sharedBy: string;
+  targetAgents?: ReadonlyArray<string>;
+  timestamp: string;
+}
+
+/** Top-level shape of `.claude-flow/daa/store.json` — mirrors `DAAStore` at daa-tools.ts:48-53. */
+export interface DaaStore {
+  agents: Record<string, DaaAgentRecord>;
+  workflows: Record<string, DaaWorkflowRecord>;
+  knowledge: Record<string, DaaKnowledgeRecord>;
+  version: string;
+}
+
+/** Empty DAA store — the load-time default when the file does not yet exist. */
+export const emptyDaaStore = (): DaaStore => ({
+  agents: {},
+  workflows: {},
+  knowledge: {},
+  version: '3.0.0',
+});
+
+// Body ported from daa-tools.ts `daa_agent_create` handler (lines 169-209):
+// load store → mint DAAAgent with defaults → store.agents[id] = agent → save.
+// The cli's outer `withDAALock` (ADR-0129 B1 O_EXCL sentinel) collapses into
+// the single `ctx.substrate.withWrite` because the substrate primitive owns
+// the cross-process lock semantics.
 export const daaAgentCreateHandler: GuardedWrite<DaaAgentCreatePayload> =
   registerMutationHandler<DaaAgentCreatePayload>(
     'daa_agent_create',
-    async (ctx: MutationContext<false>, _payload: DaaAgentCreatePayload): Promise<void> => {
-      await ctx.substrate.withWrite({ storeId: STORE_ID }, async (_handle) => {
-        throw new Error(
-          'archivist: daa_agent_create handler body pending Phase 5 wire-up; ' +
-          'callers currently route through cli/src/mcp-tools/daa-tools.ts daa_agent_create handler',
-        );
+    async (ctx: MutationContext<false>, payload: DaaAgentCreatePayload): Promise<void> => {
+      await ctx.substrate.withWrite({ storeId: STORE_ID }, async (handle) => {
+        const current = await handle.read<DaaStore>({ storeId: STORE_ID, key: 'root' });
+        const store: DaaStore = current ?? emptyDaaStore();
+
+        const now = new Date().toISOString();
+        store.agents[payload.id] = {
+          id: payload.id,
+          name: payload.name ?? `DAA-${payload.id}`,
+          type: payload.type ?? 'autonomous',
+          status: 'active',
+          cognitivePattern: payload.cognitivePattern ?? 'adaptive',
+          learningRate: payload.learningRate ?? 0.01,
+          memory: payload.enableMemory ?? true,
+          capabilities: [...(payload.capabilities ?? ['reasoning', 'learning'])],
+          metrics: { tasksCompleted: 0, successRate: 1.0, adaptations: 0 },
+          createdAt: now,
+          lastActivity: now,
+        };
+
+        await handle.write({ storeId: STORE_ID, key: 'root', payload: store });
       });
     },
     {

@@ -35,6 +35,11 @@ import {
   type MutationContext,
   type StoreId,
 } from '../../index.js';
+import {
+  COORD_STORE_KEY,
+  loadCoordStore,
+  type CoordinationStore,
+} from './shared.js';
 
 /** Topology type — matches the CLI inputSchema enum. */
 export type TopologyType =
@@ -67,24 +72,42 @@ export interface CoordinationTopologyPayload {
 
 const STORE_ID = 'coordination_topology' as StoreId;
 
-// TODO(ADR-0180 Phase 5 wire-up): port the action-switch body of
-// coordination-tools.ts `coordination_topology` callsite once the dispatch
-// boundary is wired through cli. The wrapper-in-cli pattern (loadCoordStore →
-// action-switch → mutate → saveCoordStore via direct writeFileSync) collapses
-// to a single `ctx.substrate.withWrite` here because the `makeFsJsonSubstrate`
-// primitive owns the lock semantics. The cli's bare writeFileSync becomes
-// unsafe-by-policy and is removed in the same commit that flips the dispatch
-// wire-up.
+// Ports the action-switch body of coordination-tools.ts `coordination_topology`.
+// The cli's `loadCoordStore → action-switch → saveCoordStore` (direct
+// writeFileSync) collapses to a single `ctx.substrate.withWrite` because
+// `makeFsJsonSubstrate` owns the lock semantics. `get` / `optimize` are
+// read-shaped at the cli surface (no `saveCoordStore`) — they flow through the
+// mutation registration so there is one registry entry per cli tool name, but
+// only `set` writes.
 export const topologyCoordinationHandler: GuardedWrite<CoordinationTopologyPayload> =
   registerMutationHandler<CoordinationTopologyPayload>(
     'coordination_topology',
-    async (ctx: MutationContext<false>, _payload: CoordinationTopologyPayload): Promise<void> => {
-      await ctx.substrate.withWrite({ storeId: STORE_ID }, async (_handle) => {
-        throw new Error(
-          'archivist: coordination_topology handler body pending Phase 5 wire-up; ' +
-          'callers currently route through cli/src/mcp-tools/coordination-tools.ts ' +
-          '\'coordination_topology\' handler',
-        );
+    async (ctx: MutationContext<false>, payload: CoordinationTopologyPayload): Promise<void> => {
+      await ctx.substrate.withWrite({ storeId: STORE_ID }, async (handle) => {
+        const current = await handle.read<CoordinationStore>({
+          storeId: STORE_ID,
+          key: COORD_STORE_KEY,
+        });
+        const store: CoordinationStore = current ?? loadCoordStore();
+        const action: CoordinationTopologyAction = payload.action ?? 'get';
+
+        // `get` and `optimize` are pure reads in the cli — no write.
+        if (action === 'get' || action === 'optimize') {
+          return;
+        }
+
+        if (action === 'set') {
+          if (payload.type !== undefined) store.topology.type = payload.type;
+          if (payload.maxNodes !== undefined) store.topology.maxNodes = payload.maxNodes;
+          if (payload.redundancy !== undefined) store.topology.redundancy = payload.redundancy;
+          if (payload.consensusAlgorithm !== undefined) {
+            store.topology.consensusAlgorithm = payload.consensusAlgorithm;
+          }
+          await handle.write({ storeId: STORE_ID, key: COORD_STORE_KEY, payload: store });
+          return;
+        }
+
+        throw new Error(`coordination_topology: unknown action '${String(action)}'`);
       });
     },
     {

@@ -31,6 +31,7 @@ import {
   type MutationContext,
   type StoreId,
 } from '../../index.js';
+import { emptyDaaStore, type DaaStore } from './agent-create.js';
 
 /**
  * Mutation payload mirroring the CLI tool's `daa_knowledge_share` input shape
@@ -46,24 +47,40 @@ export interface DaaKnowledgeSharePayload {
 
 const STORE_ID = 'daa' as StoreId;
 
-// TODO(ADR-0180 Phase 5 wire-up): port the body of daa-tools.ts
-// `daa_knowledge_share` callsite (mint knowledgeId = `knowledge-${Date.now()}` →
-// build knowledgeEntry → load store → store.knowledge[knowledgeId] = entry →
-// save). The cli's outer `withDAALock` over the JSON-store mirror collapses to
-// a single `ctx.substrate.withWrite`. The AgentDB tail-call (vector-searchable
-// `routeMemoryOp('store', namespace 'daa-knowledge', tags=[domain, sourceId,
-// ...targetIds])`) becomes a guarded post-write follow-up — kept out of the
-// withWrite scope so an AgentDB miss does not roll back the JSON-store mirror
-// (and vice versa), matching the cli's existing try/catch semantics.
+// Body ported from daa-tools.ts `daa_knowledge_share` handler (lines 398-432):
+// mint knowledgeId = `knowledge-${Date.now()}` → build knowledgeEntry → load
+// store → store.knowledge[knowledgeId] = entry → save. The cli's outer
+// `withDAALock` over the JSON-store mirror collapses into the single
+// `ctx.substrate.withWrite`.
+//
+// SCOPE NOTE: the cli's PRIMARY write is the `routeMemoryOp('store', namespace
+// 'daa-knowledge', tags=[domain, sourceId, ...targetIds])` AgentDB tail-call
+// (daa-tools.ts:414-424) — a write into a SEPARATE substrate (the AgentDB
+// vector store, registered under its own `memory_store` mutation). It is NOT
+// part of the daa JSON-store mutation and is intentionally not ported here; it
+// lands as a guarded post-write follow-up when the cli dispatch boundary is
+// wired, kept outside this withWrite so an AgentDB miss does not roll back the
+// JSON-store mirror (and vice versa) — matching the cli's existing try/catch
+// independence. The JSON-store mirror written below is the complete daa-store
+// body for this handler.
 export const daaKnowledgeShareHandler: GuardedWrite<DaaKnowledgeSharePayload> =
   registerMutationHandler<DaaKnowledgeSharePayload>(
     'daa_knowledge_share',
-    async (ctx: MutationContext<false>, _payload: DaaKnowledgeSharePayload): Promise<void> => {
-      await ctx.substrate.withWrite({ storeId: STORE_ID }, async (_handle) => {
-        throw new Error(
-          'archivist: daa_knowledge_share handler body pending Phase 5 wire-up; ' +
-          'callers currently route through cli/src/mcp-tools/daa-tools.ts daa_knowledge_share handler',
-        );
+    async (ctx: MutationContext<false>, payload: DaaKnowledgeSharePayload): Promise<void> => {
+      await ctx.substrate.withWrite({ storeId: STORE_ID }, async (handle) => {
+        const current = await handle.read<DaaStore>({ storeId: STORE_ID, key: 'root' });
+        const store: DaaStore = current ?? emptyDaaStore();
+
+        const knowledgeId = `knowledge-${Date.now()}`;
+        store.knowledge[knowledgeId] = {
+          domain: payload.knowledgeDomain ?? 'general',
+          content: payload.knowledgeContent ?? {},
+          sharedBy: payload.sourceAgentId,
+          targetAgents: [...payload.targetAgentIds],
+          timestamp: new Date().toISOString(),
+        };
+
+        await handle.write({ storeId: STORE_ID, key: 'root', payload: store });
       });
     },
     {

@@ -34,41 +34,52 @@ import {
   registerMutationHandler,
   type GuardedWrite,
   type MutationContext,
-  type StoreId,
 } from '../../index.js';
+import {
+  WASM_STORE_ID,
+  WASM_STORE_KEY,
+  loadWasmStore,
+  type PersistedWasmAgent,
+  type WasmStore,
+} from './shared.js';
 
 /**
- * Mutation payload mirroring the CLI tool's `wasm_gallery_create` input
- * shape (wasm-agent-tools.ts:478-486). `template` is required by the cli
- * inputSchema; the mutation handler preserves that contract at the wire-up
- * callsite. Valid template names per the cli description: `coder`,
- * `researcher`, `tester`, `reviewer`, `security`, `swarm`.
+ * Mutation payload for `wasm_gallery_create`. The cli calls
+ * `createAgentFromTemplate(template)` then `snapshotAgent` against the live
+ * wasm registry — those live side-effects stay at the cli surface. The handler
+ * owns only the persistence transition, so the payload carries the
+ * already-snapshotted `PersistedWasmAgent` record (same shape as
+ * `wasm_agent_create`'s payload — both persist identically; the audit chain
+ * records which cli tool name the caller used).
  */
 export interface WasmGalleryCreatePayload {
-  readonly template: string;
+  readonly agent: PersistedWasmAgent;
 }
 
-const STORE_ID = 'wasm_gallery_create' as StoreId;
-
-// TODO(ADR-0180 Phase 5 wire-up): port the body of wasm-agent-tools.ts
-// `wasm_gallery_create` callsite (`createAgentFromTemplate(template)` →
-// extract config triple (`model`, `instructions`, `maxTurns`) from the
-// returned `info.config` → `snapshotAgent` against the live wasm registry →
-// persist the `PersistedAgent` record into the FS-JSON store keyed by agent
-// id) once the dispatch boundary is wired through cli. The cli's outer
-// `withStoreLock` collapses to a single `ctx.substrate.withWrite` here
-// because the substrate primitive owns the lock semantics; the live
-// `createAgentFromTemplate` side-effect runs inside the withWrite scope so
-// the snapshot captures initial state atomically with the audit chain.
+// Ports the persistence half of wasm-agent-tools.ts `wasm_gallery_create`
+// (the `withStoreLock(() => { loadStore → store.agents[id] = snapshot →
+// saveStore })` block — byte-identical to `wasm_agent_create`'s persist
+// block). The cli's `withStoreLock` collapses to a single
+// `ctx.substrate.withWrite` because `makeFsJsonSubstrate` owns the lock
+// semantics. The live `createAgentFromTemplate` + `snapshotAgent` calls stay
+// in cli and produce `payload.agent`.
 export const createWasmGalleryHandler: GuardedWrite<WasmGalleryCreatePayload> =
   registerMutationHandler<WasmGalleryCreatePayload>(
     'wasm_gallery_create',
-    async (ctx: MutationContext<false>, _payload: WasmGalleryCreatePayload): Promise<void> => {
-      await ctx.substrate.withWrite({ storeId: STORE_ID }, async (_handle) => {
-        throw new Error(
-          'archivist: wasm_gallery_create handler body pending Phase 5 wire-up; ' +
-          'callers currently route through cli/src/mcp-tools/wasm-agent-tools.ts wasm_gallery_create handler',
-        );
+    async (ctx: MutationContext<false>, payload: WasmGalleryCreatePayload): Promise<void> => {
+      await ctx.substrate.withWrite({ storeId: WASM_STORE_ID }, async (handle) => {
+        const current = await handle.read<WasmStore>({
+          storeId: WASM_STORE_ID,
+          key: WASM_STORE_KEY,
+        });
+        const store: WasmStore = current ?? loadWasmStore();
+
+        const next: WasmStore = {
+          ...store,
+          agents: { ...store.agents, [payload.agent.id]: payload.agent },
+        };
+
+        await handle.write({ storeId: WASM_STORE_ID, key: WASM_STORE_KEY, payload: next });
       });
     },
     {

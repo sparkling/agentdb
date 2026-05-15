@@ -35,6 +35,7 @@ import {
   type MutationContext,
   type StoreId,
 } from '../../index.js';
+import type { HiveStateDoc } from './hive-state.js';
 
 /** Mutation payload mirroring the cli tool's input shape (hive-mind-tools.ts
  *  inputSchema lines 2854-2860). `graceful` defaults to true and `force`
@@ -47,29 +48,62 @@ export interface HiveMindShutdownPayload {
 
 const STORE_ID = 'hive-mind_shutdown' as StoreId;
 
-// TODO(ADR-0180 Phase 4 wire-up): port the body of hive-mind-tools.ts
-// `hive-mind_shutdown` callsite once the dispatch boundary is wired through
-// cli. The cli's load → guard-pending → clear-workers → reset-state → save
-// → stopSweepTimer sequence collapses to: (1) one `ctx.substrate.withWrite`
-// over the hive store that resets `initialized/queen/workers/consensus.pending/
-// sharedMemory`, (2) a dispatch to the agents.json store handler to reap the
-// terminated workers, (3) `stopHiveMindSweepTimer()` as an out-of-band
-// side-effect (timer lifecycle is process-local, not substrate state). The
-// cli's outer `withHiveStoreLock` becomes redundant under the primitive's
-// own lock semantics.
+// Ported from cli/src/mcp-tools/hive-mind-tools.ts `hive-mind_shutdown` handler
+// (lines 2881-2922). The cli's `load → guard-pending → clear-workers →
+// reset-state → save under withHiveStoreLock` collapses to a single
+// `ctx.substrate.withWrite` over the hive store — the substrate primitive
+// owns the lock semantics.
+//
+// Scope: this handler resets the hive store only (`initialized`, `queen`,
+// `workers`, `consensus.pending`, `sharedMemory`). Per this file's rationale
+// block, the agents.json worker-reap is intrinsic to shutdown semantics but
+// dispatches through the `hive-mind_agents` store's own mutation handler
+// (`agents-json.ts`, action `'clear'`) once the dispatch boundary is wired —
+// it is NOT fanned out from this handler body. `stopHiveMindSweepTimer()` is
+// likewise an out-of-band process-local side-effect (timer lifecycle is not
+// substrate state) the cli callsite still owns.
 export const shutdownHiveMindHandler: GuardedWrite<HiveMindShutdownPayload> =
   registerMutationHandler<HiveMindShutdownPayload>(
     'hive-mind_shutdown',
-    async (ctx: MutationContext<false>, _payload: HiveMindShutdownPayload): Promise<void> => {
-      await ctx.substrate.withWrite({ storeId: STORE_ID }, async (_handle) => {
-        throw new Error(
-          'archivist: hive-mind_shutdown handler body pending Phase 4 wire-up; ' +
-          'callers currently route through cli/src/mcp-tools/hive-mind-tools.ts hive-mind_shutdown handler',
-        );
+    async (ctx: MutationContext<false>, payload: HiveMindShutdownPayload): Promise<void> => {
+      await ctx.substrate.withWrite({ storeId: STORE_ID }, async (handle) => {
+        const state = await handle.read<HiveStateDoc>({ storeId: STORE_ID, key: 'root' });
+        if (!state || !state.initialized) {
+          throw new Error('hive-mind_shutdown: hive-mind not initialized or already shut down');
+        }
+
+        const graceful = payload.graceful !== false;
+        const force = payload.force === true;
+        const pendingConsensus = state.consensus.pending.length;
+
+        // Graceful shutdown with pending consensus requires an explicit force
+        // override — fail loud rather than silently discarding pending work.
+        if (graceful && pendingConsensus > 0 && !force) {
+          throw new Error(
+            `hive-mind_shutdown: cannot gracefully shutdown with ${pendingConsensus} ` +
+              `pending consensus items — pass force: true to override`,
+          );
+        }
+
+        // Reset hive state. `consensus.history` is intentionally preserved for
+        // reference (mirrors the cli — only `pending` is cleared).
+        state.initialized = false;
+        delete state.queen;
+        state.workers = [];
+        state.consensus.pending = [];
+        state.sharedMemory = {};
+
+        await handle.write({ storeId: STORE_ID, key: 'root', payload: state });
       });
     },
     {
-      invariants: [], // wired by invariants-author per ADR-0180 §Mutation invariants
+      // The natural invariant here (post-shutdown state has initialized=false,
+      // zero workers, zero pending consensus) needs the substrate after-snapshot
+      // the dispatch boundary does not yet populate (index.ts passes
+      // `substrateStateAfter: undefined` pending the ADR-0180 snapshot wiring).
+      // Authoring it now would false-positive on every dispatch — left to
+      // invariants-author once the snapshot seam lands.
+      invariants: [],
       cacheScope: 'global',
     },
   );

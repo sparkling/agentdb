@@ -22,32 +22,45 @@ import {
   registerMutationHandler,
   type GuardedWrite,
   type MutationContext,
-  type StoreId,
 } from '../../index.js';
+import {
+  GITHUB_STORE_ID,
+  emptyGitHubStore,
+  type GitHubStore,
+  type GithubRepoInfo,
+} from './shared.js';
 
+/** Mutation payload — the computed analysis record to persist.
+ *
+ *  The cli `github_repo_analyze` handler runs `git rev-list` / `gh issue list`
+ *  / etc. to COMPUTE a `RepoInfo` and the `repoKey` (`${owner}/${repo}`), then
+ *  does `store.repos[repoKey] = repoInfo; saveGitHubStore(store)`. The git/gh
+ *  shell-out + the `repoKey` derivation stay on the cli side; this handler owns
+ *  the persistence step only (matching the progress_sync substrate-seam scope),
+ *  so the already-computed `repoKey` + `repoInfo` arrive in the payload. */
 export interface GithubRepoAnalyzePayload {
-  readonly owner?: string;
-  readonly repo?: string;
-  readonly branch?: string;
-  readonly deep?: boolean;
+  readonly repoKey: string;
+  readonly repoInfo: GithubRepoInfo;
 }
 
-const STORE_ID = 'github' as StoreId;
+const STORE_ID = GITHUB_STORE_ID;
 
-// TODO(ADR-0180 Phase 5 wire-up): port the cli `github_repo_analyze` handler body
-// here once the dispatch boundary is wired through cli. The cli's open-coded
-// load → mutate `store.repos[repoKey]` → save sequence collapses to
-// `ctx.substrate.withWrite` because the substrate primitive owns the lock
-// semantics on the FS-JSON store at `.claude-flow/github/store.json`.
+// The cli's open-coded `loadGitHubStore() → store.repos[repoKey] = repoInfo →
+// saveGitHubStore()` sequence collapses to a single `ctx.substrate.withWrite`
+// because the FS-JSON substrate owns the lock + atomic-write semantics on
+// `.claude-flow/github/store.json`. The cli callsite stays in place until the
+// dispatch boundary is wired through cli (Phase 7+).
 export const githubRepoAnalyzeHandler: GuardedWrite<GithubRepoAnalyzePayload> =
   registerMutationHandler<GithubRepoAnalyzePayload>(
     'github_repo_analyze',
-    async (ctx: MutationContext<false>, _payload: GithubRepoAnalyzePayload): Promise<void> => {
-      await ctx.substrate.withWrite({ storeId: STORE_ID }, async (_handle) => {
-        throw new Error(
-          'archivist: github_repo_analyze handler body pending Phase 5 wire-up; ' +
-          'callers currently route through cli/src/mcp-tools/github-tools.ts github_repo_analyze handler',
-        );
+    async (ctx: MutationContext<false>, payload: GithubRepoAnalyzePayload): Promise<void> => {
+      await ctx.substrate.withWrite({ storeId: STORE_ID }, async (handle) => {
+        const current = await handle.read<GitHubStore>({ storeId: STORE_ID, key: 'root' });
+        const store: GitHubStore = current ?? emptyGitHubStore();
+
+        store.repos[payload.repoKey] = payload.repoInfo;
+
+        await handle.write({ storeId: STORE_ID, key: 'root', payload: store });
       });
     },
     {

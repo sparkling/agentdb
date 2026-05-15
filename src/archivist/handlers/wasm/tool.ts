@@ -32,42 +32,55 @@ import {
   registerMutationHandler,
   type GuardedWrite,
   type MutationContext,
-  type StoreId,
 } from '../../index.js';
+import {
+  WASM_STORE_ID,
+  WASM_STORE_KEY,
+  type PersistedWasmAgent,
+  type WasmStore,
+} from './shared.js';
 
 /**
- * Mutation payload mirroring the CLI tool's `wasm_agent_tool` input shape
- * (wasm-agent-tools.ts:318-327). `agentId` and `toolName` are required;
- * `toolInput` is optional (e.g. `list_files` takes no params). The wire-up
- * callsite flattens this into the wasm-side `{tool, ...toolInput}` shape.
+ * Mutation payload for `wasm_agent_tool`. The cli calls `ensureLive` +
+ * `executeWasmTool(agentId, {tool, ...toolInput})` then `snapshotAgent` — those
+ * live wasm side-effects (which advance fileCount / virtual-fs state) stay at
+ * the cli surface. The handler owns only the re-persistence of the
+ * post-execution snapshot, so the payload carries the already-re-snapshotted
+ * `PersistedWasmAgent` record.
  */
 export interface WasmAgentToolPayload {
-  readonly agentId: string;
-  readonly toolName: string;
-  readonly toolInput?: Record<string, unknown>;
+  readonly agent: PersistedWasmAgent;
 }
 
-const STORE_ID = 'wasm_agent_tool' as StoreId;
-
-// TODO(ADR-0180 Phase 5 wire-up): port the body of wasm-agent-tools.ts
-// `wasm_agent_tool` callsite (`ensureLive(agentId)` to rehydrate → flatten
-// `{tool: toolName, ...toolInput}` → `executeWasmTool(agentId, toolCall)` →
-// `snapshotAgent` against the live registry → overwrite the persisted record
-// under the same agent id) once the dispatch boundary is wired through cli.
-// The cli's outer `withStoreLock` collapses to a single
-// `ctx.substrate.withWrite` here because the substrate primitive owns the
-// lock semantics; the live wasm `executeWasmTool` side-effect runs inside
-// the withWrite scope so the snapshot captures post-execution sandbox state
-// atomically with the audit chain.
+// Ports the re-snapshot half of wasm-agent-tools.ts `wasm_agent_tool`
+// (the `withStoreLock(() => { loadStore → if existing: store.agents[id] =
+// snapshot → saveStore })` block — byte-identical to `wasm_agent_prompt`'s
+// persist block). The cli's `withStoreLock` collapses to a single
+// `ctx.substrate.withWrite`. The cli's `if (existing)` skip is ported as a
+// loud throw: a missing record after the tool ran means a concurrent
+// terminate raced the execution (`feedback-no-fallbacks`).
 export const wasmAgentToolHandler: GuardedWrite<WasmAgentToolPayload> =
   registerMutationHandler<WasmAgentToolPayload>(
     'wasm_agent_tool',
-    async (ctx: MutationContext<false>, _payload: WasmAgentToolPayload): Promise<void> => {
-      await ctx.substrate.withWrite({ storeId: STORE_ID }, async (_handle) => {
-        throw new Error(
-          'archivist: wasm_agent_tool handler body pending Phase 5 wire-up; ' +
-          'callers currently route through cli/src/mcp-tools/wasm-agent-tools.ts wasm_agent_tool handler',
-        );
+    async (ctx: MutationContext<false>, payload: WasmAgentToolPayload): Promise<void> => {
+      await ctx.substrate.withWrite({ storeId: WASM_STORE_ID }, async (handle) => {
+        const current = await handle.read<WasmStore>({
+          storeId: WASM_STORE_ID,
+          key: WASM_STORE_KEY,
+        });
+        if (!current || !current.agents[payload.agent.id]) {
+          throw new Error(
+            `wasm_agent_tool: agent '${payload.agent.id}' not found at persist time ` +
+            `(concurrent terminate raced the tool execution)`,
+          );
+        }
+
+        const next: WasmStore = {
+          ...current,
+          agents: { ...current.agents, [payload.agent.id]: payload.agent },
+        };
+
+        await handle.write({ storeId: WASM_STORE_ID, key: WASM_STORE_KEY, payload: next });
       });
     },
     {

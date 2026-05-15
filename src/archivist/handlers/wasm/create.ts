@@ -35,45 +35,52 @@ import {
   registerMutationHandler,
   type GuardedWrite,
   type MutationContext,
-  type StoreId,
 } from '../../index.js';
+import {
+  WASM_STORE_ID,
+  WASM_STORE_KEY,
+  loadWasmStore,
+  type PersistedWasmAgent,
+  type WasmStore,
+} from './shared.js';
 
 /**
- * Mutation payload mirroring the CLI tool's `wasm_agent_create` input shape
- * (wasm-agent-tools.ts:237-245). `template` and the direct-config triple
- * (`model`/`instructions`/`maxTurns`) are accepted side-by-side; the cli
- * callsite branches on `args.template` presence. The mutation handler
- * preserves that branching at the wire-up callsite — payload validation lives
- * in the dispatch path, not the registration shape.
+ * Mutation payload for `wasm_agent_create`. The cli branches on `args.template`
+ * to call `createAgentFromTemplate` or `createWasmAgent`, then `snapshotAgent`
+ * against the live wasm registry — those live wasm-bindgen side-effects stay at
+ * the cli surface (the handle is process-local + non-serialisable). The handler
+ * owns only the persistence transition, so the payload carries the
+ * already-snapshotted `PersistedWasmAgent` record. This mirrors
+ * agents/spawn.ts, where ADR-026 model routing stays in cli and only the
+ * persisted record dispatches.
  */
 export interface WasmAgentCreatePayload {
-  readonly template?: string;
-  readonly model?: string;
-  readonly instructions?: string;
-  readonly maxTurns?: number;
+  readonly agent: PersistedWasmAgent;
 }
 
-const STORE_ID = 'wasm_agent_create' as StoreId;
-
-// TODO(ADR-0180 Phase 5 wire-up): port the body of wasm-agent-tools.ts
-// `wasm_agent_create` callsite (branch on `template` → call
-// `createAgentFromTemplate` or `createWasmAgent` with the direct config →
-// `snapshotAgent` against the live wasm registry → persist the
-// `PersistedAgent` record into the FS-JSON store keyed by agent id) once the
-// dispatch boundary is wired through cli. The cli's outer `withStoreLock`
-// collapses to a single `ctx.substrate.withWrite` here because the substrate
-// primitive owns the lock semantics; the live `createWasmAgent` side-effect
-// moves to an out-of-band step after the persist succeeds (rehydration on
-// read is already handled by `ensureLive` in the cli surface).
+// Ports the persistence half of wasm-agent-tools.ts `wasm_agent_create`
+// (the `withStoreLock(() => { loadStore → store.agents[id] = snapshot →
+// saveStore })` block). The cli's `withStoreLock` collapses to a single
+// `ctx.substrate.withWrite` because `makeFsJsonSubstrate` owns the lock
+// semantics. The live `createWasmAgent` / `createAgentFromTemplate` +
+// `snapshotAgent` calls stay in cli and produce `payload.agent`.
 export const createWasmAgentHandler: GuardedWrite<WasmAgentCreatePayload> =
   registerMutationHandler<WasmAgentCreatePayload>(
     'wasm_agent_create',
-    async (ctx: MutationContext<false>, _payload: WasmAgentCreatePayload): Promise<void> => {
-      await ctx.substrate.withWrite({ storeId: STORE_ID }, async (_handle) => {
-        throw new Error(
-          'archivist: wasm_agent_create handler body pending Phase 5 wire-up; ' +
-          'callers currently route through cli/src/mcp-tools/wasm-agent-tools.ts wasm_agent_create handler',
-        );
+    async (ctx: MutationContext<false>, payload: WasmAgentCreatePayload): Promise<void> => {
+      await ctx.substrate.withWrite({ storeId: WASM_STORE_ID }, async (handle) => {
+        const current = await handle.read<WasmStore>({
+          storeId: WASM_STORE_ID,
+          key: WASM_STORE_KEY,
+        });
+        const store: WasmStore = current ?? loadWasmStore();
+
+        const next: WasmStore = {
+          ...store,
+          agents: { ...store.agents, [payload.agent.id]: payload.agent },
+        };
+
+        await handle.write({ storeId: WASM_STORE_ID, key: WASM_STORE_KEY, payload: next });
       });
     },
     {

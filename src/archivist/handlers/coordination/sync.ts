@@ -30,6 +30,11 @@ import {
   type MutationContext,
   type StoreId,
 } from '../../index.js';
+import {
+  COORD_STORE_KEY,
+  loadCoordStore,
+  type CoordinationStore,
+} from './shared.js';
 
 /** Action discriminator — mirrors the cli tool's inputSchema.action enum. */
 export type CoordinationSyncAction = 'status' | 'trigger' | 'resolve';
@@ -50,26 +55,47 @@ export interface CoordinationSyncPayload {
 
 const STORE_ID = 'coordination_sync' as StoreId;
 
-// TODO(ADR-0180 Phase 5 wire-up): port the action-switch body of
-// coordination-tools.ts `coordination_sync` callsite once the dispatch boundary
-// is wired through cli. The wrapper-in-cli pattern (loadCoordStore →
-// action-switch → mutate → saveCoordStore via direct writeFileSync) collapses
-// to a single `ctx.substrate.withWrite` here because `makeFsJsonSubstrate` owns
-// the lock semantics. Note: the cli's `trigger` includes a 50ms
-// `setTimeout`-simulated sync delay — that's behaviour-equivalent at the
-// mutation surface (one write per call) but invariants-author should drop the
-// artificial delay during wire-up; it's a cosmetic relic of state-tracking-only
-// mode.
+// Ports the action-switch body of coordination-tools.ts `coordination_sync`.
+// `status` is a pure read in the cli; `trigger` mutates `sync.{syncCount,
+// lastSync,pendingChanges}`; `resolve` clears `sync.conflicts`. The cli's
+// `loadCoordStore → action-switch → saveCoordStore` collapses to one
+// `ctx.substrate.withWrite`. The cli's `trigger` 50ms `setTimeout` sync-delay
+// is dropped — it was a cosmetic relic of state-tracking-only mode, not part of
+// the mutation.
 export const syncCoordinationHandler: GuardedWrite<CoordinationSyncPayload> =
   registerMutationHandler<CoordinationSyncPayload>(
     'coordination_sync',
-    async (ctx: MutationContext<false>, _payload: CoordinationSyncPayload): Promise<void> => {
-      await ctx.substrate.withWrite({ storeId: STORE_ID }, async (_handle) => {
-        throw new Error(
-          'archivist: coordination_sync handler body pending Phase 5 wire-up; ' +
-          'callers currently route through cli/src/mcp-tools/coordination-tools.ts ' +
-          '\'coordination_sync\' handler',
-        );
+    async (ctx: MutationContext<false>, payload: CoordinationSyncPayload): Promise<void> => {
+      await ctx.substrate.withWrite({ storeId: STORE_ID }, async (handle) => {
+        const current = await handle.read<CoordinationStore>({
+          storeId: STORE_ID,
+          key: COORD_STORE_KEY,
+        });
+        const store: CoordinationStore = current ?? loadCoordStore();
+        const action: CoordinationSyncAction = payload.action ?? 'status';
+
+        if (action === 'status') {
+          return;
+        }
+
+        if (action === 'trigger') {
+          store.sync.syncCount += 1;
+          store.sync.lastSync = new Date().toISOString();
+          store.sync.pendingChanges = 0;
+          await handle.write({ storeId: STORE_ID, key: COORD_STORE_KEY, payload: store });
+          return;
+        }
+
+        if (action === 'resolve') {
+          if (store.sync.conflicts > 0) {
+            store.sync.conflicts = 0;
+            await handle.write({ storeId: STORE_ID, key: COORD_STORE_KEY, payload: store });
+          }
+          // No conflicts to resolve — no write, mirrors the cli's no-op branch.
+          return;
+        }
+
+        throw new Error(`coordination_sync: unknown action '${String(action)}'`);
       });
     },
     {

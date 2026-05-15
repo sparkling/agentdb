@@ -29,6 +29,7 @@ import {
   type MutationContext,
   type StoreId,
 } from '../../index.js';
+import { reconcileOrphanSwarms, type SwarmState, type SwarmStore } from './shared.js';
 
 /** Topology variants — mirrors swarm-tools.ts:206-208 (`VALID_TOPOLOGIES`). */
 export type SwarmTopology =
@@ -61,23 +62,129 @@ export interface SwarmInitPayload {
 
 const STORE_ID = 'swarm_init' as StoreId;
 
-// TODO(ADR-0180 Phase 5 wire-up): port the body of swarm-tools.ts
-// `swarm_init` handler (validate topology against VALID_TOPOLOGIES, clamp
-// maxAgents, emit force-without-reason advisory warning, run ADR-0098 dedupe
-// scan over `store.swarms` filtering by {topology, maxAgents, strategy} +
-// 7-day TTL, mint a fresh `SwarmState` when no reuse candidate or `force`,
-// persist via `saveSwarmStore`). The cli's `withSwarmStoreLock` collapses to
-// a single `ctx.substrate.withWrite` here because the substrate primitive
-// owns the lock semantics.
+/** Topology allow-list — mirrors swarm-tools.ts:206-208 (`VALID_TOPOLOGIES`). */
+const VALID_TOPOLOGIES: ReadonlySet<string> = new Set<string>([
+  'hierarchical',
+  'mesh',
+  'hierarchical-mesh',
+  'ring',
+  'star',
+  'hybrid',
+  'adaptive',
+]);
+
+/** ADR-0098 dedupe TTL — only reuse running swarms updated within this window. */
+const SWARM_REUSE_TTL_MS = 7 * 24 * 3600 * 1000;
+
+// Ported from swarm-tools.ts `swarm_init` handler. The cli's `withSwarmStoreLock`
+// collapses to a single `ctx.substrate.withWrite` — the substrate primitive owns
+// the O_EXCL lock. #1799 orphan reconciliation runs in-memory on the loaded
+// store; its mutations are persisted by the same terminal `handle.write` rather
+// than a separate save. Topology validation fails loud (the cli returned an
+// error shape; under the void mutation contract an invalid topology is a thrown
+// error). The force-without-reason advisory warning is preserved verbatim.
 export const initSwarmHandler: GuardedWrite<SwarmInitPayload> =
   registerMutationHandler<SwarmInitPayload>(
     'swarm_init',
-    async (ctx: MutationContext<false>, _payload: SwarmInitPayload): Promise<void> => {
-      await ctx.substrate.withWrite({ storeId: STORE_ID }, async (_handle) => {
+    async (ctx: MutationContext<false>, payload: SwarmInitPayload): Promise<void> => {
+      const topology = payload.topology ?? 'hierarchical-mesh';
+      const maxAgents = Math.min(Math.max(payload.maxAgents ?? 15, 1), 50);
+      const strategy = payload.strategy ?? 'specialized';
+      const config = payload.config ?? {};
+      const force = payload.force === true;
+      const reason = payload.reason;
+
+      if (!VALID_TOPOLOGIES.has(topology)) {
         throw new Error(
-          'archivist: swarm_init handler body pending Phase 5 wire-up; ' +
-          'callers currently route through forks/ruflo/v3/@claude-flow/cli/src/mcp-tools/swarm-tools.ts swarm_init handler',
+          `archivist: swarm_init — invalid topology: ${topology}. ` +
+          `Valid: ${[...VALID_TOPOLOGIES].join(', ')}`,
         );
+      }
+
+      if (force && !reason) {
+        // Advisory warning — ADR-0098 Flaw 4 mitigation: force=true without a
+        // reason is a drift smell.
+        process.stderr.write(
+          '[WARN] swarm_init called with force=true but no reason — ' +
+          'prefer passing reason="..." to document why a fresh swarm is required\n',
+        );
+      }
+
+      await ctx.substrate.withWrite({ storeId: STORE_ID }, async (handle) => {
+        const current = await handle.read<SwarmStore>({ storeId: STORE_ID, key: 'root' });
+        const store: SwarmStore = current ?? { swarms: {}, version: '3.0.0' };
+
+        // #1799 — reconcile orphans on load. Persisted by the terminal write below.
+        reconcileOrphanSwarms(store);
+
+        const now = new Date().toISOString();
+        const nowMs = Date.now();
+
+        // ADR-0098: config-fingerprint dedupe. Reuse pool spans 'running' AND
+        // host-exited 'terminated' entries (a CLI-invoked swarm always exits, so
+        // #1799 reconciliation marks the prior swarm 'terminated' before the next
+        // call's dedupe filter runs). Manual-shutdown / TTL-stale terminations
+        // remain ineligible. Skipped entirely when force=true.
+        const isReusable = (s: SwarmState): boolean => {
+          if (s.status === 'running') return true;
+          if (
+            s.status === 'terminated' &&
+            typeof s.terminationReason === 'string' &&
+            /^host process \d+ exited$/.test(s.terminationReason)
+          ) {
+            return true;
+          }
+          return false;
+        };
+
+        if (!force) {
+          const candidates = Object.values(store.swarms)
+            .filter(
+              (s) =>
+                isReusable(s) &&
+                s.topology === topology &&
+                s.maxAgents === maxAgents &&
+                (s.config as { strategy?: string }).strategy === strategy &&
+                nowMs - new Date(s.updatedAt).getTime() < SWARM_REUSE_TTL_MS,
+            )
+            .sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
+
+          if (candidates.length > 0) {
+            const existing = candidates[0];
+            existing.updatedAt = now;
+            existing.status = 'running';
+            existing.pid = process.pid;
+            delete existing.terminationReason;
+            store.swarms[existing.swarmId] = existing;
+            await handle.write({ storeId: STORE_ID, key: 'root', payload: store });
+            return;
+          }
+        }
+
+        // No reuse candidate (or force=true): mint a new swarm.
+        const swarmId = `swarm-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+        const swarmState: SwarmState = {
+          swarmId,
+          topology,
+          maxAgents,
+          status: 'running',
+          agents: [],
+          tasks: [],
+          config: {
+            topology,
+            maxAgents,
+            strategy,
+            communicationProtocol: (config.communicationProtocol as string) || 'message-bus',
+            autoScaling: (config.autoScaling as boolean) ?? true,
+            consensusMechanism: (config.consensusMechanism as string) || 'majority',
+          },
+          createdAt: now,
+          updatedAt: now,
+          pid: process.pid,
+        };
+
+        store.swarms[swarmId] = swarmState;
+        await handle.write({ storeId: STORE_ID, key: 'root', payload: store });
       });
     },
     {

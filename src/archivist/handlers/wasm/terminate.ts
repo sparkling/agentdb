@@ -35,40 +35,51 @@ import {
   registerMutationHandler,
   type GuardedWrite,
   type MutationContext,
-  type StoreId,
 } from '../../index.js';
+import {
+  WASM_STORE_ID,
+  WASM_STORE_KEY,
+  type WasmStore,
+} from './shared.js';
 
 /**
- * Mutation payload mirroring the CLI tool's `wasm_agent_terminate` input
- * shape (wasm-agent-tools.ts:373-378). `agentId` is required by the cli
- * inputSchema; the mutation handler preserves that contract at the wire-up
- * callsite.
+ * Mutation payload for `wasm_agent_terminate`. The cli's best-effort
+ * `terminateWasmAgent(agentId)` (freeing the process-local wasm-bindgen handle,
+ * non-fatal if the handle was never rehydrated in this process) stays at the
+ * cli surface. The handler owns only the authoritative delete of the persisted
+ * record.
  */
 export interface WasmAgentTerminatePayload {
   readonly agentId: string;
 }
 
-const STORE_ID = 'wasm_agent_terminate' as StoreId;
-
-// TODO(ADR-0180 Phase 5 wire-up): port the body of wasm-agent-tools.ts
-// `wasm_agent_terminate` callsite (best-effort `terminateWasmAgent(agentId)`
-// for the live in-memory handle, treating handle-absence as non-fatal →
-// delete the persisted record from the FS-JSON store keyed by agent id,
-// treating I/O failure as fatal) once the dispatch boundary is wired through
-// cli. The cli's outer `withStoreLock` collapses to a single
-// `ctx.substrate.withWrite` here because the substrate primitive owns the
-// lock semantics; the live `terminateWasmAgent` side-effect runs inside the
-// withWrite scope so the audit chain reflects both the live-handle free and
-// the persisted delete as one atomic transition.
+// Ports the persisted-delete half of wasm-agent-tools.ts
+// `wasm_agent_terminate` (the `withStoreLock(() => { loadStore → if present:
+// delete → saveStore; return present })` block). The cli's `withStoreLock`
+// collapses to a single `ctx.substrate.withWrite`. Unlike prompt/tool, a
+// missing record here is NOT a fault: the cli explicitly treats `!present`
+// as non-fatal (`hadRecord = false`, no throw) — terminating an
+// already-absent agent is idempotent success, not an error. Only an actual
+// substrate I/O failure (surfaced by `read`/`write` themselves) is fatal.
 export const terminateWasmAgentHandler: GuardedWrite<WasmAgentTerminatePayload> =
   registerMutationHandler<WasmAgentTerminatePayload>(
     'wasm_agent_terminate',
-    async (ctx: MutationContext<false>, _payload: WasmAgentTerminatePayload): Promise<void> => {
-      await ctx.substrate.withWrite({ storeId: STORE_ID }, async (_handle) => {
-        throw new Error(
-          'archivist: wasm_agent_terminate handler body pending Phase 5 wire-up; ' +
-          'callers currently route through cli/src/mcp-tools/wasm-agent-tools.ts wasm_agent_terminate handler',
-        );
+    async (ctx: MutationContext<false>, payload: WasmAgentTerminatePayload): Promise<void> => {
+      await ctx.substrate.withWrite({ storeId: WASM_STORE_ID }, async (handle) => {
+        const current = await handle.read<WasmStore>({
+          storeId: WASM_STORE_ID,
+          key: WASM_STORE_KEY,
+        });
+        if (!current || !current.agents[payload.agentId]) {
+          // Idempotent: nothing persisted under this id — no write needed.
+          return;
+        }
+
+        const nextAgents = { ...current.agents };
+        delete nextAgents[payload.agentId];
+        const next: WasmStore = { ...current, agents: nextAgents };
+
+        await handle.write({ storeId: WASM_STORE_ID, key: WASM_STORE_KEY, payload: next });
       });
     },
     {

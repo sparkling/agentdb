@@ -28,6 +28,7 @@ import {
   type MutationContext,
   type StoreId,
 } from '../../index.js';
+import type { WorkflowRecord, WorkflowStep, WorkflowStore } from './shared.js';
 
 /** Workflow run options — mirrors the cli inputSchema. `dryRun=true` short-circuits
  *  the mutation path; the cli still returns a validated-stage shape. */
@@ -48,21 +49,67 @@ export interface WorkflowRunPayload {
 
 const STORE_ID = 'workflow_run' as StoreId;
 
-// TODO(ADR-0180 Phase 5 wire-up): port the body of workflow-tools.ts
-// `workflow_run` handler once the dispatch boundary is wired through cli. The
-// cli's `loadWorkflowStore` → template stage expansion → mint workflowId →
+/** Template → stage-name expansion — mirrors workflow-tools.ts:183-196. */
+function stageNamesForTemplate(template: string): string[] {
+  switch (template) {
+    case 'feature':
+      return ['Research', 'Design', 'Implement', 'Test', 'Review'];
+    case 'bugfix':
+      return ['Investigate', 'Fix', 'Test', 'Review'];
+    case 'refactor':
+      return ['Analyze', 'Refactor', 'Test', 'Review'];
+    case 'security':
+      return ['Scan', 'Analyze', 'Report'];
+    default:
+      return ['Execute'];
+  }
+}
+
+// Ported from workflow-tools.ts `workflow_run` handler. The cli's
+// `loadWorkflowStore` → template stage expansion → mint workflowId →
 // build steps[] → `saveWorkflowStore` sequence collapses to a single
-// `ctx.substrate.withWrite` because the primitive owns the lock semantics.
-// `withWorkflowLock` becomes redundant under the substrate's O_EXCL sentinel.
+// `ctx.substrate.withWrite` — the substrate primitive owns the O_EXCL lock,
+// subsuming the cli's `withWorkflowLock`. `dryRun=true` short-circuits before
+// taking the lock: it never mutates the store (the validated-stage shape was
+// a cli-return concern; under the void mutation contract dryRun is a no-op).
 export const runWorkflowHandler: GuardedWrite<WorkflowRunPayload> =
   registerMutationHandler<WorkflowRunPayload>(
     'workflow_run',
-    async (ctx: MutationContext<false>, _payload: WorkflowRunPayload): Promise<void> => {
-      await ctx.substrate.withWrite({ storeId: STORE_ID }, async (_handle) => {
-        throw new Error(
-          'archivist: workflow_run handler body pending Phase 5 wire-up; ' +
-          'callers currently route through cli/src/mcp-tools/workflow-tools.ts workflow_run handler',
-        );
+    async (ctx: MutationContext<false>, payload: WorkflowRunPayload): Promise<void> => {
+      const options = payload.options ?? {};
+      if (options.dryRun === true) {
+        return;
+      }
+
+      const templateName = payload.template || 'custom';
+      const stageNames = stageNamesForTemplate(templateName);
+      const steps: WorkflowStep[] = stageNames.map((name, i) => ({
+        stepId: `step-${i + 1}`,
+        name,
+        type: 'task' as const,
+        config: { task: payload.task || name },
+        status: 'pending' as const,
+      }));
+
+      await ctx.substrate.withWrite({ storeId: STORE_ID }, async (handle) => {
+        const current = await handle.read<WorkflowStore>({ storeId: STORE_ID, key: 'root' });
+        const store: WorkflowStore = current ?? { workflows: {}, templates: {}, version: '3.0.0' };
+
+        const workflowId = `workflow-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+        const workflow: WorkflowRecord = {
+          workflowId,
+          name: payload.task || `${templateName} workflow`,
+          description: payload.task,
+          steps,
+          status: 'running',
+          currentStep: 0,
+          variables: { template: templateName, ...options },
+          createdAt: new Date().toISOString(),
+          startedAt: new Date().toISOString(),
+        };
+
+        store.workflows[workflowId] = workflow;
+        await handle.write({ storeId: STORE_ID, key: 'root', payload: store });
       });
     },
     {

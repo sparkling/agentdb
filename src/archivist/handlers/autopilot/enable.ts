@@ -32,37 +32,67 @@ import {
   registerMutationHandler,
   type GuardedWrite,
   type MutationContext,
-  type StoreId,
 } from '../../index.js';
+import {
+  AUTOPILOT_STORE_ID,
+  AUTOPILOT_STATE_KEY,
+  AUTOPILOT_LOG_KEY,
+  appendLogEntry,
+  readAutopilotLog,
+  readAutopilotState,
+} from './shared.js';
 
 /**
  * Mutation payload mirroring the CLI tool's `autopilot_enable` input shape
  * (autopilot-tools.ts inputSchema lines 52-57). `mode` is an optional tag
- * string; when provided it must be a non-empty string (validated at cli today,
- * to be promoted to a typed invariant under Phase 5 wire-up).
+ * string; when provided it must be a non-empty string.
  */
 export interface AutopilotEnablePayload {
   readonly mode?: string;
 }
 
-const STORE_ID = 'autopilot_enable' as StoreId;
-
-// TODO(ADR-0180 Phase 5 wire-up): port the body of autopilot-tools.ts
-// `autopilot_enable` callsite once the dispatch boundary is wired through cli.
-// The wrapper-in-cli pattern (loadState → mutate enabled/startTime/iterations
-// → saveState → appendLog) collapses to a single `ctx.substrate.withWrite`
-// here because `makeFsJsonSubstrate` owns the lock semantics. The appendLog
-// becomes a second write inside the same withWrite scope.
+// Ports autopilot-tools.ts `autopilot_enable` (loadState → enabled=true,
+// startTime=now, iterations=0 → saveState → appendLog 'enabled'). The cli's
+// `loadState` / `saveState` / `appendLog` triple collapses to a single
+// `ctx.substrate.withWrite`: the state save and the log append are two writes
+// inside one lock scope, so `enabled=true` and the matching log entry land
+// atomically. The cli's `mode` type-check (ADR-0082 / ADR-0094 P11/P12) moves
+// to a fail-loud throw at the handler head — under the void-returning mutation
+// contract an invalid payload is a thrown error, not a `success:false` shape.
 export const enableAutopilotHandler: GuardedWrite<AutopilotEnablePayload> =
   registerMutationHandler<AutopilotEnablePayload>(
     'autopilot_enable',
-    async (ctx: MutationContext<false>, _payload: AutopilotEnablePayload): Promise<void> => {
-      await ctx.substrate.withWrite({ storeId: STORE_ID }, async (_handle) => {
-        throw new Error(
-          'archivist: autopilot_enable handler body pending Phase 5 wire-up; ' +
-          'callers currently route through cli/src/mcp-tools/autopilot-tools.ts ' +
-          '\'autopilot_enable\' handler',
-        );
+    async (ctx: MutationContext<false>, payload: AutopilotEnablePayload): Promise<void> => {
+      if (payload.mode !== undefined) {
+        if (typeof payload.mode !== 'string') {
+          throw new Error(
+            `archivist: autopilot_enable 'mode' must be a string if provided ` +
+            `(got ${JSON.stringify(payload.mode)})`,
+          );
+        }
+        if (payload.mode.length === 0) {
+          throw new Error(
+            `archivist: autopilot_enable 'mode' must be a non-empty string if provided`,
+          );
+        }
+      }
+
+      await ctx.substrate.withWrite({ storeId: AUTOPILOT_STORE_ID }, async (handle) => {
+        const state = await readAutopilotState(handle);
+        const log = await readAutopilotLog(handle);
+
+        state.enabled = true;
+        state.startTime = Date.now();
+        state.iterations = 0;
+
+        const nextLog = appendLogEntry(log, {
+          ts: Date.now(),
+          event: 'enabled',
+          sessionId: state.sessionId,
+        });
+
+        await handle.write({ storeId: AUTOPILOT_STORE_ID, key: AUTOPILOT_STATE_KEY, payload: state });
+        await handle.write({ storeId: AUTOPILOT_STORE_ID, key: AUTOPILOT_LOG_KEY, payload: nextLog });
       });
     },
     {

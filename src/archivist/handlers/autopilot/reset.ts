@@ -25,8 +25,15 @@ import {
   registerMutationHandler,
   type GuardedWrite,
   type MutationContext,
-  type StoreId,
 } from '../../index.js';
+import {
+  AUTOPILOT_STORE_ID,
+  AUTOPILOT_STATE_KEY,
+  AUTOPILOT_LOG_KEY,
+  appendLogEntry,
+  readAutopilotLog,
+  readAutopilotState,
+} from './shared.js';
 
 /**
  * Mutation payload mirroring the CLI tool's `autopilot_reset` input shape
@@ -36,23 +43,28 @@ import {
  */
 export type AutopilotResetPayload = Record<string, never>;
 
-const STORE_ID = 'autopilot_reset' as StoreId;
-
-// TODO(ADR-0180 Phase 5 wire-up): port the body of autopilot-tools.ts
-// `autopilot_reset` callsite once the dispatch boundary is wired through
-// cli. The wrapper-in-cli pattern (loadState → zero iterations/startTime/
-// history/lastCheck → saveState → appendLog) collapses to a single
-// `ctx.substrate.withWrite` here.
+// Ports autopilot-tools.ts `autopilot_reset` (loadState → iterations=0,
+// startTime=now, history=[], lastCheck=null → saveState → appendLog 'reset').
+// The cli's `loadState` / `saveState` / `appendLog` triple collapses to a
+// single `ctx.substrate.withWrite` — the four zeroed fields and the matching
+// log entry land atomically in one lock scope.
 export const resetAutopilotHandler: GuardedWrite<AutopilotResetPayload> =
   registerMutationHandler<AutopilotResetPayload>(
     'autopilot_reset',
     async (ctx: MutationContext<false>, _payload: AutopilotResetPayload): Promise<void> => {
-      await ctx.substrate.withWrite({ storeId: STORE_ID }, async (_handle) => {
-        throw new Error(
-          'archivist: autopilot_reset handler body pending Phase 5 wire-up; ' +
-          'callers currently route through cli/src/mcp-tools/autopilot-tools.ts ' +
-          '\'autopilot_reset\' handler',
-        );
+      await ctx.substrate.withWrite({ storeId: AUTOPILOT_STORE_ID }, async (handle) => {
+        const state = await readAutopilotState(handle);
+        const log = await readAutopilotLog(handle);
+
+        state.iterations = 0;
+        state.startTime = Date.now();
+        state.history = [];
+        state.lastCheck = null;
+
+        const nextLog = appendLogEntry(log, { ts: Date.now(), event: 'reset' });
+
+        await handle.write({ storeId: AUTOPILOT_STORE_ID, key: AUTOPILOT_STATE_KEY, payload: state });
+        await handle.write({ storeId: AUTOPILOT_STORE_ID, key: AUTOPILOT_LOG_KEY, payload: nextLog });
       });
     },
     {

@@ -30,40 +30,55 @@ import {
   registerMutationHandler,
   type GuardedWrite,
   type MutationContext,
-  type StoreId,
 } from '../../index.js';
+import {
+  WASM_STORE_ID,
+  WASM_STORE_KEY,
+  type PersistedWasmAgent,
+  type WasmStore,
+} from './shared.js';
 
 /**
- * Mutation payload mirroring the CLI tool's `wasm_agent_prompt` input shape
- * (wasm-agent-tools.ts:288-297). Both fields are required by the cli
- * inputSchema; the mutation handler preserves that contract at the wire-up
- * callsite.
+ * Mutation payload for `wasm_agent_prompt`. The cli calls `ensureLive` +
+ * `promptWasmAgent(agentId, input)` then `snapshotAgent` — those live wasm
+ * side-effects stay at the cli surface. The handler owns only the
+ * re-persistence of the post-run snapshot, so the payload carries the
+ * already-re-snapshotted `PersistedWasmAgent` record (the `agentId` is
+ * `agent.id`).
  */
 export interface WasmAgentPromptPayload {
-  readonly agentId: string;
-  readonly input: string;
+  readonly agent: PersistedWasmAgent;
 }
 
-const STORE_ID = 'wasm_agent_prompt' as StoreId;
-
-// TODO(ADR-0180 Phase 5 wire-up): port the body of wasm-agent-tools.ts
-// `wasm_agent_prompt` callsite (`ensureLive(agentId)` to rehydrate →
-// `promptWasmAgent(agentId, input)` → `snapshotAgent` against the live
-// registry → overwrite the persisted record under the same agent id) once
-// the dispatch boundary is wired through cli. The cli's outer
-// `withStoreLock` collapses to a single `ctx.substrate.withWrite` here
-// because the substrate primitive owns the lock semantics; the live wasm
-// `promptWasmAgent` side-effect runs inside the withWrite scope so the
-// snapshot captures post-run state atomically with the audit chain.
+// Ports the re-snapshot half of wasm-agent-tools.ts `wasm_agent_prompt`
+// (the `withStoreLock(() => { loadStore → if existing: store.agents[id] =
+// snapshot → saveStore })` block). The cli's `withStoreLock` collapses to a
+// single `ctx.substrate.withWrite`. The cli's `if (existing)` skip is ported
+// as a loud throw: by the time the prompt has run, a missing record means a
+// concurrent terminate raced the prompt — that is a real fault, not a
+// silently-skipped no-op (`feedback-no-fallbacks`, mirrors agents/terminate.ts).
 export const promptWasmAgentHandler: GuardedWrite<WasmAgentPromptPayload> =
   registerMutationHandler<WasmAgentPromptPayload>(
     'wasm_agent_prompt',
-    async (ctx: MutationContext<false>, _payload: WasmAgentPromptPayload): Promise<void> => {
-      await ctx.substrate.withWrite({ storeId: STORE_ID }, async (_handle) => {
-        throw new Error(
-          'archivist: wasm_agent_prompt handler body pending Phase 5 wire-up; ' +
-          'callers currently route through cli/src/mcp-tools/wasm-agent-tools.ts wasm_agent_prompt handler',
-        );
+    async (ctx: MutationContext<false>, payload: WasmAgentPromptPayload): Promise<void> => {
+      await ctx.substrate.withWrite({ storeId: WASM_STORE_ID }, async (handle) => {
+        const current = await handle.read<WasmStore>({
+          storeId: WASM_STORE_ID,
+          key: WASM_STORE_KEY,
+        });
+        if (!current || !current.agents[payload.agent.id]) {
+          throw new Error(
+            `wasm_agent_prompt: agent '${payload.agent.id}' not found at persist time ` +
+            `(concurrent terminate raced the prompt run)`,
+          );
+        }
+
+        const next: WasmStore = {
+          ...current,
+          agents: { ...current.agents, [payload.agent.id]: payload.agent },
+        };
+
+        await handle.write({ storeId: WASM_STORE_ID, key: WASM_STORE_KEY, payload: next });
       });
     },
     {

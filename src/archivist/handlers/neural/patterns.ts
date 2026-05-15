@@ -2,7 +2,7 @@
 // neural_patterns mutation handler (ADR-0180 Phase 5, §Architecture · Audit chain).
 // Registers as `GuardedWrite<NeuralPatternsMutationPayload>` covering the
 // MUTATING subactions of the CLI tool's `neural_patterns` surface:
-//   - 'store':  new pattern (depends on generateEmbedding — pending wire-up).
+//   - 'store':  new pattern (embeds the name via the EmbeddingScorer capability).
 //   - 'delete': remove pattern by id (pure data — body inline).
 // The READ subactions ('list', 'get', 'search') belong on a future read
 // handler registration; this file owns only the mutation paths so the audit
@@ -44,23 +44,51 @@ export type NeuralPatternsMutationPayload =
       readonly patternId: string;
     };
 
-// TODO(ADR-0180 Phase 5 wire-up): the 'store' branch requires generateEmbedding
-// (Tier-1 agentic-flow ReasoningBank → Tier-2/3 @claude-flow/embeddings → hash
-// fallback) which today lives in cli's neural-tools.ts. Wire-up will inject
-// the embedder via MutationContext or inline the dynamic-import chain at the
-// dispatch boundary. The 'delete' branch is pure-data and lands its body
-// inline below.
+// The 'store' branch ports the cli `neural_patterns` store action: it embeds
+// the pattern name via the `EmbeddingScorer` capability threaded onto
+// `MutationContext` (ADR-0180 F4-2 Phase C) — `requireEmbeddingScorer()` fails
+// loud if `embeddingScorerFactory` was not wired into `ArchivistInitConfig`,
+// the intended substitute for the cli's in-process `generateEmbedding` chain.
+// The 'delete' branch is pure-data and needs no capability.
 export const patternsNeuralHandler: GuardedWrite<NeuralPatternsMutationPayload> =
   registerMutationHandler<NeuralPatternsMutationPayload>(
     'neural_patterns',
     async (ctx: MutationContext<false>, payload: NeuralPatternsMutationPayload): Promise<void> => {
+      // Resolve the embedder before `withWrite` for `store` so an unwired
+      // capability fails before the lock is acquired.
+      const embedder =
+        payload.action === 'store' ? ctx.capabilities.requireEmbeddingScorer() : null;
+
       await ctx.substrate.withWrite({ storeId: NEURAL_STORE_ID }, async (handle) => {
         if (payload.action === 'store') {
-          throw new Error(
-            'archivist: neural_patterns action=store body pending Phase 5 wire-up ' +
-            '(generateEmbedding dependency); callers currently route through ' +
-            'cli/src/mcp-tools/neural-tools.ts neural_patterns handler',
-          );
+          if (!embedder) {
+            throw new Error('neural_patterns: embedding scorer unavailable for action=store');
+          }
+          const current = await handle.read<NeuralStore>({
+            storeId: NEURAL_STORE_ID,
+            key: NEURAL_STORE_KEY,
+          });
+          const store: NeuralStore = current ?? { models: {}, patterns: {}, version: '3.0.0' };
+
+          const patternId = `pattern-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+          const patternName = payload.name ?? 'Unnamed pattern';
+          const embedding = Array.from(await embedder.embed(patternName));
+
+          store.patterns[patternId] = {
+            id: patternId,
+            name: patternName,
+            type: payload.type ?? 'general',
+            embedding,
+            metadata: payload.data ?? {},
+            createdAt: new Date().toISOString(),
+            usageCount: 0,
+          };
+          await handle.write<NeuralStore>({
+            storeId: NEURAL_STORE_ID,
+            key: NEURAL_STORE_KEY,
+            payload: store,
+          });
+          return;
         }
 
         if (payload.action === 'delete') {

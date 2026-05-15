@@ -29,6 +29,7 @@ import {
   type MutationContext,
   type StoreId,
 } from '../../index.js';
+import type { HiveStateDoc } from './hive-state.js';
 
 /** Broadcast priority — matches the CLI inputSchema enum. */
 export type BroadcastPriority = 'low' | 'normal' | 'high' | 'critical';
@@ -43,26 +44,62 @@ export interface HiveMindBroadcastPayload {
 
 const STORE_ID = 'hive-mind_broadcast' as StoreId;
 
-// TODO(ADR-0180 Phase 3 wire-up): port the body of hive-mind-tools.ts
-// `hive-mind_broadcast` callsite once the dispatch boundary is wired through
-// cli. The wrapper-in-cli pattern (loadHiveState → append BroadcastRecord →
-// trim-to-100 → saveHiveState under `withHiveStoreLock`) collapses to a
-// single `ctx.substrate.withWrite` here because the primitive owns the lock
-// semantics. The cli's outer call to `withHiveStoreLock` becomes redundant
-// and is removed in the same commit that flips the dispatch wire-up.
+/** Max retained broadcast messages — matches the cli trim-to-100 contract. */
+const MAX_BROADCASTS = 100;
+
+// Ported from cli/src/mcp-tools/hive-mind-tools.ts `hive-mind_broadcast` handler
+// (lines 2822-2864). The cli's `loadHiveState → append → trim-to-100 →
+// saveHiveState under withHiveStoreLock` collapses to a single
+// `ctx.substrate.withWrite`: the substrate primitive owns the lock semantics
+// the cli's outer `withHiveStoreLock` provided. Broadcasts are operational
+// system state (ADR-0122 T4) — stored as a permanent `system`-typed
+// `MemoryEntry` under `sharedMemory.broadcasts`, trimmed to the last 100.
 export const broadcastHiveMindHandler: GuardedWrite<HiveMindBroadcastPayload> =
   registerMutationHandler<HiveMindBroadcastPayload>(
     'hive-mind_broadcast',
-    async (ctx: MutationContext<false>, _payload: HiveMindBroadcastPayload): Promise<void> => {
-      await ctx.substrate.withWrite({ storeId: STORE_ID }, async (_handle) => {
-        throw new Error(
-          'archivist: hive-mind_broadcast handler body pending Phase 3 wire-up; ' +
-          'callers currently route through cli/src/mcp-tools/hive-mind-tools.ts hive-mind_broadcast handler',
-        );
+    async (ctx: MutationContext<false>, payload: HiveMindBroadcastPayload): Promise<void> => {
+      await ctx.substrate.withWrite({ storeId: STORE_ID }, async (handle) => {
+        const state = await handle.read<HiveStateDoc>({ storeId: STORE_ID, key: 'root' });
+        if (!state || !state.initialized) {
+          throw new Error('hive-mind_broadcast: hive-mind not initialized');
+        }
+
+        const messageId = `msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+        const now = Date.now();
+        const existing = state.sharedMemory.broadcasts;
+        const priorMessages =
+          existing && Array.isArray(existing.value)
+            ? [...(existing.value as Array<unknown>)]
+            : [];
+        priorMessages.push({
+          messageId,
+          message: payload.message,
+          priority: payload.priority ?? 'normal',
+          fromId: payload.fromId ?? 'system',
+          timestamp: new Date().toISOString(),
+        });
+
+        state.sharedMemory.broadcasts = {
+          value: priorMessages.slice(-MAX_BROADCASTS),
+          type: 'system',
+          ttlMs: null,
+          expiresAt: null,
+          createdAt: existing ? existing.createdAt : now,
+          updatedAt: now,
+        };
+
+        await handle.write({ storeId: STORE_ID, key: 'root', payload: state });
       });
     },
     {
-      invariants: [], // wired by invariants-author per ADR-0180 §Mutation invariants
+      // The natural invariant here (broadcast count never regresses and never
+      // exceeds MAX_BROADCASTS) needs the substrate before/after snapshots,
+      // which the dispatch boundary does not yet populate (index.ts passes
+      // `substrateStateBefore/After: undefined` pending the ADR-0180 snapshot
+      // wiring). Authoring it now would false-positive on every dispatch —
+      // left to invariants-author once the snapshot seam lands. Matches every
+      // other un-stubbed handler (agents-json.ts, tasks/*.ts).
+      invariants: [],
       cacheScope: 'global',
     },
   );

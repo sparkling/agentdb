@@ -27,6 +27,7 @@ import {
   type MutationContext,
   type StoreId,
 } from '../../index.js';
+import { defaultSystemMetrics } from './metrics.js';
 
 /** Reset target — mirrors the CLI surface's `component` string field.
  *  The cli accepts `'all' | 'metrics' | 'agents' | 'tasks'` but only ever
@@ -46,24 +47,36 @@ export interface SystemResetPayload {
 
 const STORE_ID = 'system_metrics' as StoreId;
 
-// TODO(ADR-0180 Phase 5 wire-up): port the reset body of system-tools.ts
-// `system_reset` callsite (lines 459-487) once the dispatch boundary is wired
-// through cli. The cli's `confirm`-check → default-metrics-construction →
-// `saveMetrics(defaultMetrics)` pipeline collapses to a single
-// `ctx.substrate.withWrite` here because `makeFsJsonSubstrate` owns the lock
-// semantics. The `confirm: false` early-return should move to an invariant
-// (invariants-author) so the audit chain records `rejected` rather than a
-// silent applied-with-no-op.
+// Body ported from system-tools.ts `system_reset` handler (lines 459-487).
+// The cli's `confirm`-check → default-metrics-construction →
+// `saveMetrics(defaultMetrics)` pipeline collapses into the single
+// `ctx.substrate.withWrite` because the substrate primitive owns durability +
+// isolation.
+//
+// `confirm: false` is rejected with a throw BEFORE the substrate write opens —
+// the cli's silent `{ success: false }` early-return (system-tools.ts:460-462)
+// becomes a hard rejection so the dispatch envelope's audit chain records
+// `rejected` rather than an applied-with-no-op (per the stub's invariants
+// note + `feedback-no-fallbacks`). `component` is retained for audit-chain
+// observability but, exactly as in the cli (system-tools.ts:464-479), the
+// reset always overwrites the metrics document regardless of its value.
 export const systemResetHandler: GuardedWrite<SystemResetPayload> =
   registerMutationHandler<SystemResetPayload>(
     'system_reset',
-    async (ctx: MutationContext<false>, _payload: SystemResetPayload): Promise<void> => {
-      await ctx.substrate.withWrite({ storeId: STORE_ID }, async (_handle) => {
+    async (ctx: MutationContext<false>, payload: SystemResetPayload): Promise<void> => {
+      if (!payload.confirm) {
         throw new Error(
-          'archivist: system_reset handler body pending Phase 5 wire-up; ' +
-          'callers currently route through forks/ruflo/v3/@claude-flow/cli/src/mcp-tools/system-tools.ts ' +
-          '\'system_reset\' handler',
+          'archivist: system_reset requires confirm: true — refusing destructive ' +
+            'metrics-document overwrite without explicit confirmation',
         );
+      }
+
+      await ctx.substrate.withWrite({ storeId: STORE_ID }, async (handle) => {
+        await handle.write({
+          storeId: STORE_ID,
+          key: 'root',
+          payload: defaultSystemMetrics(),
+        });
       });
     },
     {

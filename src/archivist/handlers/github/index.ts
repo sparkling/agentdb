@@ -8,6 +8,7 @@
 // writes to `.claude-flow/github/store.json`) and so does not require a
 // mutation handler. Per ADR-0180 §Audit chain, reads are passthroughs.
 
+export * from './shared.js';
 export * from './repo-analyze.js';
 export * from './pr-manage.js';
 export * from './issue-track.js';

@@ -24,6 +24,7 @@ import {
   type MutationContext,
   type StoreId,
 } from '../../index.js';
+import type { WorkflowStore } from './shared.js';
 
 /** Mutation payload for workflow_resume. `workflowId` required. */
 export interface WorkflowResumePayload {
@@ -32,20 +33,32 @@ export interface WorkflowResumePayload {
 
 const STORE_ID = 'workflow_resume' as StoreId;
 
-// TODO(ADR-0180 Phase 5 wire-up): port the body of workflow-tools.ts
-// `workflow_resume` handler once the dispatch boundary is wired through cli.
-// The cli's load → guard `status === 'paused'` → flip status → save
-// sequence collapses to a single `ctx.substrate.withWrite`. The "not-found"
-// and "not-paused" guards become typed verdicts in the audit chain.
+// Ported from workflow-tools.ts `workflow_resume` handler. The cli's
+// load → guard `status === 'paused'` → flip status → save sequence collapses
+// to a single `ctx.substrate.withWrite`. The "not-found" and "not-paused"
+// guards throw fail-loud under the void mutation contract. No step
+// auto-completion — steps stay in their current state (actual execution
+// requires agent assignment via task tools).
 export const resumeWorkflowHandler: GuardedWrite<WorkflowResumePayload> =
   registerMutationHandler<WorkflowResumePayload>(
     'workflow_resume',
-    async (ctx: MutationContext<false>, _payload: WorkflowResumePayload): Promise<void> => {
-      await ctx.substrate.withWrite({ storeId: STORE_ID }, async (_handle) => {
-        throw new Error(
-          'archivist: workflow_resume handler body pending Phase 5 wire-up; ' +
-          'callers currently route through cli/src/mcp-tools/workflow-tools.ts workflow_resume handler',
-        );
+    async (ctx: MutationContext<false>, payload: WorkflowResumePayload): Promise<void> => {
+      await ctx.substrate.withWrite({ storeId: STORE_ID }, async (handle) => {
+        const current = await handle.read<WorkflowStore>({ storeId: STORE_ID, key: 'root' });
+        const store: WorkflowStore = current ?? { workflows: {}, templates: {}, version: '3.0.0' };
+
+        const workflow = store.workflows[payload.workflowId];
+        if (!workflow) {
+          throw new Error(`archivist: workflow_resume — workflow not found: ${payload.workflowId}`);
+        }
+        if (workflow.status !== 'paused') {
+          throw new Error(
+            `archivist: workflow_resume — workflow not paused (status: ${workflow.status}): ${payload.workflowId}`,
+          );
+        }
+
+        workflow.status = 'running';
+        await handle.write({ storeId: STORE_ID, key: 'root', payload: store });
       });
     },
     {

@@ -29,6 +29,7 @@ import {
   type MutationContext,
   type StoreId,
 } from '../../index.js';
+import { emptyDaaStore, type DaaStore } from './agent-create.js';
 
 /**
  * Mutation payload mirroring the CLI tool's `daa_workflow_execute` input
@@ -42,23 +43,34 @@ export interface DaaWorkflowExecutePayload {
 
 const STORE_ID = 'daa' as StoreId;
 
-// TODO(ADR-0180 Phase 5 wire-up): port the body of daa-tools.ts
-// `daa_workflow_execute` callsite (load store → reject if workflow missing →
-// workflow.status = 'running' → save). The cli's outer `withDAALock`
-// collapses to a single `ctx.substrate.withWrite` because the substrate
-// primitive owns the lock semantics (ADR-0129 B1 race-fix preserved under
-// the substrate's O_EXCL sentinel). Step auto-execution remains out of scope
-// per the cli's `_note` — only the status transition is durable; runtime
-// step orchestration is left to agent tools.
+// Body ported from daa-tools.ts `daa_workflow_execute` handler (lines 361-381):
+// load store → reject if workflow missing → workflow.status = 'running' →
+// save. The cli's outer `withDAALock` collapses into the single
+// `ctx.substrate.withWrite` because the substrate primitive owns the lock
+// semantics — this is the read-modify-write the ADR-0129 B1 lock exists to
+// serialise (the recorded race: `daa_workflow_execute` observing a stale
+// pre-image missing a concurrently-created workflow and returning
+// `Workflow not found`). Step auto-execution stays out of scope per the cli's
+// `_note` — only the status transition is durable; runtime step orchestration
+// is left to agent tools.
 export const daaWorkflowExecuteHandler: GuardedWrite<DaaWorkflowExecutePayload> =
   registerMutationHandler<DaaWorkflowExecutePayload>(
     'daa_workflow_execute',
-    async (ctx: MutationContext<false>, _payload: DaaWorkflowExecutePayload): Promise<void> => {
-      await ctx.substrate.withWrite({ storeId: STORE_ID }, async (_handle) => {
-        throw new Error(
-          'archivist: daa_workflow_execute handler body pending Phase 5 wire-up; ' +
-          'callers currently route through cli/src/mcp-tools/daa-tools.ts daa_workflow_execute handler',
-        );
+    async (ctx: MutationContext<false>, payload: DaaWorkflowExecutePayload): Promise<void> => {
+      await ctx.substrate.withWrite({ storeId: STORE_ID }, async (handle) => {
+        const current = await handle.read<DaaStore>({ storeId: STORE_ID, key: 'root' });
+        const store: DaaStore = current ?? emptyDaaStore();
+
+        const workflow = store.workflows[payload.workflowId];
+        if (!workflow) {
+          throw new Error(
+            `archivist: daa_workflow_execute — workflow '${payload.workflowId}' not found in daa store`,
+          );
+        }
+
+        workflow.status = 'running';
+
+        await handle.write({ storeId: STORE_ID, key: 'root', payload: store });
       });
     },
     {

@@ -27,8 +27,14 @@ import {
   registerMutationHandler,
   type GuardedWrite,
   type MutationContext,
-  type StoreId,
 } from '../../index.js';
+import {
+  AUTOPILOT_STORE_ID,
+  AUTOPILOT_STATE_KEY,
+  readAutopilotState,
+  validateNumber,
+  validateTaskSources,
+} from './shared.js';
 
 /** Valid task-source enum — matches `VALID_TASK_SOURCES` in autopilot-state.ts. */
 export type AutopilotTaskSource = 'team-tasks' | 'swarm-tasks' | 'file-checklist';
@@ -44,24 +50,31 @@ export interface AutopilotConfigPayload {
   readonly taskSources?: ReadonlyArray<AutopilotTaskSource>;
 }
 
-const STORE_ID = 'autopilot_config' as StoreId;
-
-// TODO(ADR-0180 Phase 5 wire-up): port the body of autopilot-tools.ts
-// `autopilot_config` callsite once the dispatch boundary is wired through
-// cli. The wrapper-in-cli pattern (loadState → per-field validateNumber /
-// validateTaskSources → saveState) collapses to a single
-// `ctx.substrate.withWrite` here; the validateNumber/validateTaskSources
-// gates should be promoted to typed invariants rather than inline guards.
+// Ports autopilot-tools.ts `autopilot_config` (loadState → per-provided-field
+// validateNumber / validateTaskSources → saveState). No log append. The cli's
+// `loadState` / `saveState` pair collapses to a single
+// `ctx.substrate.withWrite`. `validateNumber` clamps an out-of-range input
+// into `[min, max]` and falls back to the *current* value on a non-finite
+// input — this is intentional clamping validation (the documented cli
+// behaviour, ADR-0094 P11/P12), not a fault-masking fallback.
 export const configAutopilotHandler: GuardedWrite<AutopilotConfigPayload> =
   registerMutationHandler<AutopilotConfigPayload>(
     'autopilot_config',
-    async (ctx: MutationContext<false>, _payload: AutopilotConfigPayload): Promise<void> => {
-      await ctx.substrate.withWrite({ storeId: STORE_ID }, async (_handle) => {
-        throw new Error(
-          'archivist: autopilot_config handler body pending Phase 5 wire-up; ' +
-          'callers currently route through cli/src/mcp-tools/autopilot-tools.ts ' +
-          '\'autopilot_config\' handler',
-        );
+    async (ctx: MutationContext<false>, payload: AutopilotConfigPayload): Promise<void> => {
+      await ctx.substrate.withWrite({ storeId: AUTOPILOT_STORE_ID }, async (handle) => {
+        const state = await readAutopilotState(handle);
+
+        if (payload.maxIterations !== undefined) {
+          state.maxIterations = validateNumber(payload.maxIterations, 1, 1000, state.maxIterations);
+        }
+        if (payload.timeoutMinutes !== undefined) {
+          state.timeoutMinutes = validateNumber(payload.timeoutMinutes, 1, 1440, state.timeoutMinutes);
+        }
+        if (payload.taskSources !== undefined) {
+          state.taskSources = validateTaskSources(payload.taskSources);
+        }
+
+        await handle.write({ storeId: AUTOPILOT_STORE_ID, key: AUTOPILOT_STATE_KEY, payload: state });
       });
     },
     {

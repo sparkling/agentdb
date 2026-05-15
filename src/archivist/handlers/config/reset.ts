@@ -24,6 +24,13 @@ import {
 } from '../../index.js';
 
 import type { ConfigScope } from './set.js';
+import {
+  type ConfigStore,
+  DEFAULT_CONFIG,
+  getNestedValue,
+  normalizeConfigStore,
+  setNestedValue,
+} from './config-store.js';
 
 /** Mutation payload — mirrors the cli `config_reset` inputSchema. `key`
  *  optional: omitted means "reset the whole scope to defaults"; present means
@@ -36,22 +43,74 @@ export interface ConfigResetPayload {
 
 const STORE_ID = 'config' as StoreId;
 
-// TODO(ADR-0180 Phase 5 wire-up): port the body of config-tools.ts
-// `config_reset` callsite once the dispatch boundary is wired through cli.
-// The cli's load/mutate/save pair collapses to a single
-// `ctx.substrate.withWrite`. Both action shapes (specific-key, full-reset)
-// port verbatim, including BUG-B's `setNestedValue` rebuild for legacy
-// trees — the substrate is shape-agnostic, the handler keeps the shape
-// discrimination.
+// Ported from cli/src/mcp-tools/config-tools.ts `config_reset` handler
+// (lines 473-538). The cli's bare `loadConfigStore` / `saveConfigStore` pair
+// collapses to a single `ctx.substrate.withWrite` — the substrate primitive
+// supplies the O_EXCL lock.
+//
+// Both action shapes port verbatim:
+//   • specific-key (`payload.key` present): delete from `values` (MCP-flat),
+//     nested-walk delete (legacy), or delete from `scopes[scope]`.
+//   • full-reset (`payload.key` omitted): replace `values` with DEFAULT_CONFIG
+//     (MCP-flat) or rebuild via `setNestedValue` (legacy — BUG-B: DEFAULT_CONFIG
+//     is a FLAT dotted-key map; assigning it directly to a legacy nested tree
+//     would produce a hybrid file, so it is rebuilt nested).
 export const configResetHandler: GuardedWrite<ConfigResetPayload> =
   registerMutationHandler<ConfigResetPayload>(
     'config_reset',
-    async (ctx: MutationContext<false>, _payload: ConfigResetPayload): Promise<void> => {
-      await ctx.substrate.withWrite({ storeId: STORE_ID }, async (_handle) => {
-        throw new Error(
-          'archivist: config_reset handler body pending Phase 5 wire-up; ' +
-          'callers currently route through forks/ruflo/v3/@claude-flow/cli/src/mcp-tools/config-tools.ts config_reset handler',
-        );
+    async (ctx: MutationContext<false>, payload: ConfigResetPayload): Promise<void> => {
+      const scope = payload.scope || 'default';
+      const key = payload.key;
+
+      await ctx.substrate.withWrite({ storeId: STORE_ID }, async (handle) => {
+        const raw = await handle.read<unknown>({ storeId: STORE_ID, key: 'root' });
+        const store: ConfigStore = normalizeConfigStore(raw);
+
+        if (key) {
+          // Reset a specific key.
+          if (scope === 'default') {
+            if (key in store.values) {
+              delete store.values[key];
+            } else if (
+              store.shape === 'legacy' &&
+              getNestedValue(store.values, key) !== undefined
+            ) {
+              // Nested-walk delete for a legacy tree.
+              const parts = key.split('.');
+              let cur: Record<string, unknown> | undefined = store.values;
+              for (let i = 0; i < parts.length - 1; i++) {
+                cur = cur[parts[i] as string] as Record<string, unknown> | undefined;
+                if (!cur) break;
+              }
+              if (cur) {
+                delete cur[parts[parts.length - 1] as string];
+              }
+            }
+          } else if (store.scopes[scope] && key in store.scopes[scope]) {
+            delete store.scopes[scope][key];
+          }
+        } else {
+          // Reset the whole scope to defaults.
+          if (scope === 'default') {
+            if (store.shape === 'legacy') {
+              // BUG-B: rebuild the nested tree from the flat DEFAULT_CONFIG so
+              // the file stays nested instead of becoming a flat/nested hybrid.
+              for (const k of Object.keys(store.values)) {
+                delete store.values[k];
+              }
+              for (const [k, v] of Object.entries(DEFAULT_CONFIG)) {
+                setNestedValue(store.values, k, v);
+              }
+            } else {
+              store.values = { ...DEFAULT_CONFIG };
+            }
+          } else if (store.scopes[scope]) {
+            delete store.scopes[scope];
+          }
+        }
+
+        store.updatedAt = new Date().toISOString();
+        await handle.write({ storeId: STORE_ID, key: 'root', payload: store });
       });
     },
     {

@@ -33,7 +33,7 @@ import {
   type MutationContext,
   type StoreId,
 } from '../../index.js';
-import type { DaaCognitivePattern } from './agent-create.js';
+import { emptyDaaStore, type DaaCognitivePattern, type DaaStore } from './agent-create.js';
 
 /** Action discriminator — matches the cli inputSchema enum (daa-tools.ts:511). */
 export type DaaCognitivePatternAction = 'analyze' | 'change';
@@ -53,25 +53,58 @@ export interface DaaCognitivePatternPayload {
 
 const STORE_ID = 'daa' as StoreId;
 
-// TODO(ADR-0180 Phase 5 wire-up): port the body of daa-tools.ts
-// `daa_cognitive_pattern` write path (action='change' + agentId + pattern):
-// load store → reject if agent missing → capture previousPattern →
-// agent.cognitivePattern = payload.pattern → save → return
-// `{ previousPattern, newPattern, changedAt }`. The cli's outer `withDAALock`
-// collapses to a single `ctx.substrate.withWrite` because the substrate
-// primitive owns the lock semantics. The read paths (action='analyze',
-// no-agentId catalogue) move to a sibling read handler when the read-split
-// lands — registering under the same tool name is rejected here because
-// `dispatch` and `dispatchRead` are channel-separated (ADR-0180 §Audit chain).
+// Body ported from daa-tools.ts `daa_cognitive_pattern` WRITE path
+// (action='change' + agentId + pattern; daa-tools.ts:520-539): load store →
+// reject if agent missing → capture previousPattern → agent.cognitivePattern =
+// payload.pattern → save. The cli's outer `withDAALock` collapses into the
+// single `ctx.substrate.withWrite` because the substrate primitive owns the
+// lock semantics.
+//
+// SCOPE NOTE: only the WRITE path is registered here. The cli tool also serves
+// two READ paths — `action='analyze'` (returns the agent's current pattern +
+// metrics) and the no-`agentId` static pattern catalogue. Those are non-
+// mutating and route through `dispatchRead` under a sibling read handler when
+// the read-split lands; they are NOT a daa-store mutation and have no body
+// here. This handler rejects payloads that are not a well-formed change
+// intent — the dispatch boundary should only route `action='change'` with
+// both `agentId` and `pattern` present to a mutation handler.
 export const daaCognitivePatternHandler: GuardedWrite<DaaCognitivePatternPayload> =
   registerMutationHandler<DaaCognitivePatternPayload>(
     'daa_cognitive_pattern',
-    async (ctx: MutationContext<false>, _payload: DaaCognitivePatternPayload): Promise<void> => {
-      await ctx.substrate.withWrite({ storeId: STORE_ID }, async (_handle) => {
+    async (ctx: MutationContext<false>, payload: DaaCognitivePatternPayload): Promise<void> => {
+      if (payload.action !== 'change') {
         throw new Error(
-          'archivist: daa_cognitive_pattern handler body pending Phase 5 wire-up; ' +
-          'callers currently route through cli/src/mcp-tools/daa-tools.ts daa_cognitive_pattern handler',
+          `archivist: daa_cognitive_pattern mutation handler requires action='change'; ` +
+            `got action='${payload.action ?? 'analyze'}' (analyze + catalogue are read-only paths)`,
         );
+      }
+      if (!payload.agentId) {
+        throw new Error(
+          "archivist: daa_cognitive_pattern action='change' requires agentId",
+        );
+      }
+      if (!payload.pattern) {
+        throw new Error(
+          "archivist: daa_cognitive_pattern action='change' requires pattern",
+        );
+      }
+      const agentId = payload.agentId;
+      const pattern = payload.pattern;
+
+      await ctx.substrate.withWrite({ storeId: STORE_ID }, async (handle) => {
+        const current = await handle.read<DaaStore>({ storeId: STORE_ID, key: 'root' });
+        const store: DaaStore = current ?? emptyDaaStore();
+
+        const agent = store.agents[agentId];
+        if (!agent) {
+          throw new Error(
+            `archivist: daa_cognitive_pattern — agent '${agentId}' not found in daa store`,
+          );
+        }
+
+        agent.cognitivePattern = pattern;
+
+        await handle.write({ storeId: STORE_ID, key: 'root', payload: store });
       });
     },
     {

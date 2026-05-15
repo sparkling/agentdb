@@ -34,6 +34,7 @@ import {
   type MutationContext,
   type StoreId,
 } from '../../index.js';
+import type { WorkflowRecord, WorkflowStore } from './shared.js';
 
 /** Template action discriminator — matches the cli inputSchema enum. */
 export type WorkflowTemplateAction = 'save' | 'create' | 'list';
@@ -54,23 +55,97 @@ export interface WorkflowTemplatePayload {
 
 const STORE_ID = 'workflow_template' as StoreId;
 
-// TODO(ADR-0180 Phase 5 wire-up): port the body of workflow-tools.ts
-// `workflow_template` handler once the dispatch boundary is wired through cli.
-// The cli's switch-on-action sequence collapses to a single
-// `ctx.substrate.withWrite` callback that branches on `payload.action`. The
-// "workflow not found" / "template not found" / "unknown action" guards
-// become typed verdicts in the audit chain. Post wire-up, consider splitting
-// the `list` action into a sibling `GuardedRead<WorkflowTemplateListQuery, ...>`
-// handler so the read path doesn't take the write lock unnecessarily.
+// Ported from workflow-tools.ts `workflow_template` handler. The cli's
+// switch-on-action sequence collapses to a single `ctx.substrate.withWrite`
+// callback that branches on `payload.action`. `save` and `create` mutate;
+// `list` is read-only and takes the write scope as a no-op (no `handle.write`)
+// until the dispatch boundary splits read/write per action — at which point
+// `list` migrates to a sibling `GuardedRead`. The "workflow not found" /
+// "template not found" / "unknown action" guards throw fail-loud under the
+// void mutation contract.
 export const templateWorkflowHandler: GuardedWrite<WorkflowTemplatePayload> =
   registerMutationHandler<WorkflowTemplatePayload>(
     'workflow_template',
-    async (ctx: MutationContext<false>, _payload: WorkflowTemplatePayload): Promise<void> => {
-      await ctx.substrate.withWrite({ storeId: STORE_ID }, async (_handle) => {
-        throw new Error(
-          'archivist: workflow_template handler body pending Phase 5 wire-up; ' +
-          'callers currently route through cli/src/mcp-tools/workflow-tools.ts workflow_template handler',
-        );
+    async (ctx: MutationContext<false>, payload: WorkflowTemplatePayload): Promise<void> => {
+      await ctx.substrate.withWrite({ storeId: STORE_ID }, async (handle) => {
+        const current = await handle.read<WorkflowStore>({ storeId: STORE_ID, key: 'root' });
+        const store: WorkflowStore = current ?? { workflows: {}, templates: {}, version: '3.0.0' };
+
+        switch (payload.action) {
+          case 'save': {
+            if (typeof payload.workflowId !== 'string') {
+              throw new Error(
+                `archivist: workflow_template save — 'workflowId' is required (field: workflowId)`,
+              );
+            }
+            const workflow = store.workflows[payload.workflowId];
+            if (!workflow) {
+              throw new Error(
+                `archivist: workflow_template save — workflow not found: ${payload.workflowId}`,
+              );
+            }
+
+            const templateId = `template-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+            const template: WorkflowRecord = {
+              ...workflow,
+              workflowId: templateId,
+              name: payload.templateName || `${workflow.name} Template`,
+              status: 'draft',
+              currentStep: 0,
+              createdAt: new Date().toISOString(),
+              startedAt: undefined,
+              completedAt: undefined,
+              steps: workflow.steps.map((s) => ({
+                ...s,
+                status: 'pending' as const,
+                result: undefined,
+                startedAt: undefined,
+                completedAt: undefined,
+              })),
+            };
+
+            store.templates[templateId] = template;
+            await handle.write({ storeId: STORE_ID, key: 'root', payload: store });
+            return;
+          }
+
+          case 'create': {
+            if (typeof payload.templateId !== 'string') {
+              throw new Error(
+                `archivist: workflow_template create — 'templateId' is required (field: templateId)`,
+              );
+            }
+            const template = store.templates[payload.templateId];
+            if (!template) {
+              throw new Error(
+                `archivist: workflow_template create — template not found: ${payload.templateId}`,
+              );
+            }
+
+            const workflowId = `workflow-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+            const workflow: WorkflowRecord = {
+              ...template,
+              workflowId,
+              name: payload.newName || template.name.replace(' Template', ''),
+              status: 'ready',
+              createdAt: new Date().toISOString(),
+            };
+
+            store.workflows[workflowId] = workflow;
+            await handle.write({ storeId: STORE_ID, key: 'root', payload: store });
+            return;
+          }
+
+          case 'list':
+            // Read-only — takes the write scope as a no-op until the dispatch
+            // boundary splits read/write per action.
+            return;
+
+          default:
+            throw new Error(
+              `archivist: workflow_template — unknown action: ${String((payload as { action: unknown }).action)}`,
+            );
+        }
       });
     },
     {

@@ -38,18 +38,18 @@ import {
   type MutationContext,
   type StoreId,
 } from '../../index.js';
+import {
+  HIVE_DEFAULT_TTL_MS_BY_TYPE,
+  HIVE_MEMORY_TYPES,
+  type HiveMemoryType,
+  type HiveStateDoc,
+  isHiveEntryExpired,
+  isHiveMemoryType,
+} from './hive-state.js';
 
 /** Memory type — mirrors the cli's MemoryType union (ADR-0122 T4: 8 typed
  *  memory types from USERGUIDE). Required on `set`; optional filter on `list`. */
-export type HiveMindMemoryType =
-  | 'knowledge'
-  | 'context'
-  | 'task'
-  | 'result'
-  | 'error'
-  | 'metric'
-  | 'consensus'
-  | 'system';
+export type HiveMindMemoryType = HiveMemoryType;
 
 /** Mutation payload — discriminated by `action`. Mirrors the four cli
  *  call patterns at hive-mind-tools.ts lines 2956-3082. The optional
@@ -74,45 +74,130 @@ export type HiveMindMemoryPayload =
 
 const STORE_ID = 'hive-mind_memory' as StoreId;
 
-// TODO(ADR-0180 Phase 4 wire-up): port the body of hive-mind-tools.ts
-// `hive-mind_memory` handler once the dispatch boundary is wired through
-// cli. The wrapper-in-cli pattern (loadHiveState → mutate sharedMemory[key]
-// → saveHiveState under `withHiveStoreLock`) collapses to a single
-// `ctx.substrate.withWrite` per action because the primitive owns the lock
-// semantics. Read actions (`get`, `list`) use `ctx.substrate.read` and only
-// promote to `withWrite` when lazy eviction (ADR-0122 T4) detects expired
-// entries. The cli's outer call to `withHiveStoreLock` becomes redundant
-// and is removed in the same commit that flips the dispatch wire-up.
+// Ported from cli/src/mcp-tools/hive-mind-tools.ts `hive-mind_memory` handler
+// (lines 2973-3110). The cli's `loadHiveState → mutate sharedMemory[key] →
+// saveHiveState under withHiveStoreLock` collapses to a single
+// `ctx.substrate.withWrite` per action — the substrate primitive owns the
+// lock semantics. Per ADR-0122 (T4) ALL four actions run inside the write
+// scope because `get`/`list` lazily evict expired entries (a read-side
+// mutation), so they share the audit chain with explicit `set`/`delete`
+// writes rather than splitting into a separate read path. `set` validates
+// `type`/`ttlMs` BEFORE the read (fail-loud per `feedback-no-fallbacks` —
+// no partial write on a bad payload). The mutation surface is `void`;
+// the read shaping for `get`/`list` lands when the dispatch boundary wires
+// the read-path return shape (ADR-0180 §Read-path return shape) — until
+// then both actions still perform their lazy-evict mutation here.
 export const memoryHiveMindHandler: GuardedWrite<HiveMindMemoryPayload> =
   registerMutationHandler<HiveMindMemoryPayload>(
     'hive-mind_memory',
     async (ctx: MutationContext<false>, payload: HiveMindMemoryPayload): Promise<void> => {
-      switch (payload.action) {
-        case 'set':
-        case 'delete':
-          await ctx.substrate.withWrite({ storeId: STORE_ID }, async (_handle) => {
-            throw new Error(
-              `archivist: hive-mind_memory (action=${payload.action}) handler body pending Phase 4 wire-up; ` +
-              `callers currently route through cli/src/mcp-tools/hive-mind-tools.ts hive-mind_memory handler`,
-            );
-          });
-          return;
-        case 'get':
-        case 'list':
-          // Read-mode actions are dispatched through the mutation surface so
-          // that the lazy-eviction path (ADR-0122 T4) shares the audit chain
-          // with explicit writes. Pre-wire-up the body is identical to writes
-          // — the dispatch boundary lands real read semantics in the wire-up
-          // commit (substrate.read / readonly substrate access, with promotion
-          // to withWrite only when an expired entry is detected).
-          throw new Error(
-            `archivist: hive-mind_memory (action=${payload.action}) handler body pending Phase 4 wire-up; ` +
-            `callers currently route through cli/src/mcp-tools/hive-mind-tools.ts hive-mind_memory handler`,
-          );
+      if (!payload.key) {
+        throw new Error(`hive-mind_memory: \`key\` is required for action '${payload.action}'`);
       }
+
+      // ADR-0122 (T4): `set` validates BEFORE acquiring the write scope so a
+      // malformed payload throws without a partial write. `type` is required;
+      // a missing/unknown type would mis-route into permanent retention.
+      let resolvedTtlMs: number | null = null;
+      if (payload.action === 'set') {
+        if (payload.type === undefined) {
+          throw new Error(
+            `hive-mind_memory.set: \`type\` is required (one of: ${HIVE_MEMORY_TYPES.join(', ')})`,
+          );
+        }
+        if (!isHiveMemoryType(payload.type)) {
+          throw new Error(
+            `hive-mind_memory.set: invalid type ${JSON.stringify(payload.type)} ` +
+              `(one of: ${HIVE_MEMORY_TYPES.join(', ')})`,
+          );
+        }
+        const rawTtlMs = payload.ttlMs;
+        if (rawTtlMs !== undefined && rawTtlMs !== null) {
+          if (typeof rawTtlMs !== 'number' || !Number.isFinite(rawTtlMs)) {
+            throw new Error(
+              `hive-mind_memory.set: ttlMs must be a finite number, got ${JSON.stringify(rawTtlMs)}`,
+            );
+          }
+        }
+        resolvedTtlMs =
+          rawTtlMs === undefined || rawTtlMs === null
+            ? HIVE_DEFAULT_TTL_MS_BY_TYPE[payload.type]
+            : rawTtlMs;
+      }
+
+      // ADR-0122 (T4): `list` validates the optional filter type before the
+      // write scope — same fail-loud discipline as `set`.
+      if (
+        payload.action === 'list' &&
+        payload.type !== undefined &&
+        !isHiveMemoryType(payload.type)
+      ) {
+        throw new Error(
+          `hive-mind_memory.list: invalid type ${JSON.stringify(payload.type)} ` +
+            `(one of: ${HIVE_MEMORY_TYPES.join(', ')})`,
+        );
+      }
+
+      await ctx.substrate.withWrite({ storeId: STORE_ID }, async (handle) => {
+        const state = await handle.read<HiveStateDoc>({ storeId: STORE_ID, key: 'root' });
+        if (!state) {
+          throw new Error('hive-mind_memory: hive-mind not initialized');
+        }
+        const now = Date.now();
+        let mutated = false;
+
+        switch (payload.action) {
+          case 'set': {
+            const prior = state.sharedMemory[payload.key];
+            state.sharedMemory[payload.key] = {
+              value: payload.value,
+              type: payload.type,
+              ttlMs: resolvedTtlMs,
+              expiresAt: resolvedTtlMs === null ? null : now + resolvedTtlMs,
+              createdAt: prior ? prior.createdAt : now,
+              updatedAt: now,
+            };
+            mutated = true;
+            break;
+          }
+          case 'delete': {
+            if (payload.key in state.sharedMemory) {
+              delete state.sharedMemory[payload.key];
+              mutated = true;
+            }
+            break;
+          }
+          case 'get': {
+            // Lazy eviction (ADR-0122 T4): drop an expired entry so callers
+            // never observe expired data.
+            const entry = state.sharedMemory[payload.key];
+            if (entry !== undefined && isHiveEntryExpired(entry, now)) {
+              delete state.sharedMemory[payload.key];
+              mutated = true;
+            }
+            break;
+          }
+          case 'list': {
+            // Lazy eviction sweep across all entries (ADR-0122 T4).
+            for (const [k, entry] of Object.entries(state.sharedMemory)) {
+              if (isHiveEntryExpired(entry, now)) {
+                delete state.sharedMemory[k];
+                mutated = true;
+              }
+            }
+            break;
+          }
+        }
+
+        // Only rewrite the document when state actually changed — a `get`/
+        // `list` with no expired entries is a no-op write we skip.
+        if (mutated) {
+          await handle.write({ storeId: STORE_ID, key: 'root', payload: state });
+        }
+      });
     },
     {
-      invariants: [], // wired by invariants-author per ADR-0180 §Mutation invariants
+      invariants: [], // get/list are conditionally-mutating; set/delete have no cross-call invariant
       cacheScope: 'store',
     },
   );

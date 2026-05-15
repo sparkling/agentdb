@@ -28,6 +28,7 @@ import {
   type MutationContext,
   type StoreId,
 } from '../../index.js';
+import { emptyDaaStore, type DaaStore } from './agent-create.js';
 
 /**
  * Mutation payload mirroring the CLI tool's `daa_agent_adapt` input shape
@@ -43,24 +44,44 @@ export interface DaaAgentAdaptPayload {
 
 const STORE_ID = 'daa' as StoreId;
 
-// TODO(ADR-0180 Phase 5 wire-up): port the body of daa-tools.ts
-// `daa_agent_adapt` callsite (load store → reject if agent missing →
-// adaptations++ → successRate = (current + score) / 2 → lastActivity = now →
-// status = 'active' → save). The cli's outer `withDAALock` collapses to a
-// single `ctx.substrate.withWrite` because the substrate primitive owns the
-// lock semantics. The post-lock `routeMemoryOp('store', namespace
-// 'daa-feedback')` tail-call becomes a guarded post-write follow-up — kept
-// out of the withWrite scope so a memory-router miss does not roll back the
-// already-committed agent metrics.
+// Body ported from daa-tools.ts `daa_agent_adapt` handler (lines 230-256):
+// load store → reject if agent missing → adaptations++ → successRate =
+// (current + score) / 2 → lastActivity = now → status = 'active' → save.
+// The cli's outer `withDAALock` collapses into the single
+// `ctx.substrate.withWrite` because the substrate primitive owns the lock
+// semantics.
+//
+// SCOPE NOTE: the cli's post-lock `routeMemoryOp('store', namespace
+// 'daa-feedback')` tail-call (daa-tools.ts:262-277) is a write into a
+// SEPARATE substrate (the AgentDB vector store, registered under its own
+// `memory_store` mutation). It is NOT part of the daa JSON-store mutation and
+// is intentionally not ported here — it lands as a guarded post-write
+// follow-up when the cli dispatch boundary is wired, kept outside this
+// withWrite so an AgentDB miss cannot roll back the already-committed agent
+// metrics. The JSON-store metrics mutation below is the complete daa-store
+// body for this handler.
 export const daaAgentAdaptHandler: GuardedWrite<DaaAgentAdaptPayload> =
   registerMutationHandler<DaaAgentAdaptPayload>(
     'daa_agent_adapt',
-    async (ctx: MutationContext<false>, _payload: DaaAgentAdaptPayload): Promise<void> => {
-      await ctx.substrate.withWrite({ storeId: STORE_ID }, async (_handle) => {
-        throw new Error(
-          'archivist: daa_agent_adapt handler body pending Phase 5 wire-up; ' +
-          'callers currently route through cli/src/mcp-tools/daa-tools.ts daa_agent_adapt handler',
-        );
+    async (ctx: MutationContext<false>, payload: DaaAgentAdaptPayload): Promise<void> => {
+      await ctx.substrate.withWrite({ storeId: STORE_ID }, async (handle) => {
+        const current = await handle.read<DaaStore>({ storeId: STORE_ID, key: 'root' });
+        const store: DaaStore = current ?? emptyDaaStore();
+
+        const agent = store.agents[payload.agentId];
+        if (!agent) {
+          throw new Error(
+            `archivist: daa_agent_adapt — agent '${payload.agentId}' not found in daa store`,
+          );
+        }
+
+        const performanceScore = payload.performanceScore ?? 0.8;
+        agent.metrics.adaptations += 1;
+        agent.metrics.successRate = (agent.metrics.successRate + performanceScore) / 2;
+        agent.lastActivity = new Date().toISOString();
+        agent.status = 'active';
+
+        await handle.write({ storeId: STORE_ID, key: 'root', payload: store });
       });
     },
     {

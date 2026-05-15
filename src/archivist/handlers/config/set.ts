@@ -37,12 +37,18 @@ import {
   type MutationContext,
   type StoreId,
 } from '../../index.js';
+import {
+  type ConfigScope as ConfigScopeType,
+  type ConfigStore,
+  normalizeConfigStore,
+  setNestedValue,
+} from './config-store.js';
 
 /** Scope discriminator — mirrors the cli `config_set` inputSchema. `'default'`
  *  writes into `store.values` (top-level); any other string writes into
  *  `store.scopes[scope]`. Legacy-shape files reject scope !== 'default' per
  *  ADR-0094 Phase 8 BUG-A (config-tools.ts:321-332). */
-export type ConfigScope = string;
+export type ConfigScope = ConfigScopeType;
 
 /** Mutation payload — mirrors the cli `config_set` inputSchema. `value` is
  *  intentionally `unknown` (the cli accepts arbitrary JSON shapes); the cli
@@ -57,22 +63,76 @@ export interface ConfigSetPayload {
 
 const STORE_ID = 'config' as StoreId;
 
-// TODO(ADR-0180 Phase 5 wire-up): port the body of config-tools.ts
-// `config_set` callsite once the dispatch boundary is wired through cli. The
-// cli's bare `loadConfigStore` / `saveConfigStore` pair (no lock today)
-// collapses to a single `ctx.substrate.withWrite` because the primitive owns
-// the lock semantics. Validation branches (BUG-A legacy-scope rejection,
-// dot-notation `setNestedValue` for legacy nested trees, MCP-flat direct key
-// writes, dangerous-key filter via `DANGEROUS_KEYS`) port verbatim.
+// Ported from cli/src/mcp-tools/config-tools.ts `config_set` handler
+// (lines 291-368). The cli's bare `loadConfigStore` / `saveConfigStore` pair
+// (no lock at the cli surface) collapses to a single `ctx.substrate.withWrite`
+// — the substrate primitive supplies the O_EXCL lock the cli surface lacked,
+// so concurrent config_set / config_reset / config_import writes now serialize.
+//
+// Validation branches port verbatim (`feedback-no-fallbacks` — all fail loud):
+//   • non-empty `key` / non-undefined `value` (ADR-0094 P11/P12).
+//   • BUG-A: a legacy-shape config.json has no scope concept and its persist
+//     path only writes `values`, so a scoped write would silently drop on
+//     reload — reject it loudly instead.
+//   • dot-notation `setNestedValue` for legacy nested trees and scoped dotted
+//     keys; MCP-flat direct key writes otherwise; dangerous-key filtering is
+//     inside `setNestedValue`.
 export const configSetHandler: GuardedWrite<ConfigSetPayload> =
   registerMutationHandler<ConfigSetPayload>(
     'config_set',
-    async (ctx: MutationContext<false>, _payload: ConfigSetPayload): Promise<void> => {
-      await ctx.substrate.withWrite({ storeId: STORE_ID }, async (_handle) => {
+    async (ctx: MutationContext<false>, payload: ConfigSetPayload): Promise<void> => {
+      // ADR-0094 P11/P12: validate the payload BEFORE the write scope so a
+      // malformed key/value throws without a partial write.
+      if (typeof payload.key !== 'string' || payload.key.length === 0) {
         throw new Error(
-          'archivist: config_set handler body pending Phase 5 wire-up; ' +
-          'callers currently route through forks/ruflo/v3/@claude-flow/cli/src/mcp-tools/config-tools.ts config_set handler',
+          "config_set: 'key' is required and must be a non-empty string " +
+            "(dot notation supported, e.g. 'swarm.topology')",
         );
+      }
+      if (payload.value === undefined) {
+        throw new Error(
+          "config_set: 'value' is required — pass null explicitly to clear the key",
+        );
+      }
+
+      const key = payload.key;
+      const value = payload.value;
+      const scope = payload.scope || 'default';
+
+      await ctx.substrate.withWrite({ storeId: STORE_ID }, async (handle) => {
+        const raw = await handle.read<unknown>({ storeId: STORE_ID, key: 'root' });
+        const store: ConfigStore = normalizeConfigStore(raw);
+
+        // BUG-A (ADR-0082 / ADR-0094 Phase 8): a legacy (init-generated nested)
+        // config.json cannot persist scoped values — fail loud rather than
+        // silently dropping the value on the next reload.
+        if (scope !== 'default' && store.shape === 'legacy') {
+          throw new Error(
+            'config_set: scope writes require MCP shape — legacy (init-generated) ' +
+              'config.json cannot persist scoped values',
+          );
+        }
+
+        if (scope === 'default') {
+          if (store.shape === 'legacy') {
+            // Write into the nested tree so the cli `config get` and MCP reads agree.
+            setNestedValue(store.values, key, value);
+          } else {
+            store.values[key] = value;
+          }
+        } else {
+          if (!store.scopes[scope]) {
+            store.scopes[scope] = {};
+          }
+          if (key.includes('.')) {
+            setNestedValue(store.scopes[scope], key, value);
+          } else {
+            store.scopes[scope][key] = value;
+          }
+        }
+
+        store.updatedAt = new Date().toISOString();
+        await handle.write({ storeId: STORE_ID, key: 'root', payload: store });
       });
     },
     {

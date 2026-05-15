@@ -23,12 +23,16 @@
 // `system_*` mutation handlers — all three route through the same FS-JSON
 // store under one cross-process O_EXCL sentinel lock.
 
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
+import * as os from 'node:os';
 import {
   registerMutationHandler,
   type GuardedWrite,
   type MutationContext,
   type StoreId,
 } from '../../index.js';
+import { defaultSystemMetrics, type SystemMetrics } from './metrics.js';
 
 /**
  * Mutation payload mirroring the CLI tool's `system_health` input shape
@@ -43,27 +47,90 @@ export interface SystemHealthPayload {
 
 const STORE_ID = 'system_metrics' as StoreId;
 
-// TODO(ADR-0180 Phase 5 wire-up): port the health-probe body of system-tools.ts
-// `system_health` callsite (lines 293-410) once the dispatch boundary is wired
-// through cli. The cli's probe-sequence (memory store `existsSync`, config file
-// `existsSync`, MCP stdio detect, swarm/neural unknown, deep: disk/network/
-// database) → score computation → `saveMetrics(metrics)` collapses to a single
-// `ctx.substrate.withWrite` here because `makeFsJsonSubstrate` owns the lock
-// semantics. Probes themselves are read-only filesystem `existsSync` calls and
-// therefore stay outside the `withWrite` scope; only the final `metrics.health`
-// score-write moves inside. The `fix` flag is currently unused in the cli
-// (system-tools.ts:291) — invariants-author should record the no-op contract
-// or wire-up should implement the deferred autoremediation path.
+/**
+ * Run the cli's `system_health` component probes (system-tools.ts:295-391) and
+ * return the computed overall health score in `[0, 1]`. Every probe is a
+ * read-only `fs.existsSync` / `process` / `os` inspection — none mutates
+ * `metrics.json`, so the whole probe sequence runs OUTSIDE the `withWrite`
+ * scope. Only the resulting score is carried into the substrate write.
+ */
+function computeHealthScore(projectRoot: string, deep: boolean): number {
+  const checks: Array<{ status: string }> = [];
+
+  // Memory store — store file present?
+  checks.push({
+    status: existsSync(join(projectRoot, '.claude-flow', 'memory', 'store.json'))
+      ? 'healthy'
+      : 'degraded',
+  });
+
+  // Config — primary or alternate config file present?
+  const configExists =
+    existsSync(join(projectRoot, '.claude-flow', 'config.json')) ||
+    existsSync(join(projectRoot, 'claude-flow.config.json'));
+  checks.push({ status: configExists ? 'healthy' : 'degraded' });
+
+  // MCP — this process is the MCP server when stdin is piped (not a TTY).
+  checks.push({ status: !process.stdin.isTTY ? 'healthy' : 'unknown' });
+
+  // Swarm / neural — not monitorable from here; cli reports 'unknown'.
+  checks.push({ status: 'unknown' });
+  checks.push({ status: 'unknown' });
+
+  if (deep) {
+    // Disk — cli touches `os` mem as a proxy but reports 'unknown' (no statvfs).
+    void os.freemem();
+    checks.push({ status: 'unknown' });
+    // Network — not monitored without making a request.
+    checks.push({ status: 'unknown' });
+    // Database — coordination store file present?
+    checks.push({
+      status: existsSync(join(projectRoot, '.claude-flow', 'coordination', 'store.json'))
+        ? 'healthy'
+        : 'unknown',
+    });
+  }
+
+  const healthy = checks.filter((c) => c.status === 'healthy').length;
+  return healthy / checks.length;
+}
+
+// Body ported from system-tools.ts `system_health` handler (lines 293-395).
+// The cli's probe-sequence → score computation → `metrics.health = score` →
+// `saveMetrics` collapses into the single `ctx.substrate.withWrite` because
+// the substrate primitive owns durability + isolation. The probes themselves
+// are read-only `fs.existsSync` / `process` / `os` inspections — they observe
+// OTHER state, not `metrics.json`, so they run outside the withWrite scope;
+// only the final `metrics.health` score-write moves inside.
+//
+// SCOPE NOTE: the cli's rich RETURN shape (per-check status + latency + issue
+// list, system-tools.ts:397-409) is a pure read projection with no persisted
+// effect — it belongs to the read-handler split, not this mutation. The `fix`
+// flag is unused in the cli today (system-tools.ts:291); it carries no
+// behaviour here and stays a no-op until the deferred autoremediation path is
+// designed.
 export const systemHealthHandler: GuardedWrite<SystemHealthPayload> =
   registerMutationHandler<SystemHealthPayload>(
     'system_health',
-    async (ctx: MutationContext<false>, _payload: SystemHealthPayload): Promise<void> => {
-      await ctx.substrate.withWrite({ storeId: STORE_ID }, async (_handle) => {
-        throw new Error(
-          'archivist: system_health handler body pending Phase 5 wire-up; ' +
-          'callers currently route through forks/ruflo/v3/@claude-flow/cli/src/mcp-tools/system-tools.ts ' +
-          '\'system_health\' handler',
-        );
+    async (ctx: MutationContext<false>, payload: SystemHealthPayload): Promise<void> => {
+      // Out-of-band probes — read-only filesystem / process / os inspections.
+      // Not a `metrics.json` mutation, so they stay outside `withWrite`.
+      const score = computeHealthScore(ctx.projectRoot, payload.deep ?? false);
+
+      await ctx.substrate.withWrite({ storeId: STORE_ID }, async (handle) => {
+        const current = await handle.read<SystemMetrics>({
+          storeId: STORE_ID,
+          key: 'root',
+        });
+        const store: SystemMetrics = current ?? defaultSystemMetrics();
+
+        const next: SystemMetrics = {
+          ...store,
+          health: score,
+          lastCheck: new Date().toISOString(),
+        };
+
+        await handle.write({ storeId: STORE_ID, key: 'root', payload: next });
       });
     },
     {

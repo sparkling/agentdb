@@ -34,6 +34,8 @@ import {
   type MutationContext,
   type StoreId,
 } from '../../index.js';
+import type { AgentRecord } from './agents-json.js';
+import type { HiveStateDoc, HiveWorkerMeta } from './hive-state.js';
 
 /** Spawn action discriminator — matches the CLI inputSchema enum (ADR-0131 T12). */
 export type HiveMindSpawnAction = 'spawn' | 'retryTask';
@@ -57,30 +59,183 @@ export interface HiveMindSpawnPayload {
   readonly retryOf?: string;
 }
 
-const STORE_ID = 'hive-mind_spawn' as StoreId;
+const HIVE_STORE_ID = 'hive-mind_spawn' as StoreId;
+const AGENTS_STORE_ID = 'hive-mind_agents' as StoreId;
 
-// TODO(ADR-0180 Phase 4 wire-up): port the body of hive-mind-tools.ts
-// `hive-mind_spawn` callsite (validate agentType/agentTypes mutex →
-// loadHiveState + loadAgentStore → per-worker ID minting (retry-1 suffix
-// when action='retryTask') → write agent record → push to state.workers →
-// registerWorkerRetry → saveAgentStore + saveHiveState) once the dispatch
-// boundary is wired through cli. The cli's outer `withHiveStoreLock`
-// collapses to a single `ctx.substrate.withWrite` here because the
-// substrate primitive owns the lock semantics; both consumers (agents.json
-// + hive-state.json) compose under one withWrite scope.
+/** Valid worker types per ADR-0108 — mirrors cli `validate-input.ts`
+ *  `WORKER_TYPES`. Used to fail-loud on an unknown `agentTypes` member
+ *  rather than silently routing to a generic worker. */
+const WORKER_TYPES: ReadonlyArray<string> = [
+  'researcher', 'coder', 'analyst', 'tester', 'architect', 'reviewer',
+  'optimizer', 'documenter', 'specialist', 'coordinator', 'monitor',
+];
+
+/** Agents.json document shape — `agents-json.ts` keyed by `agentId`. */
+interface AgentsJsonDoc {
+  agents: Record<string, AgentRecord>;
+}
+
+// Ported from cli/src/mcp-tools/hive-mind-tools.ts `hive-mind_spawn` handler
+// (lines 1389-1541). The cli's `withHiveStoreLock` wrapping `loadHiveState +
+// loadAgentStore → mutate → saveAgentStore + saveHiveState` collapses to two
+// nested `ctx.substrate.withWrite` scopes — one per store. Each substrate
+// owns its own O_EXCL lock keyed by storeId; the two locks point at different
+// files (`.claude-flow/hive-mind/state.json` vs `.claude-flow/agents.json`)
+// so the nesting order is deadlock-free, matching the `task_complete`
+// two-store precedent (handlers/tasks/complete.ts).
+//
+// ADR-0108 (T13): `agentType` (scalar) and `agentTypes` (array) are mutually
+// exclusive; `agentTypes` distributes round-robin per worker. Both fail loud
+// on unknown values (`feedback-no-fallbacks`). Validation runs BEFORE the
+// write scopes so a bad payload throws without a partial write.
+// ADR-0131 (T12): `action='retryTask'` requires `retryOf` and mints the
+// canonical `<retryOf>-retry-N` worker ID; `retryOf` records the predecessor
+// pointer on the new worker's `workerMeta.retryOf` (single pointer, not a chain).
 export const spawnHiveMindHandler: GuardedWrite<HiveMindSpawnPayload> =
   registerMutationHandler<HiveMindSpawnPayload>(
     'hive-mind_spawn',
-    async (ctx: MutationContext<false>, _payload: HiveMindSpawnPayload): Promise<void> => {
-      await ctx.substrate.withWrite({ storeId: STORE_ID }, async (_handle) => {
+    async (ctx: MutationContext<false>, payload: HiveMindSpawnPayload): Promise<void> => {
+      const action = payload.action ?? 'spawn';
+      const rawRetryOf = payload.retryOf || undefined;
+
+      if (action === 'retryTask' && !rawRetryOf) {
         throw new Error(
-          'archivist: hive-mind_spawn handler body pending Phase 4 wire-up; ' +
-          'callers currently route through cli/src/mcp-tools/hive-mind-tools.ts hive-mind_spawn handler',
+          'hive-mind_spawn: retryTask requires `retryOf` (the original worker ID being retried)',
         );
+      }
+
+      const count = Math.min(Math.max(1, payload.count ?? 1), 20);
+      const role = payload.role ?? 'worker';
+      const prefix = payload.prefix ?? 'hive-worker';
+
+      // ADR-0108 (T13): scalar/array mutex. An explicit `agentType` (anything
+      // other than the 'worker' default) alongside a non-empty `agentTypes`
+      // is a caller error — fail loud rather than apply a silent precedence.
+      const agentTypeIsExplicit =
+        payload.agentType !== undefined &&
+        payload.agentType !== '' &&
+        payload.agentType !== 'worker';
+      const agentTypesArr =
+        Array.isArray(payload.agentTypes) && payload.agentTypes.length > 0
+          ? payload.agentTypes
+          : undefined;
+
+      if (agentTypeIsExplicit && agentTypesArr !== undefined) {
+        throw new Error(
+          'hive-mind_spawn: agentType and agentTypes are mutually exclusive; ' +
+            'use agentTypes for mixed spawns',
+        );
+      }
+      if (Array.isArray(payload.agentTypes) && payload.agentTypes.length === 0) {
+        throw new Error('hive-mind_spawn: agentTypes must contain at least one worker type');
+      }
+      if (agentTypesArr !== undefined) {
+        for (const t of agentTypesArr) {
+          if (typeof t !== 'string' || !WORKER_TYPES.includes(t)) {
+            throw new Error(
+              `hive-mind_spawn: agentTypes contains invalid value ${JSON.stringify(t)} ` +
+                `(one of: ${WORKER_TYPES.join(', ')})`,
+            );
+          }
+        }
+      }
+
+      // Pre-compute the per-worker type list. With `agentTypes` the
+      // distribution is round-robin `agentTypes[i % len]`; otherwise the
+      // scalar `agentType` (or 'worker' default) is replicated.
+      const scalarAgentType = payload.agentType || 'worker';
+      const perWorkerTypes: string[] = [];
+      for (let i = 0; i < count; i++) {
+        perWorkerTypes.push(
+          agentTypesArr !== undefined
+            ? (agentTypesArr[i % agentTypesArr.length] as string)
+            : scalarAgentType,
+        );
+      }
+
+      // ── Store A: hive state — validate initialization, mint worker IDs,
+      // push to state.workers, record retry lineage. The minted IDs are
+      // carried out to the agents.json write below.
+      const spawnedAgentIds: string[] = [];
+      const spawnedAgentTypes: string[] = [];
+
+      await ctx.substrate.withWrite({ storeId: HIVE_STORE_ID }, async (handle) => {
+        const state = await handle.read<HiveStateDoc>({ storeId: HIVE_STORE_ID, key: 'root' });
+        if (!state) {
+          throw new Error('hive-mind_spawn: hive-mind not initialized — run hive-mind_init first');
+        }
+        if (!state.initialized) {
+          throw new Error('hive-mind_spawn: hive-mind not initialized — run hive-mind_init first');
+        }
+
+        if (!state.workerMeta) {
+          state.workerMeta = {};
+        }
+        const workerMeta = state.workerMeta;
+
+        for (let i = 0; i < count; i++) {
+          // ADR-0131 (T12): retryTask uses the canonical `<original>-retry-N`
+          // ID convention; plain spawn mints a timestamped random ID.
+          let agentId: string;
+          if (action === 'retryTask' && rawRetryOf) {
+            const suffix = count === 1 ? 'retry-1' : `retry-${i + 1}`;
+            agentId = `${rawRetryOf}-${suffix}`;
+          } else {
+            agentId = `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+          }
+          const thisType = perWorkerTypes[i] as string;
+
+          if (!state.workers.includes(agentId)) {
+            state.workers.push(agentId);
+          }
+
+          // ADR-0131 (T12): record the single retry-lineage pointer on the new
+          // worker's metadata.
+          if (rawRetryOf) {
+            const meta: HiveWorkerMeta = workerMeta[agentId] ?? {
+              failedAt: null,
+              retryOf: null,
+            };
+            meta.retryOf = rawRetryOf;
+            workerMeta[agentId] = meta;
+          }
+
+          spawnedAgentIds.push(agentId);
+          spawnedAgentTypes.push(thisType);
+        }
+
+        await handle.write({ storeId: HIVE_STORE_ID, key: 'root', payload: state });
+      });
+
+      // ── Store B: agents.json — write one agent record per minted worker.
+      // Separate withWrite scope, separate O_EXCL lock (different file) —
+      // mirrors the two-store `task_complete` precedent.
+      await ctx.substrate.withWrite({ storeId: AGENTS_STORE_ID }, async (handle) => {
+        const current = await handle.read<AgentsJsonDoc>({
+          storeId: AGENTS_STORE_ID,
+          key: 'root',
+        });
+        const agentStore: AgentsJsonDoc = current ?? { agents: {} };
+
+        for (let i = 0; i < spawnedAgentIds.length; i++) {
+          const agentId = spawnedAgentIds[i] as string;
+          agentStore.agents[agentId] = {
+            agentId,
+            agentType: spawnedAgentTypes[i] as string,
+            status: 'idle',
+            health: 1.0,
+            taskCount: 0,
+            config: { role, hiveRole: role },
+            createdAt: new Date().toISOString(),
+            domain: 'hive-mind',
+          };
+        }
+
+        await handle.write({ storeId: AGENTS_STORE_ID, key: 'root', payload: agentStore });
       });
     },
     {
-      invariants: [], // wired by invariants-author per ADR-0180 §Mutation invariants
+      invariants: [], // cross-store spawn invariant authored by invariants-author
       cacheScope: 'global',
     },
   );

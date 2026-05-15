@@ -29,6 +29,7 @@ import {
   type MutationContext,
   type StoreId,
 } from '../../index.js';
+import { emptyDaaStore, type DaaStore } from './agent-create.js';
 
 /** Execution strategy — matches the cli inputSchema enum (daa-tools.ts:303). */
 export type DaaWorkflowStrategy = 'parallel' | 'sequential' | 'adaptive';
@@ -50,22 +51,34 @@ export interface DaaWorkflowCreatePayload {
 
 const STORE_ID = 'daa' as StoreId;
 
-// TODO(ADR-0180 Phase 5 wire-up): port the body of daa-tools.ts
-// `daa_workflow_create` callsite (load store → canonicalise steps to
-// `{ name, status: 'pending' }` → mint DAAWorkflow with defaults →
-// store.workflows[id] = workflow → save). The cli's outer `withDAALock`
-// collapses to a single `ctx.substrate.withWrite` because the substrate
-// primitive owns the lock semantics (ADR-0129 B1 race-fix preserved under
-// the substrate's O_EXCL sentinel).
+// Body ported from daa-tools.ts `daa_workflow_create` handler (lines 308-338):
+// load store → canonicalise steps to `{ name, status: 'pending' }` → mint
+// DAAWorkflow with defaults → store.workflows[id] = workflow → save. The cli's
+// outer `withDAALock` collapses into the single `ctx.substrate.withWrite`
+// because the substrate primitive owns the lock semantics (the ADR-0129 B1
+// race-fix that motivated `withDAALock` — `p3-da-wf-exec` racing
+// `p3-da-wf-create` — is preserved under the substrate's O_EXCL sentinel).
 export const daaWorkflowCreateHandler: GuardedWrite<DaaWorkflowCreatePayload> =
   registerMutationHandler<DaaWorkflowCreatePayload>(
     'daa_workflow_create',
-    async (ctx: MutationContext<false>, _payload: DaaWorkflowCreatePayload): Promise<void> => {
-      await ctx.substrate.withWrite({ storeId: STORE_ID }, async (_handle) => {
-        throw new Error(
-          'archivist: daa_workflow_create handler body pending Phase 5 wire-up; ' +
-          'callers currently route through cli/src/mcp-tools/daa-tools.ts daa_workflow_create handler',
-        );
+    async (ctx: MutationContext<false>, payload: DaaWorkflowCreatePayload): Promise<void> => {
+      await ctx.substrate.withWrite({ storeId: STORE_ID }, async (handle) => {
+        const current = await handle.read<DaaStore>({ storeId: STORE_ID, key: 'root' });
+        const store: DaaStore = current ?? emptyDaaStore();
+
+        store.workflows[payload.id] = {
+          id: payload.id,
+          name: payload.name,
+          status: 'pending',
+          steps: (payload.steps ?? []).map((s, i) => ({
+            name: typeof s === 'string' ? s : `Step ${i + 1}`,
+            status: 'pending',
+          })),
+          strategy: payload.strategy ?? 'adaptive',
+          createdAt: new Date().toISOString(),
+        };
+
+        await handle.write({ storeId: STORE_ID, key: 'root', payload: store });
       });
     },
     {

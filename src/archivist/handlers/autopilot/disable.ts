@@ -24,8 +24,15 @@ import {
   registerMutationHandler,
   type GuardedWrite,
   type MutationContext,
-  type StoreId,
 } from '../../index.js';
+import {
+  AUTOPILOT_STORE_ID,
+  AUTOPILOT_STATE_KEY,
+  AUTOPILOT_LOG_KEY,
+  appendLogEntry,
+  readAutopilotLog,
+  readAutopilotState,
+} from './shared.js';
 
 /**
  * Mutation payload mirroring the CLI tool's `autopilot_disable` input shape
@@ -35,23 +42,28 @@ import {
  */
 export type AutopilotDisablePayload = Record<string, never>;
 
-const STORE_ID = 'autopilot_disable' as StoreId;
-
-// TODO(ADR-0180 Phase 5 wire-up): port the body of autopilot-tools.ts
-// `autopilot_disable` callsite once the dispatch boundary is wired through
-// cli. The wrapper-in-cli pattern (loadState → mutate enabled=false →
-// saveState → appendLog with iterations) collapses to a single
-// `ctx.substrate.withWrite` here.
+// Ports autopilot-tools.ts `autopilot_disable` (loadState → enabled=false →
+// saveState → appendLog 'disabled' with the current iteration count). The
+// cli's `loadState` / `saveState` / `appendLog` triple collapses to a single
+// `ctx.substrate.withWrite` — state save + log append in one lock scope.
 export const disableAutopilotHandler: GuardedWrite<AutopilotDisablePayload> =
   registerMutationHandler<AutopilotDisablePayload>(
     'autopilot_disable',
     async (ctx: MutationContext<false>, _payload: AutopilotDisablePayload): Promise<void> => {
-      await ctx.substrate.withWrite({ storeId: STORE_ID }, async (_handle) => {
-        throw new Error(
-          'archivist: autopilot_disable handler body pending Phase 5 wire-up; ' +
-          'callers currently route through cli/src/mcp-tools/autopilot-tools.ts ' +
-          '\'autopilot_disable\' handler',
-        );
+      await ctx.substrate.withWrite({ storeId: AUTOPILOT_STORE_ID }, async (handle) => {
+        const state = await readAutopilotState(handle);
+        const log = await readAutopilotLog(handle);
+
+        state.enabled = false;
+
+        const nextLog = appendLogEntry(log, {
+          ts: Date.now(),
+          event: 'disabled',
+          iterations: state.iterations,
+        });
+
+        await handle.write({ storeId: AUTOPILOT_STORE_ID, key: AUTOPILOT_STATE_KEY, payload: state });
+        await handle.write({ storeId: AUTOPILOT_STORE_ID, key: AUTOPILOT_LOG_KEY, payload: nextLog });
       });
     },
     {

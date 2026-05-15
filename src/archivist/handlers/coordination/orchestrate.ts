@@ -29,6 +29,12 @@ import {
   type MutationContext,
   type StoreId,
 } from '../../index.js';
+import {
+  COORD_STORE_KEY,
+  loadCoordStore,
+  type CoordinationStore,
+  type CoordOrchestration,
+} from './shared.js';
 
 /** Orchestration strategy — matches the CLI inputSchema enum. */
 export type OrchestrationStrategy = 'parallel' | 'sequential' | 'pipeline' | 'broadcast';
@@ -49,28 +55,48 @@ export interface CoordinationOrchestratePayload {
 
 const STORE_ID = 'coordination_orchestrate' as StoreId;
 
-// TODO(ADR-0180 Phase 5 wire-up): port the body of coordination-tools.ts
-// `coordination_orchestrate` callsite once the dispatch boundary is wired
-// through cli. The wrapper-in-cli pattern (loadCoordStore → mint
-// orchestrationId → append + trim to 100 → saveCoordStore via direct
-// writeFileSync) collapses to a single `ctx.substrate.withWrite` here because
-// `makeFsJsonSubstrate` owns the lock semantics.
-//
-// Invariants-author note: the cli currently casts `store as CoordStoreShape`
-// to lazily extend with an `orchestrations` array — that's a CLI-shape hack.
-// During wire-up, fold `orchestrations` into the canonical store schema so
-// the cast disappears. The 100-entry ring-buffer cap is a substrate-level
-// retention concern, not a mutation invariant.
+// Ports the body of coordination-tools.ts `coordination_orchestrate`. The cli's
+// `loadCoordStore → mint orchestrationId → append + trim to 100 → saveCoordStore`
+// collapses to one `ctx.substrate.withWrite`. The cli's `store as CoordStoreShape`
+// cast is gone — `orchestrations` is now part of the canonical `CoordinationStore`
+// shape in shared.ts. The 100-entry ring-buffer cap is kept inline (it ports
+// verbatim from the cli; treating it as substrate-level retention is a later
+// concern, not a Phase 2 one).
 export const orchestrateCoordinationHandler: GuardedWrite<CoordinationOrchestratePayload> =
   registerMutationHandler<CoordinationOrchestratePayload>(
     'coordination_orchestrate',
-    async (ctx: MutationContext<false>, _payload: CoordinationOrchestratePayload): Promise<void> => {
-      await ctx.substrate.withWrite({ storeId: STORE_ID }, async (_handle) => {
-        throw new Error(
-          'archivist: coordination_orchestrate handler body pending Phase 5 wire-up; ' +
-          'callers currently route through cli/src/mcp-tools/coordination-tools.ts ' +
-          '\'coordination_orchestrate\' handler',
-        );
+    async (ctx: MutationContext<false>, payload: CoordinationOrchestratePayload): Promise<void> => {
+      await ctx.substrate.withWrite({ storeId: STORE_ID }, async (handle) => {
+        const current = await handle.read<CoordinationStore>({
+          storeId: STORE_ID,
+          key: COORD_STORE_KEY,
+        });
+        const store: CoordinationStore = current ?? loadCoordStore();
+
+        const orchestrationId = `orch-${Date.now()}`;
+        const agents = payload.agents ?? Object.keys(store.nodes);
+        const strategy: OrchestrationStrategy = payload.strategy ?? 'parallel';
+
+        // ADR-093 F7: this records the orchestration request — it does not
+        // execute. Real multi-agent execution lives in agent_spawn + the Task
+        // tool, or hive-mind_spawn for queen-led coordination.
+        const orchestration: CoordOrchestration = {
+          id: orchestrationId,
+          task: payload.task,
+          strategy,
+          agents: [...agents],
+          status: 'scheduled',
+          scheduledAt: new Date().toISOString(),
+          topology: store.topology.type,
+        };
+
+        if (!Array.isArray(store.orchestrations)) store.orchestrations = [];
+        store.orchestrations.push(orchestration);
+        if (store.orchestrations.length > 100) {
+          store.orchestrations = store.orchestrations.slice(-100);
+        }
+
+        await handle.write({ storeId: STORE_ID, key: COORD_STORE_KEY, payload: store });
       });
     },
     {

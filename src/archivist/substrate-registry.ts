@@ -157,6 +157,60 @@ const FS_JSON_PATH_OVERRIDES: ReadonlyMap<string, string> = new Map([
   ['coordination_load_balance', 'coordination/store.json'],
   ['coordination_sync', 'coordination/store.json'],
   ['coordination_orchestrate', 'coordination/store.json'],
+  // workflow family — single store.json shared by all 8 workflow_* handlers
+  // (handlers/workflow/shared.ts `WorkflowStore`); mirrors the cli
+  // `workflow-tools.ts` `.claude-flow/workflows/store.json` layout
+  // (`WORKFLOW_DIR = 'workflows'` + `WORKFLOW_FILE = 'store.json'`). Without
+  // these overrides each storeId falls back to a flat per-store file, both
+  // wrong-path AND fragmenting the store the cli keeps unified.
+  ['workflow_run', 'workflows/store.json'],
+  ['workflow_create', 'workflows/store.json'],
+  ['workflow_execute', 'workflows/store.json'],
+  ['workflow_pause', 'workflows/store.json'],
+  ['workflow_resume', 'workflows/store.json'],
+  ['workflow_cancel', 'workflows/store.json'],
+  ['workflow_delete', 'workflows/store.json'],
+  ['workflow_template', 'workflows/store.json'],
+  // neural family — single models.json shared by all four neural_* handlers
+  // (train / compress / optimize / patterns each use `NEURAL_STORE_ID = 'neural'`,
+  // handlers/neural/train.ts). Mirrors the cli `neural-tools.ts` layout:
+  // `loadNeuralStore`/`saveNeuralStore` round-trip `.claude-flow/neural/models.json`
+  // for BOTH `store.models` and `store.patterns` — the cli's `PATTERNS_FILE`
+  // constant is dead (never read), so `neural_patterns` also lands in models.json.
+  ['neural', 'neural/models.json'],
+  // github family — single store.json shared by repo-analyze / pr-manage /
+  // issue-track (handlers/github/shared.ts `GITHUB_STORE_ID`); mirrors the cli
+  // `github-tools.ts` `.claude-flow/github/store.json` layout. `github_workflow`
+  // touches no local store (Phase 2 carry-forward — gh-process backend only).
+  ['github', 'github/store.json'],
+  // ruvllm family — three per-WASM-type stores (handlers/ruvllm/shared.ts);
+  // mirrors the cli `ruvllm-store.ts` `.claude-flow/ruvllm/{hnsw,sona,microlora}-store.json`
+  // layout. Each create handler + its paired operate handler share one storeId
+  // so a create-then-operate lifecycle lands in one file.
+  ['ruvllm_hnsw', 'ruvllm/hnsw-store.json'],
+  ['ruvllm_sona', 'ruvllm/sona-store.json'],
+  ['ruvllm_microlora', 'ruvllm/microlora-store.json'],
+  // wasm family — single store.json shared by all five wasm_* handlers
+  // (handlers/wasm/shared.ts `WASM_STORE_ID = 'wasm_agent_create'`); mirrors the
+  // cli `wasm-agent-tools.ts` `.claude-flow/wasm-agents/store.json` layout.
+  ['wasm_agent_create', 'wasm-agents/store.json'],
+  // daa family — single store.json shared by all six FS-JSON daa_* handlers
+  // (`STORE_ID = 'daa'` in handlers/daa/*.ts); mirrors the cli `daa-tools.ts`
+  // `.claude-flow/daa/store.json` layout (STORAGE_DIR + DAA_DIR + DAA_FILE).
+  ['daa', 'daa/store.json'],
+  // system family — single metrics.json shared by the three system_* mutation
+  // handlers (`STORE_ID = 'system_metrics'` in handlers/system/{metrics,health,
+  // reset}.ts); mirrors the cli `system-tools.ts` `.claude-flow/system/metrics.json`
+  // layout (STORAGE_DIR + SYSTEM_DIR + METRICS_FILE).
+  ['system_metrics', 'system/metrics.json'],
+  // autopilot family — the cli keeps state + event-log in two files
+  // (`data/autopilot-state.json` + `data/autopilot-log.json`); the archivist
+  // folds both into one substrate document (top-level `state` + `log` keys —
+  // handlers/autopilot/shared.ts) so the state-save + log-append of enable /
+  // disable / reset commit atomically in one `withWrite` scope. Shared by the
+  // four FS-JSON autopilot_* handlers (`AUTOPILOT_STORE_ID = 'autopilot_enable'`);
+  // `autopilot_learn` is AgentDB-backed, not FS-JSON (Phase 3/4 carry-forward).
+  ['autopilot_enable', 'data/autopilot-store.json'],
   // daemon metrics — `.claude-flow/metrics/<file>.json`
   ['metrics_codebase_map', 'metrics/codebase-map.json'],
   ['metrics_security_audit', 'metrics/security-audit.json'],
@@ -173,18 +227,46 @@ const FS_JSON_PATH_OVERRIDES: ReadonlyMap<string, string> = new Map([
   ['hooks_session_end', 'data/intelligence-snapshot.json'],
 ]);
 
+// ── Project-root-relative FS-JSON overrides ──────────────────────────────────
+//
+// The swarm family is the LONE FS-JSON store whose cli path lives OUTSIDE
+// `.claude-flow/` (cli `swarm-tools.ts` uses `SWARM_DIR = '.swarm'` per ADR-0069
+// A4, a sibling of `.claude-flow/`). The standard `FS_JSON_PATH_OVERRIDES` map
+// hard-prefixes `.claude-flow/`, so it structurally cannot express swarm's
+// path. This second map's entries resolve relative to `projectRoot` directly,
+// skipping the `.claude-flow/` segment.
+//
+// Strict scope: project-root-relative status is OPT-IN per storeId via this
+// map. The standard map's 25+ entries keep their existing `.claude-flow/`-
+// prefixed resolution unchanged. Future families outside `.claude-flow/` are a
+// SEPARATE decision (`feedback-no-fallbacks`: nothing else silently widens).
+//
+// Both swarm_init and swarm_shutdown share `.swarm/swarm-state.json` (cli's
+// `SWARM_STATE_FILE`), matching the cli's unified-file layout.
+const FS_JSON_PATH_OVERRIDES_PROJECT_ROOT: ReadonlyMap<string, string> = new Map([
+  ['swarm_init', '.swarm/swarm-state.json'],
+  ['swarm_shutdown', '.swarm/swarm-state.json'],
+]);
+
 /**
- * Absolute path of the JSON document a given FS-JSON `StoreId` owns. Joins
- * `projectRoot` + `.claude-flow/` + either the pinned override or the flat
- * `<storeId>.json` default. Caller is `Archivist.initialize()` / `getSubstrate()`
- * when it mints the lazy per-store FS-JSON substrate.
+ * Absolute path of the JSON document a given FS-JSON `StoreId` owns. The
+ * standard resolution is `projectRoot` + `.claude-flow/` + (override or flat
+ * `<storeId>.json`). Storeids explicitly listed in
+ * `FS_JSON_PATH_OVERRIDES_PROJECT_ROOT` (currently only the swarm family)
+ * resolve project-root-relative WITHOUT the `.claude-flow/` segment — used
+ * exclusively by stores whose cli path lives outside `.claude-flow/`.
  *
- * `projectRoot` is the wiring point F4-2 Phase B / cli integration supplies via
- * `initialize(config)`. Until then `initialize` defaults it to `process.cwd()`
- * (documented in index.ts).
+ * Caller is `Archivist.initialize()` / `getSubstrate()` when it mints the lazy
+ * per-store FS-JSON substrate. `projectRoot` is the wiring point F4-2 Phase B /
+ * cli integration supplies via `initialize(config)`. Until then `initialize`
+ * defaults it to `process.cwd()` (documented in index.ts).
  */
 export function fsJsonPathFor(projectRoot: string, storeId: StoreId): string {
   const id = storeId as string;
+  const projectRootRel = FS_JSON_PATH_OVERRIDES_PROJECT_ROOT.get(id);
+  if (projectRootRel !== undefined) {
+    return joinPath(projectRoot, projectRootRel);
+  }
   const rel = FS_JSON_PATH_OVERRIDES.get(id) ?? `${id}.json`;
   return joinPath(projectRoot, '.claude-flow', rel);
 }

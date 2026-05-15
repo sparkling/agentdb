@@ -129,7 +129,7 @@ export async function dispatchMutation(
 ): Promise<void> {
   const entry = mutationRegistry.get(name);
   if (!entry) {
-    throw new Error(`archivist: no mutation handler registered for '${name}'`);
+    throw new Error(`archivist: mutation tool not registered '${name}'`);
   }
   await (entry.handler as MutationHandlerFn<unknown>)(ctx as MutationContext<false>, payload);
 }
@@ -137,7 +137,7 @@ export async function dispatchMutation(
 export async function dispatchRead(name: string, ctx: ReadContext, payload: unknown): Promise<unknown> {
   const entry = readRegistry.get(name);
   if (!entry) {
-    throw new Error(`archivist: no read handler registered for '${name}'`);
+    throw new Error(`archivist: read tool not registered '${name}'`);
   }
   return entry.handler(ctx, payload);
 }

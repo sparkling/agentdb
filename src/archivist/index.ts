@@ -630,7 +630,7 @@ export class Archivist {
     }
     const lookup = getRegistration(toolName);
     if (!lookup) {
-      throw new Error(`archivist: no handler registered for tool '${toolName}'`);
+      throw new Error(`archivist: tool not registered '${toolName}'`);
     }
     if (lookup.kind !== 'mutation') {
       throw new Error(
@@ -686,7 +686,7 @@ export class Archivist {
     }
     const lookup = getRegistration(toolName);
     if (!lookup) {
-      throw new Error(`archivist: no handler registered for tool '${toolName}'`);
+      throw new Error(`archivist: tool not registered '${toolName}'`);
     }
     if (lookup.kind !== 'read') {
       throw new Error(

@@ -38,37 +38,27 @@ export * from './semantic-route.js';
 //   - experience-record: no round-trip probe blocks on it (only b5-learningSystem
 //     which has independent skip patterns).
 //
-// ADR-0181 Phase 7 (2026-05-15 r2 amendment) — RE-REVERTED after the
-// detector pattern shipped in forks/ruflo c8d1a768d failed to gate the 4
-// problem stubs. Empirical probe of patch.115 showed the controllers ARE
-// real (they expose the marker methods retrieveRelevant/getCacheStats/
-// getStats/promote/searchSkills/getEngineType — so the detector accepts
-// them) but the controllers themselves do NOT persist writes to the
-// SQLite tables the corresponding read tools query. The round-trip probes
-// for reflexion/skill/hierarchical/sona therefore see write-succeeds-but-
-// read-empty → FAIL.
+// ADR-0181 Phase 7 (2026-05-15) — wire-up landing.
 //
-// The detector code in archivist-init.ts is correct and remains in place;
-// it just doesn't help in the current test env where the controllers
-// "exist" but their persistence path isn't wired. That's the genuine
-// Phase 7 work the handover doc Section F lists ("ReasoningBank /
-// SkillLibrary / HierarchicalMemory / ExperienceRecord controller
-// capabilities" with persistence wiring). Until that work lands, keeping
-// these 4 exports commented routes dispatch to "tool not registered"
-// which the acceptance harness skip-accepts.
+// The four agentdb_*_store handlers below were previously gated off because
+// the controllers "existed" (the detector found marker methods) but the
+// SQLite tables their matching read handlers query stayed empty after a
+// successful write — the persistence path was unwired. Phase 7 (a) routes
+// the three controller-backed write storeIds (reflexion / skill /
+// hierarchical) into the SQLite carve-out alongside the existing read
+// storeIds (substrate-registry.ts), (b) repoints the cli-side
+// ensureSqliteWired path to the same `.swarm/memory.db` AgentDB's `memory
+// init` provisions, and (c) ports agentdb_hierarchical_recall to a
+// SQL-over-hierarchical_memory read so the read↔write pair shares the
+// same substrate family.
 //
-// Probes blocked by un-export:
-//   - reflexion-store      → adr0112-27-1, p13-agentdb-reflexion
-//   - skill-create         → adr0112-27-3, p13-agentdb-skill
-//   - hierarchical-store   → adr0112-27-4, adr0178-hquery-e2e
-//   - sona-trajectory-store → adr0090-b5-sonaTrajectory
-//
-// Re-enable each line as its underlying controller persistence path is
-// fixed in Phase 7+.
+// Sona stays deferred: SonaTrajectoryService is in-memory-only by design
+// (no SQLite persistence) and there is no sibling read handler registered
+// yet — see the per-line note below.
 export * from './feedback.js';
 export * from './pattern-store.js';
 export * from './experience-record.js';
-//   export * from './reflexion-store.js';        // Phase 7: controller persistence not wired
-//   export * from './skill-create.js';           // Phase 7: controller persistence not wired
-//   export * from './hierarchical-store.js';     // Phase 7: controller persistence not wired
-//   export * from './sona-trajectory-store.js';  // Phase 7: controller persistence not wired
+export * from './reflexion-store.js';
+export * from './skill-create.js';
+export * from './hierarchical-store.js';
+// export * from './sona-trajectory-store.js';  // DEFERRED Phase 7+: SonaTrajectoryService is in-memory-only by design (no SQLite persistence + no sibling read handler). Follow-up ADR required for SQLite migration + read handler registration.

@@ -9,6 +9,5 @@ export * from './search-unified.js';
 export * from './retrieve.js';
 export * from './list.js';
 export * from './bridge-status.js';
-
-// STUB — body pending Phase 3 wire-up.
-//   export * from './store.js';
+// ADR-0181 Phase 6 — minimal substrate-backed write enabled.
+export * from './store.js';

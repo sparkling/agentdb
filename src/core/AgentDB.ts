@@ -14,6 +14,7 @@ import { CausalRecall } from '../controllers/CausalRecall.js';
 import { ExplainableRecall } from '../controllers/ExplainableRecall.js';
 import { NightlyLearner } from '../controllers/NightlyLearner.js';
 import { HierarchicalMemory } from '../controllers/HierarchicalMemory.js';
+import { LearningSystem } from '../controllers/LearningSystem.js';
 import { MemoryConsolidation } from '../controllers/MemoryConsolidation.js';
 import { QueryOptimizer } from '../optimizations/QueryOptimizer.js';
 import { BatchOperations } from '../optimizations/BatchOperations.js';
@@ -62,6 +63,7 @@ export class AgentDB {
   private explainableRecall: ExplainableRecall | undefined;
   private nightlyLearner: NightlyLearner | undefined;
   private hierarchicalMemory: HierarchicalMemory | undefined;
+  private learningSystem: LearningSystem | undefined;
   private memoryConsolidation: MemoryConsolidation | undefined;
   private queryOptimizer: QueryOptimizer | undefined;
   private batchOperations: BatchOperations | undefined;
@@ -137,6 +139,12 @@ export class AgentDB {
     this.explainableRecall = new ExplainableRecall(this.db as any, this.embedder);
     this.nightlyLearner = new NightlyLearner(this.db as any, this.embedder);
     this.hierarchicalMemory = new HierarchicalMemory(this.db as any, this.embedder, this.vectorBackend);
+    // ADR-0181 Item 5 (2026-05-16): LearningSystem now consumes the shared
+    // better-sqlite3 handle directly (post-pglite). The four `learning_*`
+    // tables were provisioned by `loadSchemas()` above. Singleton-cache
+    // (ADR-0076 A4) means a duplicate construction returns the existing
+    // instance rather than re-running the GNN/Sona enhancement init.
+    this.learningSystem = new LearningSystem(this.db as any, this.embedder);
     this.memoryConsolidation = new MemoryConsolidation(
       this.db as any, this.hierarchicalMemory, this.embedder, this.vectorBackend,
     );
@@ -228,7 +236,11 @@ export class AgentDB {
         return this.causalRecall;
       case 'learning':
       case 'learningSystem':
-        return undefined; // LearningSystem requires PostgresBackend; use MCP tool agentdb_learner_run instead
+        // ADR-0181 Item 5: post-pglite LearningSystem returns the live
+        // controller. The pre-Item-5 comment (`requires PostgresBackend; use
+        // MCP tool agentdb_learner_run instead`) was the workaround for the
+        // ADR-0170 era — superseded by the SQLite port.
+        return this.learningSystem;
       case 'explainableRecall':
         return this.explainableRecall;
       case 'nightlyLearner':

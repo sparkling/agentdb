@@ -11,13 +11,54 @@
 // provenance-aware callers pass `includeProvenance: true` at the cli boundary
 // and receive `RankedResults<T>` verbatim.
 //
+// Substrate routing: per ADR-0181 Phase 4, skills live in the SQLite carve-out
+// (`skills` + `skill_embeddings` tables — agentdb-mcp-server.ts:108-133).
+// Skill metadata is SQL-addressed; the per-skill embedding is a BLOB stored
+// alongside. This handler:
+//   (a) embeds the query via the narrow `EmbeddingScorer` capability;
+//   (b) reads (skill, embedding) pairs via `ctx.substrate.query` — the cli's
+//       `retrieveSkills({ query, k })` had no metadata pre-filter, so no
+//       WHERE clause here;
+//   (c) computes fresh cosine similarity for each candidate;
+//   (d) ranks top-`limit` and emits `RankedResult<SkillSearchHit>[]` with
+//       provenance per hit.
+//
 // Pre-existing CLI surface: `forks/ruflo/v3/@claude-flow/cli/src/mcp-tools/agentdb-tools.ts`
-// `agentdb_skill_search` handler (line 1681) — delegates to the SkillLibrary
+// `agentdb_skill_search` handler (line 1687) — delegates to the SkillLibrary
 // controller's `retrieveSkills({ query, k })` (with `searchSkills` / `search`
-// fallbacks for older controller shapes). Per Phase 5 deferral F4-3, the cli
-// callsite stays authoritative during the migration window — this file
-// establishes the registration shape the dispatch path will resolve when the
-// boundary is wired.
+// fallbacks for older controller shapes).
+//
+// TRICHOTOMY COLLAPSE (DA round 3): the cli handler probes the SkillLibrary
+// controller for three method shapes in order — `retrieveSkills({query,k})`
+// (v2, the canonical shape), `searchSkills(query, limit)` (legacy positional),
+// `search(query, limit)` (oldest). The trichotomy exists because the cli must
+// support every controller version it might find at runtime. This archivist
+// handler unifies on ONE path: a substrate-native SQL JOIN against `skills ⨝
+// skill_embeddings` + fresh-embedding cosine — the same shape `retrieveSkills`
+// v2's legacy tier walks (SkillLibrary.ts:334 `retrieveSkillsLegacy`). The
+// collapse is defensible because the substrate seam is uniform: there is no
+// "older controller" to dispatch to — the carve-out tables are the data, and
+// the handler reads them directly. No information loss vs the cli trichotomy
+// (every shape ultimately reads the same `skill_embeddings` BLOB column).
+//
+// CLI-TIER ALIGNMENT (DA round 2): `SkillLibrary.retrieveSkills`
+// (controllers/SkillLibrary.ts:198) is a 3-tier search — (1) GraphAdapter
+// `searchSkills(qEmb, k)`, (2) VectorBackend HNSW `search(qEmb, k*3)`, (3)
+// `retrieveSkillsLegacy` SQL JOIN over `skills ⨝ skill_embeddings` with
+// per-row cosine. Tier 2 falls through to Tier 3 on an empty in-memory index
+// (SkillLibrary.ts:314-319: "VectorBackend is in-memory (no persistence
+// path) — a fresh process sees an empty index. When the in-memory search
+// yields nothing, fall back to the durable skill_embeddings table so
+// cross-process skill retrieval still works"). This handler ports the
+// Tier 3 legacy path verbatim — the only tier that (a) is substrate-semantic
+// for the SQLite carve-out (the HNSW VectorBackend is RVF-family, not
+// SQLite-carve-out — accessing it from a SQLite-classified storeId would
+// breach `classifyStore`'s family discipline) and (b) is durable across the
+// archivist dispatch boundary (a cross-process surface that cannot rely on
+// an in-memory HNSW instance). When 100k+ corpora arrive, threading a
+// `VectorBackend` capability (parallel to `EmbeddingScorer`) is the Phase 9
+// inter-controller wiring move that adds HNSW prefilter — that is NOT a W4
+// scope.
 //
 // Type-enforcement: `ctx.substrate` is read-only narrowing (`ReadContext`, no
 // audit, no guard). Per ADR-0180 §Read-path cache writes, this handler MAY
@@ -28,9 +69,13 @@
 import { registerReadHandler, type GuardedRead, type ReadContext, type StoreId } from '../../index.js';
 import type { RankedResult, RankedResults } from '../memory/search.js';
 
+const STORE_ID = 'agentdb_skill_search' as StoreId;
+const DEFAULT_LIMIT = 5;
+const FLOAT32_BYTES = 4;
+
 /**
  * Input payload mirroring the CLI tool's `agentdb_skill_search` input shape
- * (agentdb-tools.ts:1684-1691). `query` / `limit` are the SkillLibrary-side
+ * (agentdb-tools.ts:1690-1703). `query` / `limit` are the SkillLibrary-side
  * names the cli handler validates and forwards; this archivist handler accepts
  * the same surface so the dispatch boundary can be wired without a second
  * schema translation.
@@ -47,98 +92,132 @@ export interface AgentdbSkillSearchQuery {
  * dispatch boundary.
  */
 export interface SkillSearchHit {
-  readonly id: string | number;
+  readonly id: number;
   readonly name: string;
   readonly description: string;
-  readonly successRate?: number;
+  readonly successRate: number;
+  readonly uses: number;
+  readonly avgReward: number;
+  readonly avgLatencyMs: number;
   readonly code?: string;
+  readonly signature?: unknown;
   readonly metadata?: Record<string, unknown>;
-}
-
-const STORE_ID = 'agentdb_skill_search' as StoreId;
-
-/**
- * On-disk document the FS-JSON `agentdb_skill_search` substrate owns.
- * `key: 'root'` holds the skill corpus the skill-create write path persists.
- */
-interface SkillSearchStore {
-  readonly skills: ReadonlyArray<SkillSearchHit>;
-}
-
-/** Lowercase word tokens of a string, empty tokens dropped. */
-function tokenize(text: string): ReadonlyArray<string> {
-  return text.toLowerCase().split(/[^a-z0-9]+/i).filter((t) => t.length > 0);
+  readonly similarity: number;
 }
 
 /**
- * Deterministic lexical-overlap score of a skill against the query. The
- * `description` is weighted above `name` (a query word matching the longer
- * description text is the weaker signal). Returns `{ score, matchedField }`
- * where `score` ∈ [0, 1] is the fraction of query tokens that appear in the
- * combined name+description text.
- *
- * This is a stand-in for the SkillLibrary controller's embedding similarity —
- * see the TODO(F4-2-config) at the handler body.
+ * Row shape from the SQL join over `skills` and `skill_embeddings`
+ * (agentdb-mcp-server.ts:108-133). `description` may be NULL per the column
+ * definition; `signature` and `metadata` are JSON strings; `embedding` is a
+ * BLOB column — `better-sqlite3` returns SQL BLOB values as Node `Buffer`.
  */
-function lexicalScore(
-  hit: SkillSearchHit,
-  queryTokens: ReadonlyArray<string>,
-): { score: number; matchedField: 'name' | 'description' } {
-  if (queryTokens.length === 0) return { score: 0, matchedField: 'description' };
-  const nameTokens = new Set(tokenize(hit.name));
-  const descTokens = new Set(tokenize(hit.description));
-  let nameHits = 0;
-  let anyHits = 0;
-  for (const qt of queryTokens) {
-    if (nameTokens.has(qt)) nameHits++;
-    if (nameTokens.has(qt) || descTokens.has(qt)) anyHits++;
+interface SkillRow {
+  readonly id: number;
+  readonly name: string;
+  readonly description: string | null;
+  readonly signature: string | null;
+  readonly code: string | null;
+  readonly success_rate: number;
+  readonly uses: number;
+  readonly avg_reward: number;
+  readonly avg_latency_ms: number;
+  readonly metadata: string | null;
+  readonly embedding: Buffer;
+}
+
+function parseJsonOrUndefined(raw: string | null): unknown {
+  if (raw === null || raw === '') return undefined;
+  return JSON.parse(raw);
+}
+
+function parseMetadata(raw: string | null): Record<string, unknown> | undefined {
+  const parsed = parseJsonOrUndefined(raw);
+  if (parsed === undefined) return undefined;
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error(
+      'archivist: agentdb_skill_search metadata must JSON-parse to an object',
+    );
   }
-  return {
-    score: anyHits / queryTokens.length,
-    matchedField: nameHits >= anyHits - nameHits ? 'name' : 'description',
-  };
+  return parsed as Record<string, unknown>;
 }
 
-// F4-2 wire-up (Phase B substrate seam live): this handler reads the persisted
-// skill corpus through `ctx.substrate.read` (whole-document FS-JSON store),
-// ranks each skill by deterministic lexical overlap against the query, caps at
-// `limit`, and emits `RankedResult<SkillSearchHit>[]` with provenance.
-//
-// The cli path runs `retrieveSkills({ query, k })` against the live
-// SkillLibrary controller, which scores skills by embedding cosine similarity.
-// That embedding score is NOT reproducible here: it needs the SkillLibrary
-// controller instance, and `ArchivistInitConfig` threads only `rvfBackend` /
-// `sqliteDb` / `projectRoot` — no controller registry. So ranking uses a
-// lexical-overlap stand-in. See the TODO(F4-2-config) below.
+/**
+ * Reconstruct a Float32Array view from the cli's stored embedding BLOB.
+ *
+ * View-not-copy is safe with better-sqlite3 (DA round 2 empirical test):
+ * `rows[i].b` returns row-unique Buffers whose underlying ArrayBuffer is also
+ * row-unique (not `Buffer.allocUnsafePool`-shared) — mutation isolation
+ * between rows verified. Matches the cli's own `retrieveSkillsLegacy`
+ * (SkillLibrary.ts:362) which constructs the view the same way.
+ */
+function decodeEmbedding(buf: Buffer, skillId: number): Float32Array {
+  if (buf.byteLength % FLOAT32_BYTES !== 0) {
+    throw new Error(
+      `archivist: agentdb_skill_search embedding for skill ${skillId} ` +
+        `has byteLength ${buf.byteLength} — must be a multiple of ${FLOAT32_BYTES}`,
+    );
+  }
+  return new Float32Array(buf.buffer, buf.byteOffset, buf.byteLength / FLOAT32_BYTES);
+}
+
 export const skillSearchHandler: GuardedRead<AgentdbSkillSearchQuery, RankedResults<SkillSearchHit>> =
   registerReadHandler<AgentdbSkillSearchQuery, RankedResults<SkillSearchHit>>(
     'agentdb_skill_search',
     async (ctx: ReadContext, payload: AgentdbSkillSearchQuery): Promise<RankedResults<SkillSearchHit>> => {
-      const store = await ctx.substrate.read<SkillSearchStore>({ storeId: STORE_ID, key: 'root' });
-      const corpus = store?.skills ?? [];
+      const limit = payload.limit ?? DEFAULT_LIMIT;
+      const embedder = ctx.capabilities.requireEmbeddingScorer();
+      const queryVector = await embedder.embed(payload.query);
 
-      const limit = payload.limit ?? 5;
-      const queryTokens = tokenize(payload.query);
+      const rows = await ctx.substrate.query<SkillRow>({
+        storeId: STORE_ID,
+        predicate: {
+          sql: `
+            SELECT
+              s.id, s.name, s.description, s.signature, s.code,
+              s.success_rate, s.uses, s.avg_reward, s.avg_latency_ms,
+              s.metadata,
+              se.embedding
+            FROM skills s
+            INNER JOIN skill_embeddings se ON se.skill_id = s.id
+          `,
+        },
+      });
 
-      // TODO(F4-2-config): the cli's `retrieveSkills` scores skills by embedding
-      // cosine similarity via the live SkillLibrary controller. The controller
-      // is not threaded through `ArchivistInitConfig`, so ranking falls back to
-      // a deterministic lexical-overlap score over name + description.
-      const ranked = corpus
-        .map((hit) => ({ hit, ...lexicalScore(hit, queryTokens) }))
-        .filter((scored) => scored.score > 0)
-        .sort((a, b) => b.score - a.score)
+      // Fresh-embedding cosine rerank — substrate-native, single pass.
+      // `embedder.cosineSimilarity` throws on a dimension mismatch, surfacing
+      // a schema/embedding-model divergence loudly rather than silently
+      // scoring at zero.
+      const scored: ReadonlyArray<{ row: SkillRow; similarity: number }> = rows.map((row) => ({
+        row,
+        similarity: embedder.cosineSimilarity(queryVector, decodeEmbedding(row.embedding, row.id)),
+      }));
+
+      const ranked = scored
+        .slice()
+        .sort((a, b) => b.similarity - a.similarity)
         .slice(0, limit);
 
-      return ranked.map((scored, index): RankedResult<SkillSearchHit> => ({
-        item: scored.hit,
-        score: scored.score,
+      return ranked.map(({ row, similarity }, index): RankedResult<SkillSearchHit> => ({
+        item: {
+          id: row.id,
+          name: row.name,
+          description: row.description ?? '',
+          successRate: row.success_rate,
+          uses: row.uses,
+          avgReward: row.avg_reward,
+          avgLatencyMs: row.avg_latency_ms,
+          code: row.code ?? undefined,
+          signature: parseJsonOrUndefined(row.signature),
+          metadata: parseMetadata(row.metadata),
+          similarity,
+        },
+        score: similarity,
         provenance: {
           storeId: 'skills',
-          matchType: 'bm25',
-          rawScore: scored.score,
+          matchType: 'semantic',
+          rawScore: similarity,
           rank: index + 1,
-          matchedField: scored.matchedField,
+          matchedField: 'name',
         },
       }));
     },

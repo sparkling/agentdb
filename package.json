@@ -24,6 +24,11 @@
       "import": "./dist/src/archivist/testing/index.js",
       "default": "./dist/src/archivist/testing/index.js"
     },
+    "./adapters/memory-rvf-adapter": {
+      "types": "./dist/src/adapters/memory-rvf-adapter.d.ts",
+      "import": "./dist/src/adapters/memory-rvf-adapter.js",
+      "default": "./dist/src/adapters/memory-rvf-adapter.js"
+    },
     "./wasm": "./dist/src/wasm-loader.js",
     "./package.json": "./package.json",
     "./cli": "./dist/src/cli/agentdb-cli.js",

@@ -1,5 +1,5 @@
 // charter: dispatch
-// agentdb_route mutation handler (ADR-0180 Phase 6, §Architecture · Audit chain).
+// agentdb_route mutation handler (ADR-0180 Phase 4 F4-3-callsite).
 //
 // SemanticRouter / LearningSystem.recommendAlgorithm is a MUTATING surface, not
 // a pure read: each dispatch writes a routing decision (task → route + confidence
@@ -9,22 +9,25 @@
 // to capture — `intent → applied | rejected` with guard + invariant verdicts —
 // so the call has to land on `GuardedWrite`, not the read-side passthrough.
 //
-// Pre-existing CLI surface: `forks/ruflo/v3/@claude-flow/cli/src/mcp-tools/agentdb-tools.ts`
-// `agentdb_route` handler (line 378) — delegates to `routeTask({ task, context })`
-// which in turn calls the SemanticRouter controller and the LearningSystem
-// `recommendAlgorithm` path. Per ADR-0180 §Caller surfaces, the cli callsite
-// stays authoritative during the migration window; this file establishes the
-// registration shape the dispatch path will resolve when the boundary is wired.
+// Pre-existing CLI surface: `forks/ruflo/v3/@claude-flow/cli/src/mcp-tools/agentdb-orchestration.ts`
+// `routeTask(...)` (line 227) — delegates to `getController('semanticRouter')
+// .route()` with a `LearningSystem.recommendAlgorithm` fallback. The Phase 4
+// `TaskRouter` capability (capabilities.ts:42) adapts that path to the narrow
+// surface this handler consumes — handler receives the composed `RouteDecision`
+// (`{ route, confidence, agents, controller }`), never the raw controllers.
 //
 // Type-enforcement: `ctx.substrate.withWrite` is the only path through which
-// router state may mutate. Direct fs / SQLite writes are forbidden by the
-// `no-restricted-imports` backstop and the path-restricted substrate-internal.ts
-// seam (ADR-0180 §Type enforcement). The substrate's O_EXCL sentinel lock
-// subsumes any ad-hoc serialization the SemanticRouter performed internally.
+// router trajectory state may mutate. Direct fs / SQLite writes are forbidden
+// by the `no-restricted-imports` backstop and the path-restricted
+// substrate-internal.ts seam (ADR-0180 §Type enforcement). The RVF crate owns
+// atomicity + fsync at the N-API boundary (RvfBackend.insertAsync →
+// db.ingestBatch), so the JS layer adds no extra lock here.
 //
 // cacheScope: `'namespace'` — router decisions, BanditLearner arm statistics,
 // and the ReflexionMemory recall index are all keyed by namespace, so the
 // invalidation blast-radius is exactly one namespace per write.
+
+import { randomUUID } from 'node:crypto';
 
 import {
   registerMutationHandler,
@@ -47,64 +50,82 @@ export interface AgentdbRoutePayload {
 }
 
 const STORE_ID = 'agentdb_route' as StoreId;
+const DEFAULT_NAMESPACE = 'default';
 
-// F4-2 wire-up (Phase B substrate seam live): `agentdb_route` is the RVF-family
-// (substrate-registry.ts:74) mutation that persists a routing decision into the
-// router's trajectory. `ctx.substrate.withWrite` resolves to the RVF substrate;
-// its key/value `handle.read`/`handle.write` throw (RVF is vector-addressed,
-// not whole-document), so the handler narrows to `RvfSubstrateHandle` and the
-// only persistence surface is `handle.rvf` — the live `RvfBackend`.
+// F4-3-callsite (Phase 4 capability seam live): `agentdb_route` is the
+// RVF-family (substrate-registry.ts:74) mutation that persists a routing
+// decision into the router's trajectory. The two layers the F4-2 TODOs named
+// map cleanly onto the two narrow capabilities (capabilities.ts):
 //
-// A real write here is two layers, and each layer's input is behind the
-// unfinished config seam:
+//  1. Decision computation — `ctx.capabilities.requireTaskRouter().route(...)`.
+//     Per `TaskRouter` JSDoc (capabilities.ts:30-40, 42-58): the capability
+//     "hands `{ task, context, namespace }` in and receives the composed
+//     decision `{ route, confidence, agents, controller }`" and "the
+//     underlying SemanticRouter / BanditLearner updates arm statistics as a
+//     side-effect of routing — that is *why* `agentdb_route` is a
+//     `GuardedWrite`. The capability surface returns the decision; the
+//     handler is responsible for the audited substrate write that records
+//     the trajectory." Port fidelity vs cli `routeTask(...)`
+//     (cli/src/mcp-tools/agentdb-orchestration.ts:227 — SemanticRouter.route
+//     → LearningSystem.recommendAlgorithm fallback) is preserved by the
+//     adapter wired in `ArchivistInitConfig.taskRouterFactory`, NOT by
+//     reimplementing the chain inside the handler.
 //
-//  1. Decision computation — the cli's `routeTask(...)` runs the SemanticRouter
-//     controller's `.route()` (falling back to `LearningSystem.recommendAlgorithm`)
-//     to produce `{ route, confidence, agents, controller }`. Neither controller
-//     is threaded through `ArchivistInitConfig` (it carries `rvfBackend` /
-//     `sqliteDb` / `projectRoot` only). See TODO(F4-2-config) #1.
-//  2. Trajectory persistence — appending the decision to the router's
-//     per-namespace trajectory means an RVF vector record (`handle.rvf.insertAsync`)
-//     keyed by the *embedding* of `payload.task`. The embedding service is also
-//     not in `ArchivistInitConfig`. See TODO(F4-2-config) #2.
+//  2. Trajectory persistence — `ctx.capabilities.requireEmbeddingScorer()
+//     .embed(task)`. Per `EmbeddingScorer` JSDoc (capabilities.ts:68-92), the
+//     route handler is named explicitly as a consumer of `embed(text) →
+//     Float32Array` "for the RVF trajectory record" (line 74). The vector
+//     becomes the key the RVF substrate writes:
+//     `rvfHandle.rvf.insertAsync(id, embedding, metadata)`. The RVF crate
+//     serializes ingest internally, so the JS layer adds no extra lock
+//     (rvf-store.ts module header). HNSW distance math is RVF-internal — the
+//     handler hands over the vector + metadata and does NOT score anything.
 //
-// The body inside `withWrite` THROWS rather than completing as a no-op. A
-// no-op here would let the audit chain record `intent → applied` for a write
-// that wrote nothing — the silent-loss anti-pattern (`feedback-data-loss-zero-
-// tolerance`, `feedback-no-fallbacks`). This phase `getSubstrate('agentdb_route')`
-// already throws before this body runs (RVF family, no `rvfBackend` in
-// `initialize(config)` until F4-3), so the throw changes nothing now — but at
-// F4-3, when the backend is threaded and `getSubstrate` stops throwing, a
-// no-op body would silently record phantom writes. The throw makes a premature
-// F4-3 dispatch (controller seam not yet finished) fail loud instead.
+// Both capabilities are REQUIRED for a routing write: a partial dispatch (only
+// router wired, no embedding) would either drop the trajectory or fall back to
+// a degenerate vector — both ADR-0082 silent-failure anti-patterns. The
+// `require*` accessors fail loud at the boundary when either factory is
+// unsupplied, which is the correct behavior for a mutation handler that needs
+// both to make a durable record.
+//
+// Metadata shape — the trajectory record carries the composed decision plus
+// provenance so a downstream read (Phase 5+ ranked trajectory recall) can
+// reconstruct `(task, namespace, route, confidence, controller, agents,
+// timestamp)` without re-running the router. `context` is included when
+// supplied; `namespace` defaults to `'default'` matching the cli wiring.
 export const agentdbRouteHandler: GuardedWrite<AgentdbRoutePayload> =
   registerMutationHandler<AgentdbRoutePayload>(
     'agentdb_route',
     async (ctx: MutationContext<false>, payload: AgentdbRoutePayload): Promise<void> => {
+      const router = ctx.capabilities.requireTaskRouter();
+      const scorer = ctx.capabilities.requireEmbeddingScorer();
+      const namespace = payload.namespace ?? DEFAULT_NAMESPACE;
+
+      const decision = await router.route({
+        task: payload.task,
+        context: payload.context,
+        namespace,
+      });
+
+      const embedding = await scorer.embed(payload.task);
+
       await ctx.substrate.withWrite({ storeId: STORE_ID }, async (handle) => {
         const rvfHandle = handle as RvfSubstrateHandle;
-        void rvfHandle.rvf; // narrowed RVF backend — the only RVF persistence surface
-
-        // TODO(F4-2-config) #1: compute the routing decision. Needs the
-        // SemanticRouter (+ LearningSystem fallback) controller instance on the
-        // mutation context — `ArchivistInitConfig` threads no controller
-        // registry. Port `routeTask({ task, context })` from cli
-        // agentdb-orchestration.ts once the controller seam exists.
-        void payload.task;
-        void payload.context;
-        void payload.namespace;
-
-        // TODO(F4-2-config) #2: persist the decision into the router trajectory
-        // via `rvfHandle.rvf.insertAsync(id, embedding, metadata)`. Needs the
-        // embedding service to vectorize `payload.task` — also not threaded
-        // through `ArchivistInitConfig`. The RVF crate owns atomicity + fsync;
-        // no extra JS-side lock is added here (rvf-store.ts module header).
-
-        throw new Error(
-          'archivist: agentdb_route handler body pending F4-3 config wire-up — ' +
-          'needs SemanticRouter controller + embedding service on the mutation context; ' +
-          'ArchivistInitConfig threads neither (rvfBackend/sqliteDb/projectRoot only)',
-        );
+        const recordId = randomUUID();
+        const metadata: Record<string, unknown> = {
+          task: payload.task,
+          namespace,
+          route: decision.route,
+          confidence: decision.confidence,
+          controller: decision.controller,
+          agents: [...decision.agents],
+          timestamp: ctx.timestamp,
+          auditId: ctx.auditId,
+        };
+        if (payload.context !== undefined) {
+          metadata.context = payload.context;
+        }
+        await rvfHandle.rvf.insertAsync(recordId, embedding, metadata);
       });
     },
     {

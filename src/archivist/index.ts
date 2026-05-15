@@ -56,7 +56,7 @@ import {
   fsJsonPathFor,
   type SubstrateFamily,
 } from './substrate-registry.js';
-import type { RvfBackend } from '../backends/rvf/RvfBackend.js';
+import type { VectorBackendAsync } from '../backends/VectorBackend.js';
 import type BetterSqlite3 from 'better-sqlite3';
 import type {
   GuardedRead,
@@ -181,10 +181,20 @@ export interface ArchivistInitConfig {
   readonly sqliteDb?: BetterSqlite3.Database;
   /** Lazy form of `sqliteDb` — resolved once if `sqliteDb` is absent. */
   readonly sqliteDbFactory?: () => BetterSqlite3.Database;
-  /** RVF backend for vector + content stores (ADR-0177 RVF-primary). */
-  readonly rvfBackend?: RvfBackend;
+  /**
+   * RVF backend for vector + content stores (ADR-0177 RVF-primary).
+   *
+   * Typed against the `VectorBackendAsync` interface — NOT the concrete
+   * `RvfBackend` class — so the cli can pass an adapter (`MemoryRvfAdapter`,
+   * `src/adapters/memory-rvf-adapter.ts`) that wraps `@claude-flow/memory`'s
+   * own `RvfBackend` instance. The substrate factories (`makeRvfSubstrate`)
+   * only call interface methods (`searchAsync`, `insertAsync`, etc.), so
+   * typing the config against the concrete class is over-narrow and would
+   * force a cast at the only legitimate adapter wiring site.
+   */
+  readonly rvfBackend?: VectorBackendAsync;
   /** Lazy form of `rvfBackend` — resolved once if `rvfBackend` is absent. */
-  readonly rvfBackendFactory?: () => RvfBackend;
+  readonly rvfBackendFactory?: () => VectorBackendAsync;
   /**
    * Project root for FS-JSON store paths (`<projectRoot>/.claude-flow/<store>.json`).
    * Defaults to `process.cwd()` — the cli integration wiring point should pass the

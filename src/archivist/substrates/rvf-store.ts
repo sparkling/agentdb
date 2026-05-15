@@ -29,19 +29,25 @@ import type {
   SubstrateAccess,
   SubstrateHandle,
 } from '../types.js';
-import type { RvfBackend } from '../../backends/rvf/RvfBackend.js';
+import type { VectorBackendAsync } from '../../backends/VectorBackend.js';
 
 // ── Handle augmentation ──────────────────────────────────────────────────────
 //
 // The base `SubstrateHandle` is substrate-agnostic and key/value-shaped. RVF is
 // vector-addressed, not key/value — `read`/`write` throw on this handle. The RVF
-// substrate instead exposes the live `RvfBackend` on `.rvf` so handlers run
+// substrate instead exposes the live RVF backend on `.rvf` so handlers run
 // vector ingest/search directly. Handlers that target RVF narrow the handle to
 // `RvfSubstrateHandle` to reach `.rvf` (mirrors `SqliteSubstrateHandle.db`).
+//
+// Typed against `VectorBackendAsync` (the interface) — not the concrete
+// `RvfBackend` class — so the cli's `MemoryRvfAdapter` (which wraps
+// `@claude-flow/memory`'s own `RvfBackend`) is assignable here. Handlers call
+// only async interface methods (`insertAsync` / `searchAsync` / `removeAsync`
+// / `getStatsAsync`), all on `VectorBackendAsync`.
 
 export interface RvfSubstrateHandle extends SubstrateHandle {
-  /** The live `RvfBackend`, valid only inside `withWrite`/`withBulkWrite`. */
-  readonly rvf: RvfBackend;
+  /** The live RVF backend, valid only inside `withWrite`/`withBulkWrite`. */
+  readonly rvf: VectorBackendAsync;
 }
 
 // ── Public factory ───────────────────────────────────────────────────────────
@@ -72,7 +78,7 @@ export interface RvfSubstrateHandle extends SubstrateHandle {
  *     await (handle as RvfSubstrateHandle).rvf.insertBatchAsync(items);
  *   });
  */
-export function makeRvfSubstrate(backend: RvfBackend): SubstrateAccess {
+export function makeRvfSubstrate(backend: VectorBackendAsync): SubstrateAccess {
   // The handle satisfies SubstrateHandle (so it threads through the branded
   // SubstrateAccess type) while also exposing `rvf` per ADR-0180 OF#10. Handlers
   // that need the native backend narrow to `RvfSubstrateHandle`.

@@ -15,10 +15,21 @@
 // Pre-existing CLI surface: `forks/ruflo/v3/@claude-flow/cli/src/mcp-tools/agentdb-tools.ts`
 // `agentdb_pattern_search` handler (line 280) — delegates to the package-level
 // `searchPatterns(...)` helper which routes through `memory-router.ts`
-// `routePatternOp` (BM25 + semantic, ReasoningBank-backed). Per Phase 5
-// deferral F4-3, the cli callsite stays authoritative during the migration
-// window — this file establishes the registration shape the dispatch path
-// will resolve when the boundary is wired.
+// `routePatternOp` (BM25 + semantic, ReasoningBank-backed).
+//
+// Substrate routing: this is the one ranked-read whose substrate family is the
+// SQLite carve-out (ADR-0166 — `reasoning_patterns` is SQL-addressed, while the
+// per-pattern *write* `agentdb_pattern_store` is RVF; this asymmetry is the
+// ADR-0166 axis separation, see substrate-registry.ts:94-103). The fusion
+// (BM25 + dense + RRF(k=60) + `minConfidence` post-filter) lives behind the
+// narrow `PatternReader` capability surface (capabilities.ts:108) rather than
+// being reconstructed here from raw `ctx.substrate.query` SQL: rewriting RRF in
+// SQL would duplicate the cli `searchPatterns(...)` logic with no carve-out
+// gain — the capability factory wires the same ReasoningBank read-path over
+// the `sqliteDb` `ArchivistInitConfig` threads. `ctx.substrate` for this
+// storeId still classifies to the SQLite carve-out family (so the registry
+// resolves the carve-out handle, not RVF), but the dispatch payload reaches
+// the patternReader.
 //
 // Type-enforcement: `ctx.substrate` is read-only narrowing (`ReadContext`, no
 // audit, no guard). Per ADR-0180 §Read-path cache writes, this handler MAY
@@ -27,7 +38,7 @@
 // reflected in `ctx.cacheHints.wrote_cache` as advisory observability.
 
 import { registerReadHandler, type GuardedRead, type ReadContext } from '../../index.js';
-import type { RankedResults } from '../memory/search.js';
+import type { RankedResult, RankedResults } from '../memory/search.js';
 
 /**
  * Input payload mirroring the CLI tool's `agentdb_pattern_search` input shape
@@ -44,9 +55,10 @@ export interface AgentdbPatternSearchQuery {
 
 /**
  * Pattern-search hit shape. Mirrors the `searchPatterns(...)` helper return
- * shape (`{ id, content, score }` per hit, plus `controller` at the envelope
- * level — preserved here as `storeId` in provenance). The flat shape pick for
- * `includeProvenance: false` is a field-pick at the dispatch boundary.
+ * shape (`{ id, content, score }` per hit). The flat shape pick for
+ * `includeProvenance: false` is a field-pick at the dispatch boundary; the
+ * `controller` envelope field the cli returned is reconstructed at that
+ * boundary from the resolved capability identity.
  */
 export interface PatternSearchHit {
   readonly id: string;
@@ -54,43 +66,35 @@ export interface PatternSearchHit {
   readonly score: number;
 }
 
-// F4-2 wire-up (Phase B substrate seam live): `agentdb_pattern_search` is the
-// one ranked-read tool whose substrate family is the SQLite carve-out (ADR-0166
-// — the ReasoningBank GROUP-BY read routes here, while the per-pattern write
-// `agentdb_pattern_store` is RVF; this asymmetry is the ADR-0166 axis
-// separation, see substrate-registry.ts:94-98).
-//
-// The carve-out read path is not reachable through the read-only substrate seam
-// yet: `ctx.substrate.read` resolves to `makeSqliteSubstrate`'s key/value
-// `read`, which deliberately throws ("handlers must query via handle.db") —
-// SQLite is SQL-addressed, not whole-document. The SQL surface (`handle.db`)
-// is delivered only inside `withWrite`, which the read-only `ReadContext` does
-// not expose; and the read-only `substrate.query` is F4-2 Phase B (also throws).
-// `ArchivistInitConfig` threads `sqliteDb` for the *mutation* router but no
-// read-side SQL handle and no ReasoningBank controller registry.
-//
-// So the BM25 + semantic legs + RRF(k=60) fusion + `minConfidence` post-filter
-// the cli's `searchPatterns(...)` performs cannot run here — every input it
-// needs is behind the unfinished config seam. The body THROWS rather than
-// returning an empty `RankedResults`: an empty result set silently degrades —
-// a caller cannot distinguish "no patterns match" from "this handler is not
-// wired" (`feedback-no-fallbacks`). The throw makes a premature dispatch fail
-// loud, consistent with the `agentdb_route` peer in this slice.
 export const patternSearchHandler: GuardedRead<AgentdbPatternSearchQuery, RankedResults<PatternSearchHit>> =
   registerReadHandler<AgentdbPatternSearchQuery, RankedResults<PatternSearchHit>>(
     'agentdb_pattern_search',
-    async (_ctx: ReadContext, _payload: AgentdbPatternSearchQuery): Promise<RankedResults<PatternSearchHit>> => {
-      // TODO(F4-2-config): the ReasoningBank patterns table read needs either a
-      // read-side SQLite SQL handle or the ReasoningBank controller instance on
-      // the read context — `ArchivistInitConfig` threads neither (only the
-      // mutation-side `sqliteDb`). Wire one of those through `initialize(config)`
-      // + the read-only substrate seam, then port the BM25/semantic/RRF fusion
-      // from cli `searchPatterns(...)`.
-      throw new Error(
-        'archivist: agentdb_pattern_search handler body pending F4-3 config wire-up — ' +
-        'SQLite carve-out read needs a read-side SQL handle or the ReasoningBank controller; ' +
-        'ArchivistInitConfig threads neither',
-      );
+    async (ctx: ReadContext, payload: AgentdbPatternSearchQuery): Promise<RankedResults<PatternSearchHit>> => {
+      const reader = ctx.capabilities.requirePatternReader();
+
+      const hits = await reader.searchPatterns({
+        query: payload.query,
+        topK: payload.topK,
+        minConfidence: payload.minConfidence,
+      });
+
+      return hits.map((hit, index): RankedResult<PatternSearchHit> => ({
+        item: {
+          id: hit.id,
+          content: hit.content,
+          score: hit.score,
+        },
+        score: hit.score,
+        provenance: {
+          storeId: 'reasoning_patterns',
+          // Fusion site per ADR-0179 — the capability surface composes BM25 +
+          // semantic + RRF, so the canonical matchType is `'fused'`. Matches
+          // the cli `searchPatterns(...)` composition in `routePatternOp`.
+          matchType: 'fused',
+          rawScore: hit.score,
+          rank: index + 1,
+        },
+      }));
     },
     { cacheScope: 'namespace' },
   );

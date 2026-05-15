@@ -400,14 +400,27 @@ export class MemoryRvfAdapter implements VectorBackendAsync {
     const now = Date.now();
     const namespace = this.resolveNamespace(metadata);
     const key = this.resolveKey(id, metadata);
+    // ADR-0181 Phase 6: if the caller supplied a `content` field in metadata
+    // (the dispatched memory_store handler at handlers/memory/store.ts does
+    // this), surface it as the entry's first-class `content` field so the
+    // cli's `routeMemoryOp('get').entry.content` retrieval — and the test
+    // harness's value-match assertions — see the actual value rather than
+    // an empty string. Tags are likewise lifted out of metadata when the
+    // caller supplied them.
+    const rawContent = metadata?.content;
+    const content = typeof rawContent === 'string' ? rawContent : '';
+    const rawTags = metadata?.tags;
+    const tags = Array.isArray(rawTags)
+      ? rawTags.filter((t): t is string => typeof t === 'string')
+      : [];
     return {
       id,
       key,
-      content: '',
+      content,
       embedding,
       type: 'semantic',
       namespace,
-      tags: [],
+      tags,
       metadata: metadata ? { ...metadata } : {},
       accessLevel: 'private',
       createdAt: now,

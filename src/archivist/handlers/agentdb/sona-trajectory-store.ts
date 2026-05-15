@@ -71,11 +71,12 @@ const STORE_ID = 'agentdb_sona_trajectory_store' as StoreId;
 // branch routes through a sibling `registerReadHandler` registration that
 // lands alongside; this mutation handler owns only the record path. The cli
 // branch stays in place until the dispatch boundary is wired through.
-// ADR-0181 Phase 6 wire-up — port of cli `agentdb-tools.ts:2039`. SonaTrajectoryService
-// is pure-compute (in-memory RL store) and "never silently falls back" per cli
-// L2031-2037. We honour that: when the controller is wired (success), we're
-// done; when not, we still record an RVF entry under namespace 'sona' so the
-// MCP boundary keeps a persistence trail (ADR-0093 F4 hand-port semantics).
+// ADR-0181 Phase 7 — port of cli `agentdb-tools.ts:2039`. SonaTrajectoryService
+// is pure-compute (in-memory RL store, no SQLite persistence by design) and
+// "never silently falls back" per cli L2031-2037. The body honours that
+// directive: a controller-unavailable result is fatal, no RVF fallback. The
+// matching read handler (sibling registerReadHandler for the 'stats' action)
+// is deferred — see handlers/agentdb/index.ts barrel for the deferral note.
 export const storeSonaTrajectoryHandler: GuardedWrite<AgentdbSonaTrajectoryStorePayload> =
   registerMutationHandler<AgentdbSonaTrajectoryStorePayload>(
     'agentdb_sona_trajectory_store',

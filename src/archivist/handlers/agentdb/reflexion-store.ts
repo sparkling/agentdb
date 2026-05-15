@@ -58,11 +58,12 @@ const STORE_ID = 'agentdb_reflexion_store' as StoreId;
 // the timeout semantics in the migrated path). The cli branch stays in
 // place until the dispatch boundary is wired through; this handler is the
 // registration shape the dispatch path will resolve.
-// ADR-0181 Phase 6 wire-up — port of cli `agentdb-tools.ts:1003`. Primary
-// path: ReflexionMemory controller writes via `storeEpisode` (v3) or `store`
-// (legacy) through the ReflexionStoreWriter capability (2-second timeout
-// preserved cli-side). Fallback path: substrate.withWrite RVF when controller
-// is unwired.
+// ADR-0181 Phase 7 — port of cli `agentdb-tools.ts:1003`. ReflexionMemory
+// controller writes via `storeEpisode` (v3) or `store` (legacy) through the
+// ReflexionStoreWriter capability (2-second timeout preserved cli-side).
+// Substrate is SQLite-classified per substrate-registry (the `episodes` +
+// `episode_embeddings` tables are the persistence model the matching read
+// handler queries); a controller-unavailable result is fatal, no fallback.
 export const storeReflexionHandler: GuardedWrite<AgentdbReflexionStorePayload> =
   registerMutationHandler<AgentdbReflexionStorePayload>(
     'agentdb_reflexion_store',

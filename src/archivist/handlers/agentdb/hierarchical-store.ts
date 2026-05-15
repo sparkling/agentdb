@@ -57,9 +57,12 @@ const STORE_ID = 'agentdb_hierarchical_store' as StoreId;
 // rather than silent fallback (ADR-0082 no-silent-failure). The cli branch
 // stays in place until the dispatch boundary is wired through; this handler
 // is the registration shape the dispatch path will resolve.
-// ADR-0181 Phase 6 wire-up — port of cli `agentdb-tools.ts:465`. Primary
-// path: HierarchicalMemory controller via `hierarchicalStore({key, value,
-// tier})` through the HierarchicalMemoryWriter capability. Fallback: RVF.
+// ADR-0181 Phase 7 — port of cli `agentdb-tools.ts:465`. HierarchicalMemory
+// controller writes via `hierarchicalStore({key, value, tier})` through the
+// HierarchicalMemoryWriter capability. Substrate is SQLite-classified per
+// substrate-registry (the `hierarchical_memory` table is the persistence
+// model the matching read handler queries via importance-ordered SELECT);
+// a controller-unavailable result is fatal, no fallback.
 export const storeHierarchicalHandler: GuardedWrite<AgentdbHierarchicalStorePayload> =
   registerMutationHandler<AgentdbHierarchicalStorePayload>(
     'agentdb_hierarchical_store',

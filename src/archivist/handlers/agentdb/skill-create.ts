@@ -57,11 +57,13 @@ const STORE_ID = 'agentdb_skill_create' as StoreId;
 // rejection (cli line 1680, ADR-0082 no-silent-failure). The cli branch
 // stays in place until the dispatch boundary is wired through; this handler
 // is the registration shape the dispatch path will resolve.
-// ADR-0181 Phase 6 wire-up — port of cli `agentdb-tools.ts:1650`. Primary path:
-// SkillLibrary controller creates via `createSkill({...})` (v3 API) or
-// `promote(...)` (legacy) — both probed by the SkillLibraryWriter capability.
-// Fallback path: substrate.withWrite RVF when the controller is unwired (null
-// return). Explicit controller errors surface as throws (ADR-0082).
+// ADR-0181 Phase 7 — port of cli `agentdb-tools.ts:1650`. SkillLibrary
+// controller creates via `createSkill({...})` (v3 API) or `promote(...)`
+// (legacy) — both probed by the SkillLibraryWriter capability. Substrate
+// is SQLite-classified per substrate-registry (the `skills` +
+// `skill_embeddings` tables are the persistence model the matching read
+// handler queries); a controller-unavailable result is fatal, no fallback.
+// Explicit controller errors surface as throws (ADR-0082).
 export const createSkillHandler: GuardedWrite<AgentdbSkillCreatePayload> =
   registerMutationHandler<AgentdbSkillCreatePayload>(
     'agentdb_skill_create',

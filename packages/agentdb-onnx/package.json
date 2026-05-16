@@ -1,12 +1,12 @@
 {
   "name": "agentdb-onnx",
-  "version": "1.0.0-patch.651",
+  "version": "1.0.0-patch.652",
   "description": "ONNX-backed embedding service for AgentDB (ADR-0161)",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "dependencies": {
-    "agentdb": "3.0.0-alpha.14-patch.151"
+    "agentdb": "3.0.0-alpha.14-patch.152"
   },
   "devDependencies": {
     "typescript": "^5.0.0"

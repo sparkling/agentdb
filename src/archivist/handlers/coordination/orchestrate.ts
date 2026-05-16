@@ -23,12 +23,10 @@
 // is `makeFsJsonSubstrate` (substrates/fs-json-store.ts), shared with the
 // other five `coordination_*` mutation handlers.
 
-import {
-  registerMutationHandler,
-  type GuardedWrite,
-  type MutationContext,
-  type StoreId,
-} from '../../index.js';
+import { registerMutationHandler } from '../../registration.js';
+import type { MutationContext } from '../../mutation-context.js';
+import type { GuardedWrite, StoreId } from '../../types.js';
+import { orchestrateInvariants } from '../../invariants/coordination/orchestrate.js';
 import {
   COORD_STORE_KEY,
   loadCoordStore,
@@ -100,7 +98,7 @@ export const orchestrateCoordinationHandler: GuardedWrite<CoordinationOrchestrat
       });
     },
     {
-      invariants: [], // wired by invariants-author per ADR-0180 §Mutation invariants
+      invariants: orchestrateInvariants,
       cacheScope: 'global',
     },
   );

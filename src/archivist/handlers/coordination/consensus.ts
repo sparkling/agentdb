@@ -39,12 +39,10 @@
 // underlying primitive is `makeFsJsonSubstrate` (substrates/fs-json-store.ts),
 // shared with the other five `coordination_*` mutation handlers.
 
-import {
-  registerMutationHandler,
-  type GuardedWrite,
-  type MutationContext,
-  type StoreId,
-} from '../../index.js';
+import { registerMutationHandler } from '../../registration.js';
+import type { MutationContext } from '../../mutation-context.js';
+import type { GuardedWrite, StoreId } from '../../types.js';
+import { consensusInvariants } from '../../invariants/coordination/consensus.js';
 import {
   COORD_STORE_KEY,
   calcRequiredVotes,
@@ -260,7 +258,7 @@ export const consensusCoordinationHandler: GuardedWrite<CoordinationConsensusPay
       });
     },
     {
-      invariants: [], // wired by invariants-author per ADR-0180 §Mutation invariants
+      invariants: consensusInvariants,
       cacheScope: 'global',
     },
   );

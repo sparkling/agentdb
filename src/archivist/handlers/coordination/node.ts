@@ -27,12 +27,10 @@
 // five `coordination_*` mutation handlers — all six route through the same
 // FS-JSON store under one cross-process O_EXCL sentinel lock.
 
-import {
-  registerMutationHandler,
-  type GuardedWrite,
-  type MutationContext,
-  type StoreId,
-} from '../../index.js';
+import { registerMutationHandler } from '../../registration.js';
+import type { MutationContext } from '../../mutation-context.js';
+import type { GuardedWrite, StoreId } from '../../types.js';
+import { nodeInvariants } from '../../invariants/coordination/node.js';
 import {
   COORD_STORE_KEY,
   loadCoordStore,
@@ -134,7 +132,7 @@ export const nodeCoordinationHandler: GuardedWrite<CoordinationNodePayload> =
       });
     },
     {
-      invariants: [], // wired by invariants-author per ADR-0180 §Mutation invariants
+      invariants: nodeInvariants,
       cacheScope: 'global',
     },
   );

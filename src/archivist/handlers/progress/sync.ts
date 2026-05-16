@@ -20,6 +20,7 @@
 
 import { registerMutationHandler } from '../../registration.js';
 import type { GuardedWrite, MutationContext, StoreId } from '../../index.js';
+import { syncInvariants } from '../../invariants/progress/sync.js';
 
 /** Persisted progress snapshot — shape mirrors the cli's `syncProgress()`
  *  output (progress-tools.ts lines 224-235) so consumers of v3-progress.json
@@ -66,7 +67,7 @@ export const progressSyncHandler: GuardedWrite<ProgressSyncPayload> =
       });
     },
     {
-      invariants: [], // wired by invariants-author per ADR-0180 §Mutation invariants
+      invariants: syncInvariants,
       cacheScope: 'store',
     },
   );

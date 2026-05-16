@@ -34,12 +34,10 @@
 // Type-enforcement: `ctx.substrate.withWrite` is the only path through which
 // the learning pattern store may mutate.
 
-import {
-  registerMutationHandler,
-  type GuardedWrite,
-  type MutationContext,
-  type StoreId,
-} from '../../index.js';
+import { registerMutationHandler } from '../../registration.js';
+import type { MutationContext } from '../../mutation-context.js';
+import type { GuardedWrite, StoreId } from '../../types.js';
+import { learnInvariants } from '../../invariants/autopilot/learn.js';
 
 /**
  * Mutation payload mirroring the CLI tool's `autopilot_learn` input shape
@@ -125,7 +123,7 @@ export const learnAutopilotHandler: GuardedWrite<AutopilotLearnPayload> =
       });
     },
     {
-      invariants: [], // wired by invariants-author per ADR-0180 §Mutation invariants
+      invariants: learnInvariants,
       cacheScope: 'namespace',
     },
   );

@@ -21,11 +21,10 @@
 // Type-enforcement: `ctx.substrate.withWrite` is the only path through which
 // `autopilot-state.json` may mutate.
 
-import {
-  registerMutationHandler,
-  type GuardedWrite,
-  type MutationContext,
-} from '../../index.js';
+import { registerMutationHandler } from '../../registration.js';
+import type { MutationContext } from '../../mutation-context.js';
+import type { GuardedWrite } from '../../types.js';
+import { resetInvariants } from '../../invariants/autopilot/reset.js';
 import {
   AUTOPILOT_STORE_ID,
   AUTOPILOT_STATE_KEY,
@@ -68,7 +67,7 @@ export const resetAutopilotHandler: GuardedWrite<AutopilotResetPayload> =
       });
     },
     {
-      invariants: [], // wired by invariants-author per ADR-0180 §Mutation invariants
+      invariants: resetInvariants,
       cacheScope: 'namespace',
     },
   );

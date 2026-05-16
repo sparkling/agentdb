@@ -28,11 +28,10 @@
 // preserve this; the invariants-author should encode the type/non-empty gate
 // as a typed invariant rather than an inline early return.
 
-import {
-  registerMutationHandler,
-  type GuardedWrite,
-  type MutationContext,
-} from '../../index.js';
+import { registerMutationHandler } from '../../registration.js';
+import type { MutationContext } from '../../mutation-context.js';
+import type { GuardedWrite } from '../../types.js';
+import { enableInvariants } from '../../invariants/autopilot/enable.js';
 import {
   AUTOPILOT_STORE_ID,
   AUTOPILOT_STATE_KEY,
@@ -96,7 +95,7 @@ export const enableAutopilotHandler: GuardedWrite<AutopilotEnablePayload> =
       });
     },
     {
-      invariants: [], // wired by invariants-author per ADR-0180 §Mutation invariants
+      invariants: enableInvariants,
       cacheScope: 'namespace',
     },
   );

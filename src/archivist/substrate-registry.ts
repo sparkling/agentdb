@@ -85,7 +85,13 @@ const RVF_STORE_IDS: ReadonlySet<string> = new Set([
   // surface — both sides now share the SQLite handle, so the read↔write
   // pair classifies as carve-out together (matches Phase 7 reflexion /
   // skill / hierarchical pattern).
-  'agentdb_experience_record',
+  // ADR-0181 Item 5 Phase 2 (2026-05-16) — `agentdb_experience_record`
+  // similarly removed from RVF and added to SQLITE_CARVE_OUT_STORE_IDS
+  // below. LearningSystem (commits 1-5) now persists to the four
+  // learning_* SQLite tables; the cli's `agentdb_experience_record` MCP
+  // tool now gates behind ensureSqliteWired() (forks/ruflo cfc519f42)
+  // and the dispatch substrate must classify accordingly so the
+  // archivist's withWrite scope shares the same SQLite handle.
   'agentdb_route',
   'agentdb_feedback',
 ]);
@@ -114,6 +120,7 @@ const RVF_STORE_IDS: ReadonlySet<string> = new Set([
 //   agentdb_skill_create         → SkillLibrary.createSkill      (Phase 7, LIVE)
 //   agentdb_hierarchical_store   → HierarchicalMemory.store      (Phase 7, LIVE)
 //   agentdb_sona_trajectory_store → SonaTrajectoryService.recordTrajectory (Item 6, LIVE 2026-05-16)
+//   agentdb_experience_record    → LearningSystem.recordExperience  (Item 5 Phase 2, LIVE 2026-05-16)
 //
 // NOTE: `agentdb_pattern_search` (a GROUP-BY *read* over ReasoningBank) is
 // carve-out, while `agentdb_pattern_store` (a per-pattern *write*) is RVF —
@@ -164,6 +171,14 @@ const SQLITE_CARVE_OUT_STORE_IDS: ReadonlySet<string> = new Set([
   // dispatch and 'stats' → dispatchRead (split-by-action matches Item 2's
   // agentdb_neural_patterns/agentdb_gnn_stats split).
   'agentdb_sona_trajectory_store',
+  // ADR-0181 Item 5 Phase 2 (2026-05-16): LearningSystem persists to four
+  // learning_* SQLite tables (commits 1-5 retired the pglite/PostgresBackend
+  // path per ADR-0177). The cli wrapper at agentdb-tools.ts:1933 gates
+  // behind ensureSqliteWired (forks/ruflo cfc519f42); the substrate seam
+  // must classify the storeId accordingly so the archivist's withWrite
+  // scope shares the same SQLite handle the cli uses for INSERTs.
+  // Same shape as Phase 7's reflexion/skill/hierarchical move.
+  'agentdb_experience_record',
 ]);
 
 // ── Classification ───────────────────────────────────────────────────────────

@@ -5,13 +5,14 @@
 // Pre-existing CLI surface: `cli/src/mcp-tools/claims-tools.ts` `claims_release`
 // handler — loads store, verifies ownership, deletes claim + stealable entries.
 
-import {
-  registerMutationHandler,
-  type GuardedWrite,
-  type MutationContext,
-  type StoreId,
+import { registerMutationHandler } from '../../registration.js';
+import type {
+  GuardedWrite,
+  MutationContext,
+  StoreId,
 } from '../../index.js';
 import type { Claimant, ClaimsStore } from './claim.js';
+import { releaseInvariants } from '../../invariants/claims/release.js';
 
 export interface ClaimsReleasePayload {
   readonly issueId: string;
@@ -50,7 +51,7 @@ export const claimsReleaseHandler: GuardedWrite<ClaimsReleasePayload> =
       });
     },
     {
-      invariants: [],
+      invariants: releaseInvariants,
       cacheScope: 'store',
     },
   );

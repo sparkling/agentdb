@@ -5,13 +5,14 @@
 // allowed list. The substrate's O_EXCL lock guarantees that of N parallel
 // steals against the same issue, exactly one succeeds.
 
-import {
-  registerMutationHandler,
-  type GuardedWrite,
-  type MutationContext,
-  type StoreId,
+import { registerMutationHandler } from '../../registration.js';
+import type {
+  GuardedWrite,
+  MutationContext,
+  StoreId,
 } from '../../index.js';
 import type { Claimant, ClaimsStore } from './claim.js';
+import { stealInvariants } from '../../invariants/claims/steal.js';
 
 export interface ClaimsStealPayload {
   readonly issueId: string;
@@ -65,7 +66,7 @@ export const claimsStealHandler: GuardedWrite<ClaimsStealPayload> =
       });
     },
     {
-      invariants: [],
+      invariants: stealInvariants,
       cacheScope: 'store',
     },
   );

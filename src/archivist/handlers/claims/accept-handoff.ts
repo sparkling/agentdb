@@ -3,13 +3,14 @@
 // Accepts a pending handoff. Target claimant becomes the new owner; status
 // flips from 'handoff-pending' back to 'active'.
 
-import {
-  registerMutationHandler,
-  type GuardedWrite,
-  type MutationContext,
-  type StoreId,
+import { registerMutationHandler } from '../../registration.js';
+import type {
+  GuardedWrite,
+  MutationContext,
+  StoreId,
 } from '../../index.js';
 import type { Claimant, ClaimsStore } from './claim.js';
+import { acceptHandoffInvariants } from '../../invariants/claims/accept-handoff.js';
 
 export interface ClaimsAcceptHandoffPayload {
   readonly issueId: string;
@@ -56,7 +57,7 @@ export const claimsAcceptHandoffHandler: GuardedWrite<ClaimsAcceptHandoffPayload
       });
     },
     {
-      invariants: [],
+      invariants: acceptHandoffInvariants,
       cacheScope: 'store',
     },
   );

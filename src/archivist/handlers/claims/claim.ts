@@ -9,12 +9,13 @@
 // lockfile). The substrate's `withWrite` subsumes that primitive; cli callsites
 // stay in place until Phase 7+ removes the legacy path.
 
-import {
-  registerMutationHandler,
-  type GuardedWrite,
-  type MutationContext,
-  type StoreId,
+import { registerMutationHandler } from '../../registration.js';
+import type {
+  GuardedWrite,
+  MutationContext,
+  StoreId,
 } from '../../index.js';
+import { claimInvariants } from '../../invariants/claims/claim.js';
 
 export interface Claimant {
   readonly type: 'human' | 'agent';
@@ -108,7 +109,7 @@ export const claimsClaimHandler: GuardedWrite<ClaimsClaimPayload> =
       });
     },
     {
-      invariants: [],
+      invariants: claimInvariants,
       cacheScope: 'store',
     },
   );

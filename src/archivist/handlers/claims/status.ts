@@ -4,13 +4,14 @@
 // and optional note + progress. The 'stealable' transition has its own
 // dedicated handler (claims_mark-stealable).
 
-import {
-  registerMutationHandler,
-  type GuardedWrite,
-  type MutationContext,
-  type StoreId,
+import { registerMutationHandler } from '../../registration.js';
+import type {
+  GuardedWrite,
+  MutationContext,
+  StoreId,
 } from '../../index.js';
 import type { ClaimsStore, ClaimStatus } from './claim.js';
+import { statusInvariants } from '../../invariants/claims/status.js';
 
 export interface ClaimsStatusPayload {
   readonly issueId: string;
@@ -52,7 +53,7 @@ export const claimsStatusHandler: GuardedWrite<ClaimsStatusPayload> =
       });
     },
     {
-      invariants: [],
+      invariants: statusInvariants,
       cacheScope: 'store',
     },
   );

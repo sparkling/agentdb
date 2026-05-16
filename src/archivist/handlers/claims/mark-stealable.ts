@@ -4,13 +4,14 @@
 // Writes both `claims[issueId].status='stealable'` and `stealable[issueId]`
 // metadata atomically inside a single substrate withWrite.
 
-import {
-  registerMutationHandler,
-  type GuardedWrite,
-  type MutationContext,
-  type StoreId,
+import { registerMutationHandler } from '../../registration.js';
+import type {
+  GuardedWrite,
+  MutationContext,
+  StoreId,
 } from '../../index.js';
 import type { ClaimsStore, StealReason } from './claim.js';
+import { markStealableInvariants } from '../../invariants/claims/mark-stealable.js';
 
 export interface ClaimsMarkStealablePayload {
   readonly issueId: string;
@@ -53,7 +54,7 @@ export const claimsMarkStealableHandler: GuardedWrite<ClaimsMarkStealablePayload
       });
     },
     {
-      invariants: [],
+      invariants: markStealableInvariants,
       cacheScope: 'store',
     },
   );

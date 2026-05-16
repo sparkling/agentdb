@@ -9,13 +9,14 @@
 // surface stays at the cli layer (the cli wrapper computes them post-dispatch
 // or pre-dispatch and returns them). Body below covers the mutation portion only.
 
-import {
-  registerMutationHandler,
-  type GuardedWrite,
-  type MutationContext,
-  type StoreId,
+import { registerMutationHandler } from '../../registration.js';
+import type {
+  GuardedWrite,
+  MutationContext,
+  StoreId,
 } from '../../index.js';
 import type { ClaimsStore, IssueClaim } from './claim.js';
+import { rebalanceInvariants } from '../../invariants/claims/rebalance.js';
 
 export interface ClaimsRebalancePayload {
   readonly dryRun?: boolean;
@@ -98,7 +99,7 @@ export const claimsRebalanceHandler: GuardedWrite<ClaimsRebalancePayload> =
       });
     },
     {
-      invariants: [],
+      invariants: rebalanceInvariants,
       cacheScope: 'store',
     },
   );

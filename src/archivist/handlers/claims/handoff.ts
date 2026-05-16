@@ -3,13 +3,14 @@
 // Requests handoff of an issue from the current claimant to a target claimant.
 // Sets status='handoff-pending'; the target accepts via claims_accept-handoff.
 
-import {
-  registerMutationHandler,
-  type GuardedWrite,
-  type MutationContext,
-  type StoreId,
+import { registerMutationHandler } from '../../registration.js';
+import type {
+  GuardedWrite,
+  MutationContext,
+  StoreId,
 } from '../../index.js';
 import type { Claimant, ClaimsStore } from './claim.js';
+import { handoffInvariants } from '../../invariants/claims/handoff.js';
 
 export interface ClaimsHandoffPayload {
   readonly issueId: string;
@@ -56,7 +57,7 @@ export const claimsHandoffHandler: GuardedWrite<ClaimsHandoffPayload> =
       });
     },
     {
-      invariants: [],
+      invariants: handoffInvariants,
       cacheScope: 'store',
     },
   );

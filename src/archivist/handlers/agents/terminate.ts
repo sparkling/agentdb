@@ -17,13 +17,14 @@
 // backstop and the path-restricted substrate-internal.ts seam (ADR-0180
 // §Type enforcement).
 
-import {
-  registerMutationHandler,
-  type GuardedWrite,
-  type MutationContext,
-  type StoreId,
+import { registerMutationHandler } from '../../registration.js';
+import type {
+  GuardedWrite,
+  MutationContext,
+  StoreId,
 } from '../../index.js';
 import type { AgentStore } from './spawn.js';
+import { terminateInvariants } from '../../invariants/agents/terminate.js';
 
 /**
  * Mutation payload mirroring the CLI tool's `agent_terminate` input shape
@@ -69,7 +70,7 @@ export const terminateAgentHandler: GuardedWrite<AgentTerminatePayload> =
       });
     },
     {
-      invariants: [], // wired by invariants-author per ADR-0180 §Mutation invariants
+      invariants: terminateInvariants,
       cacheScope: 'store',
     },
   );

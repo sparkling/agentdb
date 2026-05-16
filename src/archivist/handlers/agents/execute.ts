@@ -24,13 +24,14 @@
 // backstop and the path-restricted substrate-internal.ts seam (ADR-0180
 // §Type enforcement).
 
-import {
-  registerMutationHandler,
-  type GuardedWrite,
-  type MutationContext,
-  type StoreId,
+import { registerMutationHandler } from '../../registration.js';
+import type {
+  GuardedWrite,
+  MutationContext,
+  StoreId,
 } from '../../index.js';
 import type { AgentRecord, AgentStore } from './spawn.js';
+import { executeInvariants } from '../../invariants/agents/execute.js';
 
 /**
  * Mutation payload — record-update half of `agent_execute`. The Anthropic
@@ -86,7 +87,7 @@ export const executeAgentHandler: GuardedWrite<AgentExecutePayload> =
       });
     },
     {
-      invariants: [], // wired by invariants-author per ADR-0180 §Mutation invariants
+      invariants: executeInvariants,
       cacheScope: 'store',
     },
   );

@@ -26,12 +26,13 @@
 // from store-tree code is forbidden by the `no-restricted-imports` backstop
 // and the path-restricted substrate-internal.ts seam (ADR-0180 §Type enforcement).
 
-import {
-  registerMutationHandler,
-  type GuardedWrite,
-  type MutationContext,
-  type StoreId,
+import { registerMutationHandler } from '../../registration.js';
+import type {
+  GuardedWrite,
+  MutationContext,
+  StoreId,
 } from '../../index.js';
+import { spawnInvariants } from '../../invariants/agents/spawn.js';
 
 /** Claude Agent SDK model selector — mirrors the CLI inputSchema enum. */
 export type ClaudeModel = 'haiku' | 'sonnet' | 'opus' | 'inherit';
@@ -101,7 +102,7 @@ export const spawnAgentHandler: GuardedWrite<AgentSpawnPayload> =
       });
     },
     {
-      invariants: [], // wired by invariants-author per ADR-0180 §Mutation invariants
+      invariants: spawnInvariants,
       cacheScope: 'store',
     },
   );

@@ -27,13 +27,14 @@
 // backstop and the path-restricted substrate-internal.ts seam (ADR-0180
 // §Type enforcement).
 
-import {
-  registerMutationHandler,
-  type GuardedWrite,
-  type MutationContext,
-  type StoreId,
+import { registerMutationHandler } from '../../registration.js';
+import type {
+  GuardedWrite,
+  MutationContext,
+  StoreId,
 } from '../../index.js';
 import type { AgentRecord, AgentStore } from './spawn.js';
+import { poolInvariants } from '../../invariants/agents/pool.js';
 
 /** Pool actions — mirrors the CLI inputSchema enum (agent-tools.ts:443-447).
  *  'status' is read-only and routes through dispatchRead at wire-up time. */
@@ -143,7 +144,7 @@ export const poolAgentHandler: GuardedWrite<AgentPoolPayload> =
       });
     },
     {
-      invariants: [], // wired by invariants-author per ADR-0180 §Mutation invariants
+      invariants: poolInvariants,
       cacheScope: 'store',
     },
   );

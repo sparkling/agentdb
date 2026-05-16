@@ -23,6 +23,7 @@
 
 import { registerMutationHandler } from '../../registration.js';
 import type { GuardedWrite, MutationContext, StoreId } from '../../index.js';
+import { resetInvariants } from '../../invariants/system/reset.js';
 import { defaultSystemMetrics } from './metrics.js';
 
 /** Reset target — mirrors the CLI surface's `component` string field.
@@ -76,7 +77,7 @@ export const systemResetHandler: GuardedWrite<SystemResetPayload> =
       });
     },
     {
-      invariants: [], // wired by invariants-author per ADR-0180 §Mutation invariants
+      invariants: resetInvariants,
       cacheScope: 'store',
     },
   );

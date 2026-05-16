@@ -28,6 +28,7 @@ import { join } from 'node:path';
 import * as os from 'node:os';
 import { registerMutationHandler } from '../../registration.js';
 import type { GuardedWrite, MutationContext, StoreId } from '../../index.js';
+import { metricsInvariants } from '../../invariants/system/metrics.js';
 
 /**
  * Shape of `.claude-flow/system/metrics.json` — mirrors `SystemMetrics` at
@@ -195,7 +196,7 @@ export const systemMetricsHandler: GuardedWrite<SystemMetricsPayload> =
       });
     },
     {
-      invariants: [], // wired by invariants-author per ADR-0180 §Mutation invariants
+      invariants: metricsInvariants,
       cacheScope: 'store',
     },
   );

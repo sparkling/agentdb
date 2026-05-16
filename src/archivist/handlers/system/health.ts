@@ -28,6 +28,7 @@ import { join } from 'node:path';
 import * as os from 'node:os';
 import { registerMutationHandler } from '../../registration.js';
 import type { GuardedWrite, MutationContext, StoreId } from '../../index.js';
+import { healthInvariants } from '../../invariants/system/health.js';
 import { defaultSystemMetrics, type SystemMetrics } from './metrics.js';
 
 /**
@@ -130,7 +131,7 @@ export const systemHealthHandler: GuardedWrite<SystemHealthPayload> =
       });
     },
     {
-      invariants: [], // wired by invariants-author per ADR-0180 §Mutation invariants
+      invariants: healthInvariants,
       cacheScope: 'store',
     },
   );

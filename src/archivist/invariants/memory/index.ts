@@ -20,3 +20,19 @@ export { migrateInvariants } from './migrate.js';
 
 export type { MemoryImportClaudePayload } from './import-claude.js';
 export { importClaudeInvariants } from './import-claude.js';
+
+// Read-side invariants (TODO ADR-0181 #104 — read handlers don't accept `invariants:` today).
+export type { MemoryListQuery } from './list.js';
+export { listInvariants } from './list.js';
+
+export type { MemoryRetrieveQuery } from './retrieve.js';
+export { retrieveInvariants } from './retrieve.js';
+
+export type { MemorySearchQuery } from './search.js';
+export { searchInvariants } from './search.js';
+
+export type { MemorySearchUnifiedQuery } from './search-unified.js';
+export { searchUnifiedInvariants } from './search-unified.js';
+
+export type { MemoryBridgeStatusQuery } from './bridge-status.js';
+export { bridgeStatusInvariants } from './bridge-status.js';

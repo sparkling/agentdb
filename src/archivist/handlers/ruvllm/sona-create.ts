@@ -17,6 +17,7 @@
 
 import { registerMutationHandler } from '../../registration.js';
 import type { GuardedWrite, MutationContext } from '../../index.js';
+import { sonaCreateInvariants } from '../../invariants/ruvllm/sona-create.js';
 import {
   RUVLLM_SONA_STORE_ID,
   type RuvllmSonaStore,
@@ -49,7 +50,7 @@ export const sonaCreateRuvllmHandler: GuardedWrite<RuvllmSonaCreatePayload> =
       });
     },
     {
-      invariants: [], // wired by invariants-author per ADR-0180 §Mutation invariants
+      invariants: sonaCreateInvariants,
       cacheScope: 'global',
     },
   );

@@ -18,6 +18,7 @@
 
 import { registerMutationHandler } from '../../registration.js';
 import type { GuardedWrite, MutationContext } from '../../index.js';
+import { microLoraCreateInvariants } from '../../invariants/ruvllm/microlora-create.js';
 import {
   RUVLLM_MICROLORA_STORE_ID,
   type RuvllmMicroLoraStore,
@@ -50,7 +51,7 @@ export const microLoraCreateRuvllmHandler: GuardedWrite<RuvllmMicroLoraCreatePay
       });
     },
     {
-      invariants: [], // wired by invariants-author per ADR-0180 §Mutation invariants
+      invariants: microLoraCreateInvariants,
       cacheScope: 'global',
     },
   );

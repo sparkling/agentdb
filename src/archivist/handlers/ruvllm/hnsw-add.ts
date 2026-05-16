@@ -19,6 +19,7 @@
 
 import { registerMutationHandler } from '../../registration.js';
 import type { GuardedWrite, MutationContext } from '../../index.js';
+import { hnswAddInvariants } from '../../invariants/ruvllm/hnsw-add.js';
 import { RUVLLM_HNSW_STORE_ID, type RuvllmHnswStore } from './shared.js';
 
 export interface RuvllmHnswAddPayload {
@@ -56,7 +57,7 @@ export const hnswAddRuvllmHandler: GuardedWrite<RuvllmHnswAddPayload> =
       });
     },
     {
-      invariants: [], // wired by invariants-author per ADR-0180 §Mutation invariants
+      invariants: hnswAddInvariants,
       cacheScope: 'global',
     },
   );

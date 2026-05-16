@@ -27,12 +27,8 @@
 // `invariants: [...]` against this handler) — invariants are correctness
 // gates, guards are policy (ADR-0180 §Mutation invariants).
 
-import {
-  registerMutationHandler,
-  type GuardedWrite,
-  type MutationContext,
-  type StoreId,
-} from '../../index.js';
+import { registerMutationHandler } from '../../registration.js';
+import type { GuardedWrite, MutationContext, StoreId } from '../../index.js';
 import { experienceRecordInvariants } from '../../invariants/agentdb/experience-record.js';
 
 /**

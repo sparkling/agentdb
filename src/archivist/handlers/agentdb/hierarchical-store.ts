@@ -21,12 +21,8 @@
 // `['working', 'episodic', 'semantic']` array survives during the migration
 // window and converts to a typed-payload invariant during Phase 6 wire-up.
 
-import {
-  registerMutationHandler,
-  type GuardedWrite,
-  type MutationContext,
-  type StoreId,
-} from '../../index.js';
+import { registerMutationHandler } from '../../registration.js';
+import type { GuardedWrite, MutationContext, StoreId } from '../../index.js';
 
 /**
  * Hierarchical memory tier — mirrors the cli enum constraint

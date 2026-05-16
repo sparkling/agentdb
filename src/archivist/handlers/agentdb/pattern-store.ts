@@ -26,12 +26,8 @@
 // the ReasoningBank fallback path also uses, so cache invalidation aligns
 // across primary and fallback persistence sites.
 
-import {
-  registerMutationHandler,
-  type GuardedWrite,
-  type MutationContext,
-  type StoreId,
-} from '../../index.js';
+import { registerMutationHandler } from '../../registration.js';
+import type { GuardedWrite, MutationContext, StoreId } from '../../index.js';
 import { patternStoreInvariants } from '../../invariants/agentdb/pattern-store.js';
 
 /**

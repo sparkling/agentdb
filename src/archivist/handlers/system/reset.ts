@@ -21,12 +21,8 @@
 // `system_*` mutation handlers — all three route through the same FS-JSON
 // store under one cross-process O_EXCL sentinel lock.
 
-import {
-  registerMutationHandler,
-  type GuardedWrite,
-  type MutationContext,
-  type StoreId,
-} from '../../index.js';
+import { registerMutationHandler } from '../../registration.js';
+import type { GuardedWrite, MutationContext, StoreId } from '../../index.js';
 import { defaultSystemMetrics } from './metrics.js';
 
 /** Reset target — mirrors the CLI surface's `component` string field.

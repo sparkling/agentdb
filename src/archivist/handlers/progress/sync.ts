@@ -18,12 +18,8 @@
 // from store-tree code is forbidden by the path-restricted
 // substrate-internal.ts seam (ADR-0180 §Type enforcement).
 
-import {
-  registerMutationHandler,
-  type GuardedWrite,
-  type MutationContext,
-  type StoreId,
-} from '../../index.js';
+import { registerMutationHandler } from '../../registration.js';
+import type { GuardedWrite, MutationContext, StoreId } from '../../index.js';
 
 /** Persisted progress snapshot — shape mirrors the cli's `syncProgress()`
  *  output (progress-tools.ts lines 224-235) so consumers of v3-progress.json

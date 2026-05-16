@@ -9,13 +9,10 @@
 // Pre-existing CLI surface: `cli/src/mcp-tools/task-tools.ts` `task_cancel`
 // handler (lines 428-453). Cli callsite stays in place until Phase 7+.
 
-import {
-  registerMutationHandler,
-  type GuardedWrite,
-  type MutationContext,
-  type StoreId,
-} from '../../index.js';
+import { registerMutationHandler } from '../../registration.js';
+import type { GuardedWrite, MutationContext, StoreId } from '../../index.js';
 import type { TaskStore } from './shared.js';
+import { cancelInvariants } from '../../invariants/tasks/cancel.js';
 
 export interface TaskCancelPayload {
   readonly taskId: string;
@@ -48,7 +45,7 @@ export const taskCancelHandler: GuardedWrite<TaskCancelPayload> =
       });
     },
     {
-      invariants: [],
+      invariants: cancelInvariants,
       cacheScope: 'store',
     },
   );

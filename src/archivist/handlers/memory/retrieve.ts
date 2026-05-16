@@ -30,7 +30,8 @@
 // The cli's tool handler at memory-tools.ts:303-375 stays authoritative until
 // Phase 4 flips the dispatch boundary.
 
-import { registerReadHandler, type GuardedRead, type ReadContext, type StoreId } from '../../index.js';
+import { registerReadHandler } from '../../registration.js';
+import type { GuardedRead, ReadContext, StoreId } from '../../index.js';
 import type { MemoryRecord, RankedResult, RankedResults } from './search.js';
 
 export interface MemoryRetrieveQuery {

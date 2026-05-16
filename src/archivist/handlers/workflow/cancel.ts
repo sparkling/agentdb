@@ -17,12 +17,8 @@
 // Type-enforcement: `ctx.substrate.withWrite` is the only path through which
 // workflow state may transition; direct fs writes are forbidden.
 
-import {
-  registerMutationHandler,
-  type GuardedWrite,
-  type MutationContext,
-  type StoreId,
-} from '../../index.js';
+import { registerMutationHandler } from '../../registration.js';
+import type { GuardedWrite, MutationContext, StoreId } from '../../index.js';
 import type { WorkflowStore } from './shared.js';
 
 /** Mutation payload for workflow_cancel. `workflowId` required;

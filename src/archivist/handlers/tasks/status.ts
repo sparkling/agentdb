@@ -12,13 +12,10 @@
 // No fields are written; the handler reads `store` and surfaces the record
 // via `ctx` side-channel resolution at the dispatch wire-up callsite (Phase 7+).
 
-import {
-  registerMutationHandler,
-  type GuardedWrite,
-  type MutationContext,
-  type StoreId,
-} from '../../index.js';
+import { registerMutationHandler } from '../../registration.js';
+import type { GuardedWrite, MutationContext, StoreId } from '../../index.js';
 import type { TaskStore } from './shared.js';
+import { taskStatusInvariants } from '../../invariants/tasks/index.js';
 
 export interface TaskStatusPayload {
   readonly taskId: string;
@@ -55,7 +52,7 @@ export const taskStatusHandler: GuardedWrite<TaskStatusPayload> =
       });
     },
     {
-      invariants: [],
+      invariants: taskStatusInvariants,
       cacheScope: 'store',
     },
   );

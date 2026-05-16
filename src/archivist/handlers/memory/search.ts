@@ -37,7 +37,8 @@
 // memory-tools.ts:397-583 stays authoritative until Phase 4 flips the dispatch
 // boundary.
 
-import { registerReadHandler, type GuardedRead, type ReadContext, type StoreId } from '../../index.js';
+import { registerReadHandler } from '../../registration.js';
+import type { GuardedRead, ReadContext, StoreId } from '../../index.js';
 
 export interface MemorySearchQuery {
   readonly namespace?: string;

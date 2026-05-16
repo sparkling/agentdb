@@ -67,11 +67,13 @@
 import {
   registerMutationHandler,
   registerReadHandler,
-  type GuardedRead,
-  type GuardedWrite,
-  type MutationContext,
-  type ReadContext,
-  type StoreId,
+} from '../../registration.js';
+import type {
+  GuardedRead,
+  GuardedWrite,
+  MutationContext,
+  ReadContext,
+  StoreId,
 } from '../../index.js';
 
 /**

@@ -8,13 +8,10 @@
 // handler (lines 295-330). The cli callsite stays in place until Phase 7+
 // flips the dispatch wire-up.
 
-import {
-  registerMutationHandler,
-  type GuardedWrite,
-  type MutationContext,
-  type StoreId,
-} from '../../index.js';
+import { registerMutationHandler } from '../../registration.js';
+import type { GuardedWrite, MutationContext, StoreId } from '../../index.js';
 import type { TaskRecord, TaskStore } from './shared.js';
+import { taskUpdateInvariants } from '../../invariants/tasks/index.js';
 
 export interface TaskUpdatePayload {
   readonly taskId: string;
@@ -59,7 +56,7 @@ export const taskUpdateHandler: GuardedWrite<TaskUpdatePayload> =
       });
     },
     {
-      invariants: [],
+      invariants: taskUpdateInvariants,
       cacheScope: 'store',
     },
   );

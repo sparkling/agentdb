@@ -28,12 +28,8 @@
 // `cacheScope: 'global'` (rather than namespace-bucketed) is the correct
 // granularity — there is no caller-supplied key to scope against.
 
-import {
-  registerMutationHandler,
-  type GuardedWrite,
-  type MutationContext,
-  type StoreId,
-} from '../../index.js';
+import { registerMutationHandler } from '../../registration.js';
+import type { GuardedWrite, MutationContext, StoreId } from '../../index.js';
 
 /**
  * Mutation payload for the daemon-scheduled performance-optimize worker.

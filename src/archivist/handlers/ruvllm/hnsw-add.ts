@@ -17,11 +17,8 @@
 // to a non-existent router is a caller bug, not a silent no-op. The cli callsite
 // stays in place until the dispatch boundary is wired through cli (Phase 7+).
 
-import {
-  registerMutationHandler,
-  type GuardedWrite,
-  type MutationContext,
-} from '../../index.js';
+import { registerMutationHandler } from '../../registration.js';
+import type { GuardedWrite, MutationContext } from '../../index.js';
 import { RUVLLM_HNSW_STORE_ID, type RuvllmHnswStore } from './shared.js';
 
 export interface RuvllmHnswAddPayload {

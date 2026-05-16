@@ -28,12 +28,8 @@
 // Type-enforcement: `ctx.substrate.withWrite` is the only path through which
 // templates or workflows may be inserted via this handler.
 
-import {
-  registerMutationHandler,
-  type GuardedWrite,
-  type MutationContext,
-  type StoreId,
-} from '../../index.js';
+import { registerMutationHandler } from '../../registration.js';
+import type { GuardedWrite, MutationContext, StoreId } from '../../index.js';
 import type { WorkflowRecord, WorkflowStore } from './shared.js';
 
 /** Template action discriminator — matches the cli inputSchema enum. */

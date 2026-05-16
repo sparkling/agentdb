@@ -45,7 +45,8 @@ import { existsSync, readdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
-import { registerReadHandler, type GuardedRead, type ReadContext } from '../../index.js';
+import { registerReadHandler } from '../../registration.js';
+import type { GuardedRead, ReadContext } from '../../index.js';
 import type { RankedResult, RankedResults } from './search.js';
 
 export interface MemoryBridgeStatusQuery {

@@ -16,12 +16,8 @@
 // Both paths terminate in `saveConfigStore(store)`, which routes the
 // `__shape`-preserving write the substrate now owns.
 
-import {
-  registerMutationHandler,
-  type GuardedWrite,
-  type MutationContext,
-  type StoreId,
-} from '../../index.js';
+import { registerMutationHandler } from '../../registration.js';
+import type { GuardedWrite, MutationContext, StoreId } from '../../index.js';
 
 import type { ConfigScope } from './set.js';
 import {

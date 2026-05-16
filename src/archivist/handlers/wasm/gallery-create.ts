@@ -30,11 +30,8 @@
 // instantiates the FS-JSON store via `makeFsJsonSubstrate` from
 // `archivist/substrates`.
 
-import {
-  registerMutationHandler,
-  type GuardedWrite,
-  type MutationContext,
-} from '../../index.js';
+import { registerMutationHandler } from '../../registration.js';
+import type { GuardedWrite, MutationContext } from '../../index.js';
 import {
   WASM_STORE_ID,
   WASM_STORE_KEY,

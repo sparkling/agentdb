@@ -24,12 +24,8 @@
 // timeout option during wire-up; until then the cli wrapper continues to own
 // the timeout semantics.
 
-import {
-  registerMutationHandler,
-  type GuardedWrite,
-  type MutationContext,
-  type StoreId,
-} from '../../index.js';
+import { registerMutationHandler } from '../../registration.js';
+import type { GuardedWrite, MutationContext, StoreId } from '../../index.js';
 
 /**
  * Mutation payload mirroring the CLI tool's `agentdb_reflexion-store` input

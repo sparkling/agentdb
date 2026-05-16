@@ -32,12 +32,8 @@
 // worker writes under one cross-process O_EXCL sentinel lock — this handler
 // holds the substrate seam for the benchmark worker.
 
-import {
-  registerMutationHandler,
-  type GuardedWrite,
-  type MutationContext,
-  type StoreId,
-} from '../../index.js';
+import { registerMutationHandler } from '../../registration.js';
+import type { GuardedWrite, MutationContext, StoreId } from '../../index.js';
 
 /**
  * Mutation payload for the daemon-scheduled benchmark worker.

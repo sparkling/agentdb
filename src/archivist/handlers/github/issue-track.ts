@@ -18,11 +18,8 @@
 // semantics. The cli callsite stays in place until Phase 7+ removes the
 // legacy path.
 
-import {
-  registerMutationHandler,
-  type GuardedWrite,
-  type MutationContext,
-} from '../../index.js';
+import { registerMutationHandler } from '../../registration.js';
+import type { GuardedWrite, MutationContext } from '../../index.js';
 import {
   GITHUB_STORE_ID,
   emptyGitHubStore,

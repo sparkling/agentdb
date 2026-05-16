@@ -13,13 +13,10 @@
 // migrator preserves the side-effect but routes it through the archivist's
 // audit chain (each store's write emits its own intent → applied entry).
 
-import {
-  registerMutationHandler,
-  type GuardedWrite,
-  type MutationContext,
-  type StoreId,
-} from '../../index.js';
+import { registerMutationHandler } from '../../registration.js';
+import type { GuardedWrite, MutationContext, StoreId } from '../../index.js';
 import type { TaskAgentStore, TaskStore } from './shared.js';
+import { completeInvariants } from '../../invariants/tasks/complete.js';
 
 export interface TaskCompletePayload {
   readonly taskId: string;
@@ -86,7 +83,7 @@ export const taskCompleteHandler: GuardedWrite<TaskCompletePayload> =
       });
     },
     {
-      invariants: [],
+      invariants: completeInvariants,
       cacheScope: 'store',
     },
   );

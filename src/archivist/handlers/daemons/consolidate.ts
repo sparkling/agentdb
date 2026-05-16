@@ -80,12 +80,8 @@
 // chain records a single `consolidation.applied` entry covering all four
 // artifacts, not four separate intents.
 
-import {
-  registerMutationHandler,
-  type GuardedWrite,
-  type MutationContext,
-  type StoreId,
-} from '../../index.js';
+import { registerMutationHandler } from '../../registration.js';
+import type { GuardedWrite, MutationContext, StoreId } from '../../index.js';
 
 /**
  * Mutation payload for daemon-scheduled consolidation passes (ADR-0180

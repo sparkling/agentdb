@@ -11,12 +11,8 @@
 // flips the dispatch wire-up; this file establishes the registration shape
 // the dispatch path will resolve.
 
-import {
-  registerMutationHandler,
-  type GuardedWrite,
-  type MutationContext,
-  type StoreId,
-} from '../../index.js';
+import { registerMutationHandler } from '../../registration.js';
+import type { GuardedWrite, MutationContext, StoreId } from '../../index.js';
 import type { TaskRecord, TaskStore } from './shared.js';
 import { createInvariants } from '../../invariants/tasks/create.js';
 

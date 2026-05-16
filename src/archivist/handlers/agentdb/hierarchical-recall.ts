@@ -58,7 +58,8 @@
 // rather than namespacing per-call — the tier filter is a payload field, not a
 // cache partition.
 
-import { registerReadHandler, type GuardedRead, type ReadContext, type StoreId } from '../../index.js';
+import { registerReadHandler } from '../../registration.js';
+import type { GuardedRead, ReadContext, StoreId } from '../../index.js';
 import type { RankedResult, RankedResults } from '../memory/search.js';
 
 export interface AgentdbHierarchicalRecallQuery {

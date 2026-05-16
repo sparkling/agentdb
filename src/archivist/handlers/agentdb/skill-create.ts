@@ -22,12 +22,8 @@
 // (not namespaced by user/agent) — creation invalidates skill-listing reads
 // regardless of caller namespace.
 
-import {
-  registerMutationHandler,
-  type GuardedWrite,
-  type MutationContext,
-  type StoreId,
-} from '../../index.js';
+import { registerMutationHandler } from '../../registration.js';
+import type { GuardedWrite, MutationContext, StoreId } from '../../index.js';
 
 /**
  * Mutation payload mirroring the CLI tool's `agentdb_skill_create` input

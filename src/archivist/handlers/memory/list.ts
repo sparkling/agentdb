@@ -28,7 +28,8 @@
 // no entries ever exist to enumerate. The cli's tool handler at memory-tools.ts
 // :646-718 stays authoritative until Phase 4 flips the dispatch boundary.
 
-import { registerReadHandler, type GuardedRead, type ReadContext, type StoreId } from '../../index.js';
+import { registerReadHandler } from '../../registration.js';
+import type { GuardedRead, ReadContext, StoreId } from '../../index.js';
 import type { RankedResult, RankedResults } from './search.js';
 
 export interface MemoryListQuery {

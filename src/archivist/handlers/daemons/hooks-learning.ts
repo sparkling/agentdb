@@ -68,12 +68,8 @@
 // shared with sibling daemon worker handlers under one cross-process O_EXCL
 // sentinel lock (ADR-0180 §Type enforcement, substrate-internal.ts seam).
 
-import {
-  registerMutationHandler,
-  type GuardedWrite,
-  type MutationContext,
-  type StoreId,
-} from '../../index.js';
+import { registerMutationHandler } from '../../registration.js';
+import type { GuardedWrite, MutationContext, StoreId } from '../../index.js';
 
 /**
  * Mutation payload for the 60-second hooks-learning consolidation pass.

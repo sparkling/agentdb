@@ -22,12 +22,8 @@
 // store-tree code is forbidden by the `no-restricted-imports` backstop and
 // the path-restricted substrate-internal.ts seam (ADR-0180 §Type enforcement).
 
-import {
-  registerMutationHandler,
-  type GuardedWrite,
-  type MutationContext,
-  type StoreId,
-} from '../../index.js';
+import { registerMutationHandler } from '../../registration.js';
+import type { GuardedWrite, MutationContext, StoreId } from '../../index.js';
 import type { WorkflowRecord, WorkflowStep, WorkflowStore } from './shared.js';
 
 /** Workflow run options — mirrors the cli inputSchema. `dryRun=true` short-circuits

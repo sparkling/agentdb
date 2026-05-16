@@ -52,7 +52,8 @@
 // populate GNNService in-process pattern caches without invoking MutationGuard
 // — those writes die with the process.
 
-import { registerReadHandler, type GuardedRead, type ReadContext, type StoreId } from '../../index.js';
+import { registerReadHandler } from '../../registration.js';
+import type { GuardedRead, ReadContext, StoreId } from '../../index.js';
 import type { RankedResult, RankedResults } from '../memory/search.js';
 
 /**

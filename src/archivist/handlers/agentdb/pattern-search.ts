@@ -37,7 +37,8 @@
 // without invoking MutationGuard — those writes die with the process and are
 // reflected in `ctx.cacheHints.wrote_cache` as advisory observability.
 
-import { registerReadHandler, type GuardedRead, type ReadContext } from '../../index.js';
+import { registerReadHandler } from '../../registration.js';
+import type { GuardedRead, ReadContext } from '../../index.js';
 import type { RankedResult, RankedResults } from '../memory/search.js';
 
 /**

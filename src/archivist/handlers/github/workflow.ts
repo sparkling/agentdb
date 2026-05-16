@@ -20,12 +20,8 @@
 // touched). The cli callsite stays in place until Phase 7+ removes the
 // legacy path.
 
-import {
-  registerMutationHandler,
-  type GuardedWrite,
-  type MutationContext,
-  type StoreId,
-} from '../../index.js';
+import { registerMutationHandler } from '../../registration.js';
+import type { GuardedWrite, MutationContext, StoreId } from '../../index.js';
 
 /** Mutation payload — discriminated by `action`. Mirrors the four action
  *  branches at cli `github_workflow`. `workflowId` carries the same

@@ -10,13 +10,10 @@
 // happens at the dispatch wire-up callsite (Phase 7+) — this handler only
 // surfaces the consistent snapshot under the audit chain.
 
-import {
-  registerMutationHandler,
-  type GuardedWrite,
-  type MutationContext,
-  type StoreId,
-} from '../../index.js';
+import { registerMutationHandler } from '../../registration.js';
+import type { GuardedWrite, MutationContext, StoreId } from '../../index.js';
 import type { TaskRecord, TaskStore } from './shared.js';
+import { listInvariants } from '../../invariants/tasks/list.js';
 
 export interface TaskListPayload {
   readonly status?: string;
@@ -47,7 +44,7 @@ export const taskListHandler: GuardedWrite<TaskListPayload> =
       });
     },
     {
-      invariants: [],
+      invariants: listInvariants,
       cacheScope: 'store',
     },
   );

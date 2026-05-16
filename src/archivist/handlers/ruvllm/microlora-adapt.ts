@@ -17,11 +17,8 @@
 // instance; per `feedback-no-fallbacks` this handler fails loud instead. The cli
 // callsite stays in place until the dispatch boundary is wired through cli (Phase 7+).
 
-import {
-  registerMutationHandler,
-  type GuardedWrite,
-  type MutationContext,
-} from '../../index.js';
+import { registerMutationHandler } from '../../registration.js';
+import type { GuardedWrite, MutationContext } from '../../index.js';
 import { RUVLLM_MICROLORA_STORE_ID, type RuvllmMicroLoraStore } from './shared.js';
 
 export interface RuvllmMicroLoraAdaptPayload {

@@ -13,13 +13,10 @@
 // Pre-existing CLI surface: `cli/src/mcp-tools/task-tools.ts` `task_assign`
 // handler (lines 345-414). Cli callsite stays in place until Phase 7+.
 
-import {
-  registerMutationHandler,
-  type GuardedWrite,
-  type MutationContext,
-  type StoreId,
-} from '../../index.js';
+import { registerMutationHandler } from '../../registration.js';
+import type { GuardedWrite, MutationContext, StoreId } from '../../index.js';
 import type { TaskAgentStore, TaskStore } from './shared.js';
+import { assignInvariants } from '../../invariants/tasks/assign.js';
 
 export interface TaskAssignPayload {
   readonly taskId: string;
@@ -103,7 +100,7 @@ export const taskAssignHandler: GuardedWrite<TaskAssignPayload> =
       });
     },
     {
-      invariants: [],
+      invariants: assignInvariants,
       cacheScope: 'store',
     },
   );

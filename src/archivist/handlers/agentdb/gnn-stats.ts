@@ -24,7 +24,8 @@
 // returns the legacy cli response shape so the cli wrapper at
 // `agentdb-tools.ts:1992` can surface it verbatim.
 
-import { registerReadHandler, type GuardedRead, type ReadContext } from '../../index.js';
+import { registerReadHandler } from '../../registration.js';
+import type { GuardedRead, ReadContext } from '../../index.js';
 
 /**
  * Input payload — mirrors the cli `agentdb_neural_patterns` `'stats'`-action

@@ -30,12 +30,8 @@
 // scoping must be applied at that call site (the cli wrapper is the
 // canonical boundary).
 
-import {
-  registerMutationHandler,
-  type GuardedWrite,
-  type MutationContext,
-  type StoreId,
-} from '../../index.js';
+import { registerMutationHandler } from '../../registration.js';
+import type { GuardedWrite, MutationContext, StoreId } from '../../index.js';
 import { storeInvariants } from '../../invariants/memory/store.js';
 
 export interface MemoryStorePayload {

@@ -23,7 +23,8 @@
 // `'global'` because the router trajectory is process-global rather than
 // namespaced — the input string is the only cache partition.
 
-import { registerReadHandler, type GuardedRead, type ReadContext, type StoreId } from '../../index.js';
+import { registerReadHandler } from '../../registration.js';
+import type { GuardedRead, ReadContext, StoreId } from '../../index.js';
 import type { RankedResult, RankedResults } from '../memory/search.js';
 
 export interface AgentdbSemanticRouteQuery {

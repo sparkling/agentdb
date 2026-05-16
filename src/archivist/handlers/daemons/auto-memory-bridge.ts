@@ -41,12 +41,12 @@
 // audit-chain records a single intent → applied transition per tick rather
 // than three independent ones.
 
-import {
-  registerMutationHandler,
-  type BulkIntent,
-  type GuardedWrite,
-  type MutationContext,
-  type StoreId,
+import { registerMutationHandler } from '../../registration.js';
+import type {
+  BulkIntent,
+  GuardedWrite,
+  MutationContext,
+  StoreId,
 } from '../../index.js';
 import { createHash } from 'node:crypto';
 

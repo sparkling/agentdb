@@ -22,7 +22,8 @@
 // the resolved `Float32Array` directly. This handler asks the capability for the
 // embedding — provider negotiation lives in the wiring point, not here.
 
-import { registerReadHandler, type GuardedRead, type ReadContext } from '../../index.js';
+import { registerReadHandler } from '../../registration.js';
+import type { GuardedRead, ReadContext } from '../../index.js';
 
 /** Input mirroring `agentdb-tools.ts` `agentdb_embed` schema — single required `text` field. */
 export interface AgentdbEmbedQuery {

@@ -18,11 +18,8 @@
 // `registerMutationHandler` produces a branded value that the store barrel's
 // `Record<string, GuardedWrite<any> | GuardedRead<any, any>>` typing accepts.
 
-import {
-  registerMutationHandler,
-  type GuardedWrite,
-  type MutationContext,
-} from '../../index.js';
+import { registerMutationHandler } from '../../registration.js';
+import type { GuardedWrite, MutationContext } from '../../index.js';
 import {
   GITHUB_STORE_ID,
   emptyGitHubStore,

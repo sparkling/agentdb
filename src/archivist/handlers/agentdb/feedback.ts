@@ -23,12 +23,8 @@
 // `cacheScope: 'namespace'` because feedback writes are per-agent/per-task
 // scoped — global cache invalidation would over-flush across unrelated agents.
 
-import {
-  registerMutationHandler,
-  type GuardedWrite,
-  type MutationContext,
-  type StoreId,
-} from '../../index.js';
+import { registerMutationHandler } from '../../registration.js';
+import type { GuardedWrite, MutationContext, StoreId } from '../../index.js';
 import { feedbackInvariants } from '../../invariants/agentdb/feedback.js';
 
 /**

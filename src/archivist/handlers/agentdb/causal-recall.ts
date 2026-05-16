@@ -64,7 +64,8 @@
 // payload (no such flag exists in the current `agentdb_causal-recall` schema;
 // ADR-0033 α/β/γ weights are CausalRecall instance-config, not per-call).
 
-import { registerReadHandler, type GuardedRead, type ReadContext, type StoreId } from '../../index.js';
+import { registerReadHandler } from '../../registration.js';
+import type { GuardedRead, ReadContext, StoreId } from '../../index.js';
 import type { RankedResult, RankedResults } from '../memory/search.js';
 
 const STORE_ID = 'agentdb_causal_recall' as StoreId;

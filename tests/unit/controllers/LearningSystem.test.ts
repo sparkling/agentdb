@@ -3,32 +3,41 @@
  *
  * Tests reinforcement learning session management, action prediction, and policy training.
  *
- * ADR-0170 Phase B.6: ported from better-sqlite3 to PostgresBackend
- * (pglite-embedded). Each test gets a fresh ephemeral pglite cluster
- * under `os.tmpdir()`; the singleton-cache is reset between tests so
- * sequential specs each construct against their own backend.
+ * ADR-0181 Item 5 (2026-05-16): reverted from PostgresBackend (pglite,
+ * ADR-0170 Phase B.6) back to better-sqlite3 per ADR-0177. Each test gets
+ * a fresh `:memory:` SQLite database loaded with the production schema.sql
+ * (same file AgentDB.loadSchemas reads at boot — drift prevention). The
+ * singleton-cache is reset between tests so sequential specs each construct
+ * against their own database handle.
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { LearningSystem, ActionFeedback } from '../../../src/controllers/LearningSystem.js';
 import { EmbeddingService } from '../../../src/controllers/EmbeddingService.js';
-import { PostgresBackend } from '../../../src/backends/postgres/PostgresBackend.js';
+import Database from 'better-sqlite3';
 import * as fs from 'fs';
-import * as os from 'os';
 import * as path from 'path';
+import { fileURLToPath } from 'url';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const SCHEMA_SQL = fs.readFileSync(
+  path.join(__dirname, '../../../src/schemas/schema.sql'),
+  'utf-8',
+);
 
 describe('LearningSystem', () => {
-  let backend: PostgresBackend;
+  let db: InstanceType<typeof Database>;
   let embedder: EmbeddingService;
   let learning: LearningSystem;
-  let dataDir: string;
 
   beforeEach(async () => {
     LearningSystem._resetSingleton();
-    dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'learning-system-test-'));
 
-    backend = new PostgresBackend({ metric: 'cosine', dataDir });
-    await backend.initialize();
+    db = new Database(':memory:');
+    // Load the production schema — same file AgentDB.loadSchemas reads at
+    // boot. Reading it directly (rather than duplicating DDL inline) catches
+    // future schema drift between the test setup and the production wiring.
+    db.exec(SCHEMA_SQL);
 
     embedder = new EmbeddingService({
       model: 'mock-model',
@@ -37,23 +46,16 @@ describe('LearningSystem', () => {
     });
     await embedder.initialize();
 
-    learning = new LearningSystem(backend, embedder);
+    learning = new LearningSystem(db, embedder);
   });
 
   afterEach(async () => {
     try {
-      backend.close();
+      db.close();
     } catch {
       /* best-effort */
     }
     LearningSystem._resetSingleton();
-    try {
-      if (dataDir && fs.existsSync(dataDir)) {
-        fs.rmSync(dataDir, { recursive: true, force: true });
-      }
-    } catch {
-      /* best-effort */
-    }
   });
 
   describe('startSession', () => {
@@ -103,8 +105,7 @@ describe('LearningSystem', () => {
         discountFactor: 0.9,
       });
 
-      const result = await backend.query('SELECT * FROM learning_sessions WHERE id = $1', [sessionId]);
-      const session = result.rows[0];
+      const session = db.prepare('SELECT * FROM learning_sessions WHERE id = ?').get(sessionId);
 
       expect(session).toBeDefined();
     });
@@ -119,8 +120,7 @@ describe('LearningSystem', () => {
 
       await learning.endSession(sessionId);
 
-      const result = await backend.query('SELECT * FROM learning_sessions WHERE id = $1', [sessionId]);
-      const session = result.rows[0] as any;
+      const session = db.prepare('SELECT * FROM learning_sessions WHERE id = ?').get(sessionId) as any;
 
       expect(session.status).toBe('completed');
       expect(session.end_time).toBeDefined();
@@ -238,12 +238,11 @@ describe('LearningSystem', () => {
 
       await learning.submitFeedback(feedback);
 
-      const result = await backend.query(
-        'SELECT * FROM learning_experiences WHERE session_id = $1',
-        [sessionId],
-      );
+      const rows = db.prepare(
+        'SELECT * FROM learning_experiences WHERE session_id = ?',
+      ).all(sessionId);
 
-      expect(result.rows.length).toBe(1);
+      expect(rows.length).toBe(1);
     });
   });
 
@@ -278,7 +277,14 @@ describe('LearningSystem', () => {
       expect(result.avgReward).toBeGreaterThanOrEqual(0);
       expect(result.convergenceRate).toBeGreaterThanOrEqual(0);
       expect(result.convergenceRate).toBeLessThanOrEqual(1);
-      expect(result.trainingTimeMs).toBeGreaterThan(0);
+      // ADR-0181 Item 5 (post-pglite -> SQLite): synchronous prepare/run
+      // can complete in <1ms wall-clock so Date.now() rounds to 0. The
+      // postgres async path always crossed the ms boundary; SQLite doesn't.
+      // Semantic intent of this assertion was "training actually ran"
+      // — already verified by epochsCompleted === 5 and finalLoss >= 0.
+      // Relax to non-negative: keeps the contract that we record a
+      // duration without false-positive failing on fast in-memory SQLite.
+      expect(result.trainingTimeMs).toBeGreaterThanOrEqual(0);
     }, 10000);
 
     it('should improve policy over epochs', async () => {
@@ -511,5 +517,84 @@ describe('LearningSystem', () => {
 
       expect(duration).toBeLessThan(3000); // Should complete in less than 3 seconds
     }, 10000);
+  });
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // ADR-0181 Item 5 commit 5/5: cli adapter round-trip shape coverage.
+  //
+  // The cli `makeCliLearningSystemWriter` (forks/ruflo
+  // archivist-init.ts:596) drives LearningSystem with the b5 probe payload
+  // shape `{task, success, reward}`. These tests assert the full round-trip
+  // — startSession + recordExperience — using the SAME signatures the cli
+  // adapter calls. If LearningSystem's surface ever drifts (param order,
+  // required fields, return type), these tests catch it before the b5
+  // learningSystem probe at acceptance-adr0090-b5-checks.sh:1346 reverts to
+  // skip_accepted.
+  // ─────────────────────────────────────────────────────────────────────────
+  describe('cli adapter round-trip', () => {
+    it('startSession with default cli params returns string sessionId', async () => {
+      const sessionId = await learning.startSession(
+        'archivist-default',
+        'q-learning',
+        { learningRate: 0.1, discountFactor: 0.9, explorationRate: 0.1 },
+      );
+
+      expect(typeof sessionId).toBe('string');
+      expect(sessionId).toMatch(/^session-/);
+    });
+
+    it('recordExperience({sessionId, toolName, action, outcome, ...}) lands row in learning_experiences', async () => {
+      // Mirror the cli adapter's exact call sequence (post-Item-5 commit 4).
+      const sessionId = await learning.startSession(
+        'archivist-default',
+        'q-learning',
+        { learningRate: 0.1, discountFactor: 0.9, explorationRate: 0.1 },
+      );
+
+      const taskMarker = `b5-roundtrip-${Date.now()}`;
+      const insertedId = await learning.recordExperience({
+        sessionId,
+        toolName: 'archivist',
+        action: taskMarker,
+        outcome: taskMarker,
+        reward: 0.75,
+        success: true,
+        metadata: { input: 'test-input', output: 'test-output' },
+      });
+
+      // The b5 probe greps `learning_experiences.action LIKE '%marker%'`
+      // — the controller writes `outcome` into INSERT slot 3 (the `action`
+      // column at LearningSystem.ts:1346). Verify that mapping survives.
+      const row = db.prepare(
+        `SELECT * FROM learning_experiences WHERE session_id = ? AND action = ?`,
+      ).get(sessionId, taskMarker) as any;
+
+      expect(row).toBeDefined();
+      expect(row.action).toBe(taskMarker);
+      expect(row.reward).toBe(0.75);
+      expect(row.success).toBe(1);
+      expect(typeof insertedId).toBe('number');
+      expect(insertedId).toBeGreaterThan(0);
+    });
+
+    it('FK enforcement: recordExperience without prior startSession would violate FK (sanity)', async () => {
+      // This documents the constraint. The cli adapter MUST call
+      // startSession first. Calling recordExperience with a fabricated
+      // sessionId that has no row in learning_sessions throws on FK.
+      // Note: PRAGMA foreign_keys must be ON for this to fire; the
+      // production schema.sql sets it at line 13. Verify it's on for
+      // this in-memory DB.
+      db.pragma('foreign_keys = ON');
+      await expect(
+        learning.recordExperience({
+          sessionId: 'no-such-session-id',
+          toolName: 'archivist',
+          action: 'orphan',
+          outcome: 'orphan',
+          reward: 0.5,
+          success: true,
+        }),
+      ).rejects.toThrow(/FOREIGN KEY/);
+    });
   });
 });

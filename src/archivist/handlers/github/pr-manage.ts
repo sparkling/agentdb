@@ -18,6 +18,7 @@
 
 import { registerMutationHandler } from '../../registration.js';
 import type { GuardedWrite, MutationContext } from '../../index.js';
+import { prManageInvariants } from '../../invariants/github/pr-manage.js';
 import {
   GITHUB_STORE_ID,
   emptyGitHubStore,
@@ -110,7 +111,7 @@ export const githubPrManageHandler: GuardedWrite<GithubPrManagePayload> =
       });
     },
     {
-      invariants: [], // wired by invariants-author per ADR-0180 §Mutation invariants
+      invariants: prManageInvariants,
       cacheScope: 'store',
     },
   );

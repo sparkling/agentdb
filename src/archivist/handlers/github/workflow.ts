@@ -22,6 +22,7 @@
 
 import { registerMutationHandler } from '../../registration.js';
 import type { GuardedWrite, MutationContext, StoreId } from '../../index.js';
+import { workflowInvariants } from '../../invariants/github/workflow.js';
 
 /** Mutation payload — discriminated by `action`. Mirrors the four action
  *  branches at cli `github_workflow`. `workflowId` carries the same
@@ -83,7 +84,7 @@ export const githubWorkflowHandler: GuardedWrite<GithubWorkflowPayload> =
       });
     },
     {
-      invariants: [], // wired by invariants-author per ADR-0180 §Mutation invariants
+      invariants: workflowInvariants,
       cacheScope: 'store',
     },
   );

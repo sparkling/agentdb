@@ -20,6 +20,7 @@
 
 import { registerMutationHandler } from '../../registration.js';
 import type { GuardedWrite, MutationContext } from '../../index.js';
+import { repoAnalyzeInvariants } from '../../invariants/github/repo-analyze.js';
 import {
   GITHUB_STORE_ID,
   emptyGitHubStore,
@@ -61,7 +62,7 @@ export const githubRepoAnalyzeHandler: GuardedWrite<GithubRepoAnalyzePayload> =
       });
     },
     {
-      invariants: [], // wired by invariants-author per ADR-0180 §Mutation invariants
+      invariants: repoAnalyzeInvariants,
       cacheScope: 'store',
     },
   );

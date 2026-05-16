@@ -20,6 +20,7 @@
 
 import { registerMutationHandler } from '../../registration.js';
 import type { GuardedWrite, MutationContext } from '../../index.js';
+import { issueTrackInvariants } from '../../invariants/github/issue-track.js';
 import {
   GITHUB_STORE_ID,
   emptyGitHubStore,
@@ -142,7 +143,7 @@ export const githubIssueTrackHandler: GuardedWrite<GithubIssueTrackPayload> =
       });
     },
     {
-      invariants: [], // wired by invariants-author per ADR-0180 §Mutation invariants
+      invariants: issueTrackInvariants,
       cacheScope: 'store',
     },
   );

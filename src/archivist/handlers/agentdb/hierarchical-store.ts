@@ -23,6 +23,7 @@
 
 import { registerMutationHandler } from '../../registration.js';
 import type { GuardedWrite, MutationContext, StoreId } from '../../index.js';
+import { hierarchicalStoreInvariants } from '../../invariants/agentdb/hierarchical-store.js';
 
 /**
  * Hierarchical memory tier — mirrors the cli enum constraint
@@ -89,7 +90,7 @@ export const storeHierarchicalHandler: GuardedWrite<AgentdbHierarchicalStorePayl
       });
     },
     {
-      invariants: [], // wired by invariants-author per ADR-0180 §Mutation invariants
+      invariants: hierarchicalStoreInvariants,
       cacheScope: 'namespace',
     },
   );

@@ -24,6 +24,7 @@
 
 import { registerMutationHandler } from '../../registration.js';
 import type { GuardedWrite, MutationContext, StoreId } from '../../index.js';
+import { skillCreateInvariants } from '../../invariants/agentdb/skill-create.js';
 
 /**
  * Mutation payload mirroring the CLI tool's `agentdb_skill_create` input
@@ -93,7 +94,7 @@ export const createSkillHandler: GuardedWrite<AgentdbSkillCreatePayload> =
       });
     },
     {
-      invariants: [], // wired by invariants-author per ADR-0180 §Mutation invariants
+      invariants: skillCreateInvariants,
       cacheScope: 'namespace',
     },
   );

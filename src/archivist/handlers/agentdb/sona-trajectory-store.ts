@@ -75,6 +75,7 @@ import type {
   ReadContext,
   StoreId,
 } from '../../index.js';
+import { sonaTrajectoryStoreInvariants } from '../../invariants/agentdb/sona-trajectory-store.js';
 
 /**
  * Discriminator for SonaTrajectoryService actions. `'record'` is the
@@ -146,7 +147,7 @@ export const storeSonaTrajectoryHandler: GuardedWrite<AgentdbSonaTrajectoryStore
       });
     },
     {
-      invariants: [], // wired by invariants-author per ADR-0180 §Mutation invariants
+      invariants: sonaTrajectoryStoreInvariants,
       cacheScope: 'namespace',
     },
   );

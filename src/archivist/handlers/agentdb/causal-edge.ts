@@ -60,6 +60,7 @@
 
 import { registerMutationHandler } from '../../registration.js';
 import type { GuardedWrite, MutationContext, StoreId } from '../../index.js';
+import { causalEdgeInvariants } from '../../invariants/agentdb/causal-edge.js';
 
 /**
  * Mutation payload mirroring the CLI tool's `agentdb_causal-edge` input shape
@@ -114,8 +115,7 @@ export const causalEdgeHandler: GuardedWrite<AgentdbCausalEdgePayload> =
       });
     },
     {
-      // Phase 8 partial — invariants left for invariants-author follow-up.
-      invariants: [],
+      invariants: causalEdgeInvariants,
       cacheScope: 'namespace',
     },
   );

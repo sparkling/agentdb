@@ -26,6 +26,7 @@
 
 import { registerMutationHandler } from '../../registration.js';
 import type { GuardedWrite, MutationContext, StoreId } from '../../index.js';
+import { reflexionStoreInvariants } from '../../invariants/agentdb/reflexion-store.js';
 
 /**
  * Mutation payload mirroring the CLI tool's `agentdb_reflexion-store` input
@@ -96,7 +97,7 @@ export const storeReflexionHandler: GuardedWrite<AgentdbReflexionStorePayload> =
       });
     },
     {
-      invariants: [], // wired by invariants-author per ADR-0180 §Mutation invariants
+      invariants: reflexionStoreInvariants,
       cacheScope: 'namespace',
     },
   );

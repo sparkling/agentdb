@@ -555,7 +555,12 @@ describe('LearningSystem', () => {
       const insertedId = await learning.recordExperience({
         sessionId,
         toolName: 'archivist',
-        action: taskMarker,
+        // Mirror the post-Item-5-Phase-2 cli adapter at archivist-init.ts:670
+        // — `action` is the stable activity tag, `outcome` is the per-call
+        // task marker. Asserts the field-map invariant the b5 probe depends
+        // on: SQLite `action` column receives method param `outcome`, NOT
+        // method param `action` (LearningSystem.ts:1238 INSERT binding).
+        action: 'experience-record',
         outcome: taskMarker,
         reward: 0.75,
         success: true,
@@ -565,6 +570,9 @@ describe('LearningSystem', () => {
       // The b5 probe greps `learning_experiences.action LIKE '%marker%'`
       // — the controller writes `outcome` into INSERT slot 3 (the `action`
       // column at LearningSystem.ts:1346). Verify that mapping survives.
+      // Asserting `action = taskMarker` (NOT 'experience-record') is the
+      // exact field-map invariant — if anyone swaps the binding back, this
+      // test fails before the b5 probe silently regresses.
       const row = db.prepare(
         `SELECT * FROM learning_experiences WHERE session_id = ? AND action = ?`,
       ).get(sessionId, taskMarker) as any;
@@ -575,6 +583,13 @@ describe('LearningSystem', () => {
       expect(row.success).toBe(1);
       expect(typeof insertedId).toBe('number');
       expect(insertedId).toBeGreaterThan(0);
+
+      // Also verify the metadata JSON contains the OTHER field-map half:
+      // the method param `action` ('experience-record') is folded into the
+      // metadata blob alongside toolName.
+      const metadata = JSON.parse(row.metadata);
+      expect(metadata.action).toBe('experience-record');
+      expect(metadata.toolName).toBe('archivist');
     });
 
     it('FK enforcement: recordExperience without prior startSession would violate FK (sanity)', async () => {

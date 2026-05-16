@@ -33,6 +33,7 @@
 
 import { registerMutationHandler } from '../../registration.js';
 import type { GuardedWrite, MutationContext } from '../../index.js';
+import { terminateInvariants } from '../../invariants/wasm/terminate.js';
 import {
   WASM_STORE_ID,
   WASM_STORE_KEY,
@@ -80,7 +81,7 @@ export const terminateWasmAgentHandler: GuardedWrite<WasmAgentTerminatePayload> 
       });
     },
     {
-      invariants: [], // wired by invariants-author per ADR-0180 §Mutation invariants
+      invariants: terminateInvariants,
       cacheScope: 'global',
     },
   );

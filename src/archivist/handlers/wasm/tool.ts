@@ -30,6 +30,7 @@
 
 import { registerMutationHandler } from '../../registration.js';
 import type { GuardedWrite, MutationContext } from '../../index.js';
+import { toolInvariants } from '../../invariants/wasm/tool.js';
 import {
   WASM_STORE_ID,
   WASM_STORE_KEY,
@@ -81,7 +82,7 @@ export const wasmAgentToolHandler: GuardedWrite<WasmAgentToolPayload> =
       });
     },
     {
-      invariants: [], // wired by invariants-author per ADR-0180 §Mutation invariants
+      invariants: toolInvariants,
       cacheScope: 'global',
     },
   );

@@ -32,6 +32,7 @@
 
 import { registerMutationHandler } from '../../registration.js';
 import type { GuardedWrite, MutationContext } from '../../index.js';
+import { galleryCreateInvariants } from '../../invariants/wasm/gallery-create.js';
 import {
   WASM_STORE_ID,
   WASM_STORE_KEY,
@@ -80,7 +81,7 @@ export const createWasmGalleryHandler: GuardedWrite<WasmGalleryCreatePayload> =
       });
     },
     {
-      invariants: [], // wired by invariants-author per ADR-0180 §Mutation invariants
+      invariants: galleryCreateInvariants,
       cacheScope: 'global',
     },
   );

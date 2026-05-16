@@ -28,6 +28,7 @@
 
 import { registerMutationHandler } from '../../registration.js';
 import type { GuardedWrite, MutationContext } from '../../index.js';
+import { promptInvariants } from '../../invariants/wasm/prompt.js';
 import {
   WASM_STORE_ID,
   WASM_STORE_KEY,
@@ -79,7 +80,7 @@ export const promptWasmAgentHandler: GuardedWrite<WasmAgentPromptPayload> =
       });
     },
     {
-      invariants: [], // wired by invariants-author per ADR-0180 §Mutation invariants
+      invariants: promptInvariants,
       cacheScope: 'global',
     },
   );

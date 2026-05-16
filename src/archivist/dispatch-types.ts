@@ -180,6 +180,7 @@ export interface ToolPayloadMap {
   readonly agentdb_skill_create: AgentdbSkillCreatePayload;
   readonly agentdb_skill_search: AgentdbSkillSearchQuery;
   readonly agentdb_sona_trajectory_store: AgentdbSonaTrajectoryStorePayload;
+  readonly agentdb_sona_trajectory_stats: AgentdbSonaTrajectoryStorePayload;
 
   // agent_* (mutation)
   readonly agent_execute: AgentExecutePayload;

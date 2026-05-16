@@ -1,10 +1,16 @@
 // charter: dispatch
-// agentdb_sona_trajectory_store mutation + sibling read handlers
-// (ADR-0181 Item 6 wire-up, 2026-05-16). Both actions of the cli
-// `agentdb_sona_trajectory_store` MCP tool now flow through dispatch:
-// `'record'` lands on the mutation handler (audit-chain GuardedWrite),
-// `'stats'` lands on the sibling registerReadHandler at the bottom of
-// this file (returns SonaStats merged from in-memory + SQLite).
+// agentdb_sona_trajectory_store mutation + agentdb_sona_trajectory_stats
+// sibling read handler (ADR-0181 Item 6 wire-up, 2026-05-16; r2 split-
+// storeId fix below). Both actions of the cli `agentdb_sona_trajectory_store`
+// MCP tool flow through dispatch under DISTINCT storeIds:
+//   - `'record'` → archivist.dispatch('agentdb_sona_trajectory_store')
+//                  → mutation handler (audit-chain GuardedWrite)
+//   - `'stats'`  → archivist.dispatchRead('agentdb_sona_trajectory_stats')
+//                  → sibling read handler (returns SonaStats merged from
+//                    in-memory + SQLite)
+// Distinct-storeId pattern is required: see the read handler block at the
+// bottom of this file for the r2 root-cause analysis (getRegistration
+// returns mutation when both register under same name).
 //
 // Pre-existing CLI surface: `forks/ruflo/v3/@claude-flow/cli/src/mcp-tools/agentdb-tools.ts`
 // `agentdb_sona_trajectory_store` handler — validates `pattern` (non-empty,
@@ -110,7 +116,7 @@ export const storeSonaTrajectoryHandler: GuardedWrite<AgentdbSonaTrajectoryStore
       if (payload.action === 'stats') {
         throw new Error(
           'archivist: agentdb_sona_trajectory_store mutation — \'stats\' action is read-only; ' +
-            'caller must use dispatchRead, not dispatch (ADR-0181 Item 6 split).',
+            'caller must dispatchRead(\'agentdb_sona_trajectory_stats\') instead (ADR-0181 Item 6 r2 split).',
         );
       }
       const pattern = payload.pattern;
@@ -159,17 +165,27 @@ export interface AgentdbSonaTrajectoryStatsResult {
   readonly agentTypes: ReadonlyArray<string>;
 }
 
-// ADR-0181 Item 6 sibling read handler. Same storeId
-// (`agentdb_sona_trajectory_store`) — the dispatcher's read registry is a
-// separate namespace from the mutation registry, so co-registering under the
-// same name is the intended split-by-action pattern (matches the
-// `agentdb_neural_patterns` ('similar') vs `agentdb_gnn_stats` ('stats')
-// split landed in Item 2). Reads off the SonaTrajectoryReader capability,
-// which adapts the cli `getController('sonaTrajectory').getStats()` per call.
+// ADR-0181 Item 6 r2 (2026-05-16): the sibling read handler registers under
+// a DISTINCT storeId — `agentdb_sona_trajectory_stats` — NOT
+// `agentdb_sona_trajectory_store`. Initial Item 6 design co-registered
+// both under the same name on the assumption that the dispatcher's read
+// and mutation registries were separate namespaces; they ARE separate
+// Maps, but `getRegistration(name)` (registration.ts:150-156) checks
+// mutation FIRST and returns it when found. So
+// `dispatchRead('agentdb_sona_trajectory_store')` resolved the MUTATION
+// entry and threw "targets a mutation handler" at index.ts:858. Empirical
+// repro: r1 acceptance probe `adr0090-b5-sonaTrajectory` flipped skip→FAIL.
+// The distinct-storeId split-by-action pattern matches what Item 2 already
+// shipped (option (a) of b5-queen's verdict for that wire-up):
+//   mutation: `agentdb_neural_patterns`     (action='similar')
+//   read:     `agentdb_gnn_stats`            (action='stats', split-out)
+// Cli wrapper at agentdb-tools.ts routes action='stats' to the new
+// `_stats` storeId via dispatchRead and action='record' to the original
+// `_store` storeId via dispatch (mutation).
 export const readSonaTrajectoryStatsHandler:
   GuardedRead<AgentdbSonaTrajectoryStorePayload, AgentdbSonaTrajectoryStatsResult> =
   registerReadHandler<AgentdbSonaTrajectoryStorePayload, AgentdbSonaTrajectoryStatsResult>(
-    'agentdb_sona_trajectory_store',
+    'agentdb_sona_trajectory_stats',
     async (
       ctx: ReadContext,
       payload: AgentdbSonaTrajectoryStorePayload,
@@ -179,7 +195,7 @@ export const readSonaTrajectoryStatsHandler:
       // fail loud (`feedback-no-fallbacks`).
       if (payload.action && payload.action !== 'stats') {
         throw new Error(
-          `archivist: agentdb_sona_trajectory_store read — only 'stats' action is read-side, got '${String(payload.action)}'`,
+          `archivist: agentdb_sona_trajectory_stats read — only 'stats' action is read-side, got '${String(payload.action)}'`,
         );
       }
       const reader = ctx.capabilities.requireSonaTrajectoryReader();

@@ -18,6 +18,7 @@
 
 import { registerMutationHandler } from '../../registration.js';
 import type { GuardedWrite, MutationContext, StoreId } from '../../index.js';
+import { resetInvariants } from '../../invariants/config/reset.js';
 
 import type { ConfigScope } from './set.js';
 import {
@@ -110,7 +111,7 @@ export const configResetHandler: GuardedWrite<ConfigResetPayload> =
       });
     },
     {
-      invariants: [], // wired by invariants-author per ADR-0180 §Mutation invariants
+      invariants: resetInvariants,
       cacheScope: 'store',
     },
   );

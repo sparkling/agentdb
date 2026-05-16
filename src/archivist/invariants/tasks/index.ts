@@ -1,11 +1,28 @@
 // charter: mutation-invariants
 // Barrel re-export for the task_* mutation invariants (ADR-0180 §Architecture
-// · Mutation invariants). Wired today: task_create. The other task_* mutation
-// handlers (update, complete, assign, cancel) operate on existing TaskRecord
-// values minted by task_create; their range/well-formedness contract is
-// enforced at the create-time invariant gate plus the substrate's atomic
-// read-modify-write. They will gain per-handler invariants if a follow-up
-// pass needs intent-vs-recorded discrimination on partial updates.
+// · Mutation invariants + ADR-0181 §H). Per-handler invariants for update /
+// complete / assign / cancel / list / status landed in §H so intent-vs-
+// recorded discrimination + range/well-formedness coverage holds on partial
+// updates and read-shaped mutations (list/status run under withWrite per the
+// Phase 5 convention).
 
 export type { TaskCreatePayload } from './create.js';
 export { createInvariants } from './create.js';
+
+export type { TaskAssignPayload } from './assign.js';
+export { assignInvariants } from './assign.js';
+
+export type { TaskCancelPayload } from './cancel.js';
+export { cancelInvariants } from './cancel.js';
+
+export type { TaskCompletePayload } from './complete.js';
+export { completeInvariants } from './complete.js';
+
+export type { TaskListPayload } from './list.js';
+export { listInvariants } from './list.js';
+
+export type { TaskStatusPayload } from './status.js';
+export { statusInvariants as taskStatusInvariants } from './status.js';
+
+export type { TaskUpdatePayload } from './update.js';
+export { updateInvariants as taskUpdateInvariants } from './update.js';

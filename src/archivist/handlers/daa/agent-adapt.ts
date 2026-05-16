@@ -22,13 +22,14 @@
 // DAA state may mutate. Direct `fs.writeFileSync` on store.json is forbidden
 // by the path-restricted substrate-internal.ts seam (ADR-0180 §Type enforcement).
 
-import {
-  registerMutationHandler,
-  type GuardedWrite,
-  type MutationContext,
-  type StoreId,
+import { registerMutationHandler } from '../../registration.js';
+import type {
+  GuardedWrite,
+  MutationContext,
+  StoreId,
 } from '../../index.js';
 import { emptyDaaStore, type DaaStore } from './agent-create.js';
+import { agentAdaptInvariants } from '../../invariants/daa/agent-adapt.js';
 
 /**
  * Mutation payload mirroring the CLI tool's `daa_agent_adapt` input shape
@@ -97,7 +98,7 @@ export const daaAgentAdaptHandler: GuardedWrite<DaaAgentAdaptPayload> =
       });
     },
     {
-      invariants: [], // wired by invariants-author per ADR-0180 §Mutation invariants
+      invariants: agentAdaptInvariants,
       cacheScope: 'store',
     },
   );

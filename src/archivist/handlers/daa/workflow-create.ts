@@ -23,13 +23,14 @@
 // forbidden by the path-restricted substrate-internal.ts seam
 // (ADR-0180 §Type enforcement).
 
-import {
-  registerMutationHandler,
-  type GuardedWrite,
-  type MutationContext,
-  type StoreId,
+import { registerMutationHandler } from '../../registration.js';
+import type {
+  GuardedWrite,
+  MutationContext,
+  StoreId,
 } from '../../index.js';
 import { emptyDaaStore, type DaaStore } from './agent-create.js';
+import { workflowCreateInvariants } from '../../invariants/daa/workflow-create.js';
 
 /** Execution strategy — matches the cli inputSchema enum (daa-tools.ts:303). */
 export type DaaWorkflowStrategy = 'parallel' | 'sequential' | 'adaptive';
@@ -82,7 +83,7 @@ export const daaWorkflowCreateHandler: GuardedWrite<DaaWorkflowCreatePayload> =
       });
     },
     {
-      invariants: [], // wired by invariants-author per ADR-0180 §Mutation invariants
+      invariants: workflowCreateInvariants,
       cacheScope: 'store',
     },
   );

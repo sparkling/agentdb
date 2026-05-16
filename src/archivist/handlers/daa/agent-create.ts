@@ -22,12 +22,13 @@
 // by the `no-restricted-imports` backstop and the path-restricted
 // substrate-internal.ts seam (ADR-0180 §Type enforcement).
 
-import {
-  registerMutationHandler,
-  type GuardedWrite,
-  type MutationContext,
-  type StoreId,
+import { registerMutationHandler } from '../../registration.js';
+import type {
+  GuardedWrite,
+  MutationContext,
+  StoreId,
 } from '../../index.js';
+import { agentCreateInvariants } from '../../invariants/daa/agent-create.js';
 
 /** Cognitive pattern enum — matches the cli inputSchema enum (daa-tools.ts:162). */
 export type DaaCognitivePattern =
@@ -146,7 +147,7 @@ export const daaAgentCreateHandler: GuardedWrite<DaaAgentCreatePayload> =
       });
     },
     {
-      invariants: [], // wired by invariants-author per ADR-0180 §Mutation invariants
+      invariants: agentCreateInvariants,
       cacheScope: 'store',
     },
   );

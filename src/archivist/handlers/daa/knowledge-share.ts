@@ -25,13 +25,14 @@
 // (ADR-0180 §Type enforcement). The AgentDB tail-call is a separate substrate
 // (vector store) and registers its own mutation under `memory_store`.
 
-import {
-  registerMutationHandler,
-  type GuardedWrite,
-  type MutationContext,
-  type StoreId,
+import { registerMutationHandler } from '../../registration.js';
+import type {
+  GuardedWrite,
+  MutationContext,
+  StoreId,
 } from '../../index.js';
 import { emptyDaaStore, type DaaStore } from './agent-create.js';
+import { knowledgeShareInvariants } from '../../invariants/daa/knowledge-share.js';
 
 /**
  * Mutation payload mirroring the CLI tool's `daa_knowledge_share` input shape
@@ -89,7 +90,7 @@ export const daaKnowledgeShareHandler: GuardedWrite<DaaKnowledgeSharePayload> =
       });
     },
     {
-      invariants: [], // wired by invariants-author per ADR-0180 §Mutation invariants
+      invariants: knowledgeShareInvariants,
       cacheScope: 'store',
     },
   );

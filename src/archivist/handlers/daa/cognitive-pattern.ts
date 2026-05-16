@@ -27,13 +27,14 @@
 // is forbidden by the path-restricted substrate-internal.ts seam
 // (ADR-0180 §Type enforcement).
 
-import {
-  registerMutationHandler,
-  type GuardedWrite,
-  type MutationContext,
-  type StoreId,
+import { registerMutationHandler } from '../../registration.js';
+import type {
+  GuardedWrite,
+  MutationContext,
+  StoreId,
 } from '../../index.js';
 import { emptyDaaStore, type DaaCognitivePattern, type DaaStore } from './agent-create.js';
+import { cognitivePatternInvariants } from '../../invariants/daa/cognitive-pattern.js';
 
 /** Action discriminator — matches the cli inputSchema enum (daa-tools.ts:511). */
 export type DaaCognitivePatternAction = 'analyze' | 'change';
@@ -108,7 +109,7 @@ export const daaCognitivePatternHandler: GuardedWrite<DaaCognitivePatternPayload
       });
     },
     {
-      invariants: [], // wired by invariants-author per ADR-0180 §Mutation invariants
+      invariants: cognitivePatternInvariants,
       cacheScope: 'store',
     },
   );

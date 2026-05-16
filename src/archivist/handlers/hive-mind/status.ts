@@ -23,14 +23,19 @@
 // the same `makeFsJsonSubstrate` primitive that the mutation peers (spawn,
 // consensus, agents-json) use.
 
-import {
-  registerReadHandler,
-  type GuardedRead,
-  type ReadContext,
-  type StoreId,
+import { registerReadHandler } from '../../registration.js';
+import type {
+  GuardedRead,
+  ReadContext,
+  StoreId,
 } from '../../index.js';
 import type { RankedResult, RankedResults } from '../memory/search.js';
 import type { HiveStateDoc } from './hive-state.js';
+// Sibling invariant file at ../../invariants/hive-mind/status.ts ships
+// request-payload invariants as the contract spec. `RegisterReadOpts` does
+// NOT accept an `invariants` array today (registration.ts L46-48), so we
+// cannot pass them here — the file exists for the eventual ADR-0180 §Read-
+// path return-shape design landing.
 
 /** Query payload — mirrors the cli tool's inputSchema (line 1666-1670 of
  *  hive-mind-tools.ts). `verbose` adds workerDetails / consensusHistory /

@@ -28,14 +28,15 @@
 // O_EXCL sentinel lock subsumes the legacy `withHiveStoreLock` (ADR-0129 B1)
 // because the migrated wire-up routes both stores through the same primitive.
 
-import {
-  registerMutationHandler,
-  type GuardedWrite,
-  type MutationContext,
-  type StoreId,
+import { registerMutationHandler } from '../../registration.js';
+import type {
+  GuardedWrite,
+  MutationContext,
+  StoreId,
 } from '../../index.js';
 import type { AgentRecord } from './agents-json.js';
 import type { HiveStateDoc, HiveWorkerMeta } from './hive-state.js';
+import { hiveMindSpawnInvariants } from '../../invariants/hive-mind/index.js';
 
 /** Spawn action discriminator — matches the CLI inputSchema enum (ADR-0131 T12). */
 export type HiveMindSpawnAction = 'spawn' | 'retryTask';
@@ -235,7 +236,7 @@ export const spawnHiveMindHandler: GuardedWrite<HiveMindSpawnPayload> =
       });
     },
     {
-      invariants: [], // cross-store spawn invariant authored by invariants-author
+      invariants: hiveMindSpawnInvariants,
       cacheScope: 'global',
     },
   );

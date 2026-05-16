@@ -20,12 +20,13 @@
 // store-tree code is forbidden by the `no-restricted-imports` backstop and
 // the path-restricted substrate-internal.ts seam (ADR-0180 §Type enforcement).
 
-import {
-  registerMutationHandler,
-  type GuardedWrite,
-  type MutationContext,
-  type StoreId,
+import { registerMutationHandler } from '../../registration.js';
+import type {
+  GuardedWrite,
+  MutationContext,
+  StoreId,
 } from '../../index.js';
+import { agentsJsonInvariants } from '../../invariants/hive-mind/agents-json.js';
 
 /** Single agent record persisted under agents.json. Matches the structure
  *  produced by hive-mind_spawn / agent_spawn at the cli surface. */
@@ -86,7 +87,7 @@ export const agentsJsonHandler: GuardedWrite<AgentsJsonPayload> =
       });
     },
     {
-      invariants: [], // wired by invariants-author per ADR-0180 §Mutation invariants
+      invariants: agentsJsonInvariants,
       cacheScope: 'store',
     },
   );

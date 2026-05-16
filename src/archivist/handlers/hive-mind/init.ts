@@ -23,13 +23,14 @@
 // is no try/catch around the dispatch call site, no quiet fallback to
 // "init didn't reach substrate".
 
-import {
-  registerMutationHandler,
-  type GuardedWrite,
-  type MutationContext,
-  type StoreId,
+import { registerMutationHandler } from '../../registration.js';
+import type {
+  GuardedWrite,
+  MutationContext,
+  StoreId,
 } from '../../index.js';
 import type { HiveStateDoc } from './hive-state.js';
+import { initInvariants } from '../../invariants/hive-mind/init.js';
 
 /** Payload — the full HiveStateDoc the cli composed under `withHiveStoreLock`.
  *  Carrying the entire doc keeps the handler stateless: it owns no defaults,
@@ -67,5 +68,9 @@ export const initHiveMindHandler: GuardedWrite<HiveMindInitPayload> =
           payload: payload.state,
         });
       });
+    },
+    {
+      invariants: initInvariants,
+      cacheScope: 'global',
     },
   );

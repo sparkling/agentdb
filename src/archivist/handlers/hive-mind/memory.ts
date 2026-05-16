@@ -32,11 +32,11 @@
 // `no-restricted-imports` backstop and the path-restricted
 // substrate-internal.ts seam (ADR-0180 §Type enforcement).
 
-import {
-  registerMutationHandler,
-  type GuardedWrite,
-  type MutationContext,
-  type StoreId,
+import { registerMutationHandler } from '../../registration.js';
+import type {
+  GuardedWrite,
+  MutationContext,
+  StoreId,
 } from '../../index.js';
 import {
   HIVE_DEFAULT_TTL_MS_BY_TYPE,
@@ -46,6 +46,7 @@ import {
   isHiveEntryExpired,
   isHiveMemoryType,
 } from './hive-state.js';
+import { memoryInvariants } from '../../invariants/hive-mind/memory.js';
 
 /** Memory type — mirrors the cli's MemoryType union (ADR-0122 T4: 8 typed
  *  memory types from USERGUIDE). Required on `set`; optional filter on `list`. */
@@ -232,7 +233,12 @@ export const memoryHiveMindHandler: GuardedWrite<HiveMindMemoryPayload> =
       });
     },
     {
-      invariants: [], // get/list are conditionally-mutating; set/delete have no cross-call invariant
+      // Per-action range/well-formedness invariants now ship at the dispatch
+      // boundary (action ∈ enum, key length, type ∈ HIVE_MEMORY_TYPES, ttlMs ≥ 0).
+      // Cross-call snapshot invariants are still deferred — get/list are
+      // conditionally mutating so substrate-state monotonicity needs the
+      // ADR-0180 snapshot seam.
+      invariants: memoryInvariants,
       cacheScope: 'store',
     },
   );

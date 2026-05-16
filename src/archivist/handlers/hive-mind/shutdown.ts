@@ -29,13 +29,14 @@
 // `no-restricted-imports` backstop and the path-restricted
 // substrate-internal.ts seam (ADR-0180 §Type enforcement).
 
-import {
-  registerMutationHandler,
-  type GuardedWrite,
-  type MutationContext,
-  type StoreId,
+import { registerMutationHandler } from '../../registration.js';
+import type {
+  GuardedWrite,
+  MutationContext,
+  StoreId,
 } from '../../index.js';
 import type { HiveStateDoc } from './hive-state.js';
+import { shutdownInvariants } from '../../invariants/hive-mind/shutdown.js';
 
 /** Mutation payload mirroring the cli tool's input shape (hive-mind-tools.ts
  *  inputSchema lines 2854-2860). `graceful` defaults to true and `force`
@@ -97,13 +98,12 @@ export const shutdownHiveMindHandler: GuardedWrite<HiveMindShutdownPayload> =
       });
     },
     {
-      // The natural invariant here (post-shutdown state has initialized=false,
-      // zero workers, zero pending consensus) needs the substrate after-snapshot
-      // the dispatch boundary does not yet populate (index.ts passes
-      // `substrateStateAfter: undefined` pending the ADR-0180 snapshot wiring).
-      // Authoring it now would false-positive on every dispatch — left to
-      // invariants-author once the snapshot seam lands.
-      invariants: [],
+      // Range/well-formedness invariants on the request payload (graceful /
+      // force booleans) land at the dispatch boundary now. The post-shutdown
+      // state-shape invariant (initialized=false, zero workers, zero pending
+      // consensus) needs the after-snapshot the ADR-0180 snapshot seam will
+      // provide later.
+      invariants: shutdownInvariants,
       cacheScope: 'global',
     },
   );

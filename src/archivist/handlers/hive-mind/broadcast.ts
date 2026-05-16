@@ -23,13 +23,14 @@
 // the `no-restricted-imports` backstop and the path-restricted
 // substrate-internal.ts seam (ADR-0180 §Type enforcement).
 
-import {
-  registerMutationHandler,
-  type GuardedWrite,
-  type MutationContext,
-  type StoreId,
+import { registerMutationHandler } from '../../registration.js';
+import type {
+  GuardedWrite,
+  MutationContext,
+  StoreId,
 } from '../../index.js';
 import type { HiveStateDoc } from './hive-state.js';
+import { broadcastInvariants } from '../../invariants/hive-mind/broadcast.js';
 
 /** Broadcast priority — matches the CLI inputSchema enum. */
 export type BroadcastPriority = 'low' | 'normal' | 'high' | 'critical';
@@ -92,14 +93,12 @@ export const broadcastHiveMindHandler: GuardedWrite<HiveMindBroadcastPayload> =
       });
     },
     {
-      // The natural invariant here (broadcast count never regresses and never
-      // exceeds MAX_BROADCASTS) needs the substrate before/after snapshots,
-      // which the dispatch boundary does not yet populate (index.ts passes
-      // `substrateStateBefore/After: undefined` pending the ADR-0180 snapshot
-      // wiring). Authoring it now would false-positive on every dispatch —
-      // left to invariants-author once the snapshot seam lands. Matches every
-      // other un-stubbed handler (agents-json.ts, tasks/*.ts).
-      invariants: [],
+      // Range/well-formedness invariants on the request payload now land at
+      // the dispatch boundary. The substrate-snapshot invariant (broadcast
+      // count never regresses and never exceeds MAX_BROADCASTS) still needs
+      // before/after snapshots that index.ts doesn't yet populate — that
+      // landing happens once the ADR-0180 snapshot seam is wired.
+      invariants: broadcastInvariants,
       cacheScope: 'global',
     },
   );

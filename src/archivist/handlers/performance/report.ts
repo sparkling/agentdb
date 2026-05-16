@@ -20,12 +20,10 @@
 // store-tree code is forbidden by the path-restricted substrate-internal.ts
 // seam (ADR-0180 §Type enforcement).
 
-import {
-  registerMutationHandler,
-  type GuardedWrite,
-  type MutationContext,
-  type StoreId,
-} from '../../index.js';
+import { registerMutationHandler } from '../../registration.js';
+import type { MutationContext } from '../../mutation-context.js';
+import type { GuardedWrite, StoreId } from '../../types.js';
+import { reportInvariants } from '../../invariants/performance/report.js';
 
 /** Per-sample performance snapshot — shape mirrors the cli's `PerfMetrics`
  *  interface (performance-tools.ts:26-33) so on-disk metrics.json round-trips
@@ -111,7 +109,7 @@ export const performanceReportHandler: GuardedWrite<PerfReportPayload> =
       });
     },
     {
-      invariants: [], // wired by invariants-author per ADR-0180 §Mutation invariants
+      invariants: reportInvariants,
       cacheScope: 'store',
     },
   );

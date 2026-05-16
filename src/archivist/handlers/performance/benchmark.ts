@@ -35,12 +35,10 @@
 // file from store-tree code is forbidden by the path-restricted
 // substrate-internal.ts seam (ADR-0180 §Type enforcement).
 
-import {
-  registerMutationHandler,
-  type GuardedWrite,
-  type MutationContext,
-  type StoreId,
-} from '../../index.js';
+import { registerMutationHandler } from '../../registration.js';
+import type { MutationContext } from '../../mutation-context.js';
+import type { GuardedWrite, StoreId } from '../../types.js';
+import { benchmarkInvariants } from '../../invariants/performance/benchmark.js';
 
 /** Per-suite benchmark result — shape mirrors the cli's `Benchmark`
  *  interface (performance-tools.ts:35-46). Retained verbatim so existing
@@ -130,7 +128,7 @@ export const performanceBenchmarkHandler: GuardedWrite<PerfBenchmarkPayload> =
       });
     },
     {
-      invariants: [], // wired by invariants-author per ADR-0180 §Mutation invariants
+      invariants: benchmarkInvariants,
       cacheScope: 'store',
     },
   );

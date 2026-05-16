@@ -95,6 +95,7 @@ import { createConnection } from 'node:net';
 import * as path from 'node:path';
 import { registerMutationHandler } from '../../registration.js';
 import type { StoreId } from '../../types.js';
+import { sessionEndInvariants } from '../../invariants/hooks/session-end.js';
 
 /** Tight connect+send budget for the nudge — the hook must not stall session
  *  teardown waiting on a daemon that may be slow or gone. On timeout the
@@ -223,7 +224,7 @@ export const sessionEndHandler = registerMutationHandler<SessionEndPayload>(
     }
   },
   {
-    invariants: [],
+    invariants: sessionEndInvariants,
     cacheScope: 'global',
   },
 );

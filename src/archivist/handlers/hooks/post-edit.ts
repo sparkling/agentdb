@@ -27,6 +27,7 @@
 
 import { registerMutationHandler } from '../../registration.js';
 import type { StoreId } from '../../types.js';
+import { postEditInvariants } from '../../invariants/hooks/post-edit.js';
 
 export interface PostEditPayload {
   readonly file: string;
@@ -60,7 +61,7 @@ export const postEditHandler = registerMutationHandler<PostEditPayload>(
   },
   {
     hotPath: true,
-    invariants: [],
+    invariants: postEditInvariants,
     cacheScope: 'global',
   },
 );

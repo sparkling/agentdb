@@ -42,6 +42,7 @@
 
 import { registerMutationHandler } from '../../registration.js';
 import type { StoreId } from '../../types.js';
+import { preTaskInvariants } from '../../invariants/hooks/pre-task.js';
 
 export interface PreTaskPayload {
   readonly prompt: string;
@@ -75,7 +76,7 @@ export const preTaskHandler = registerMutationHandler<PreTaskPayload>(
   },
   {
     hotPath: true,
-    invariants: [],
+    invariants: preTaskInvariants,
     cacheScope: 'global',
   },
 );

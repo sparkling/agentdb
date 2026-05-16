@@ -21,6 +21,7 @@
 // silent no-op.
 
 import { registerMutationHandler } from '../../registration.js';
+import { postTaskInvariants } from '../../invariants/hooks/post-task.js';
 
 export interface PostTaskPayload {
   readonly success: boolean;
@@ -41,7 +42,7 @@ export const postTaskHandler = registerMutationHandler<PostTaskPayload>(
     );
   },
   {
-    invariants: [],
+    invariants: postTaskInvariants,
     cacheScope: 'global',
   },
 );

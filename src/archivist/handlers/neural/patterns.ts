@@ -17,11 +17,10 @@
 // Type-enforcement: `ctx.substrate.withWrite` is the only path through which
 // `.claude-flow/neural/models.json` pattern mutations may run.
 
-import {
-  registerMutationHandler,
-  type GuardedWrite,
-  type MutationContext,
-} from '../../index.js';
+import { registerMutationHandler } from '../../registration.js';
+import type { MutationContext } from '../../mutation-context.js';
+import type { GuardedWrite } from '../../types.js';
+import { patternsInvariants } from '../../invariants/neural/patterns.js';
 import {
   NEURAL_STORE_ID,
   NEURAL_STORE_KEY,
@@ -112,7 +111,7 @@ export const patternsNeuralHandler: GuardedWrite<NeuralPatternsMutationPayload> 
       });
     },
     {
-      invariants: [], // wired by invariants-author per ADR-0180 §Mutation invariants
+      invariants: patternsInvariants,
       cacheScope: 'store',
     },
   );

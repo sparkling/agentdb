@@ -24,12 +24,10 @@
 // the file are forbidden by the `no-restricted-imports` backstop and the
 // path-restricted substrate-internal.ts seam (ADR-0180 §Type enforcement).
 
-import {
-  registerMutationHandler,
-  type GuardedWrite,
-  type MutationContext,
-  type StoreId,
-} from '../../index.js';
+import { registerMutationHandler } from '../../registration.js';
+import type { MutationContext } from '../../mutation-context.js';
+import type { GuardedWrite, StoreId } from '../../types.js';
+import { trainInvariants } from '../../invariants/neural/train.js';
 
 /** Model kinds — matches the CLI inputSchema enum. */
 export type NeuralModelType = 'moe' | 'transformer' | 'classifier' | 'embedding';
@@ -182,7 +180,7 @@ export const trainNeuralHandler: GuardedWrite<NeuralTrainPayload> =
       });
     },
     {
-      invariants: [], // wired by invariants-author per ADR-0180 §Mutation invariants
+      invariants: trainInvariants,
       cacheScope: 'store',
     },
   );

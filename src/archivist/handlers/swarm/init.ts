@@ -23,13 +23,14 @@
 // legacy `withSwarmStoreLock` because the migrated wire-up routes the swarm
 // store through the same primitive.
 
-import {
-  registerMutationHandler,
-  type GuardedWrite,
-  type MutationContext,
-  type StoreId,
+import { registerMutationHandler } from '../../registration.js';
+import type {
+  GuardedWrite,
+  MutationContext,
+  StoreId,
 } from '../../index.js';
 import { reconcileOrphanSwarms, type SwarmState, type SwarmStore } from './shared.js';
+import { swarmInitInvariants } from '../../invariants/swarm/index.js';
 
 /** Topology variants — mirrors swarm-tools.ts:206-208 (`VALID_TOPOLOGIES`). */
 export type SwarmTopology =
@@ -188,7 +189,7 @@ export const initSwarmHandler: GuardedWrite<SwarmInitPayload> =
       });
     },
     {
-      invariants: [], // wired by invariants-author per ADR-0180 §Mutation invariants
+      invariants: swarmInitInvariants,
       cacheScope: 'global',
     },
   );

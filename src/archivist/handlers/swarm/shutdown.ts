@@ -24,13 +24,14 @@
 // legacy `withSwarmStoreLock` because the migrated wire-up routes the swarm
 // store through the same primitive.
 
-import {
-  registerMutationHandler,
-  type GuardedWrite,
-  type MutationContext,
-  type StoreId,
+import { registerMutationHandler } from '../../registration.js';
+import type {
+  GuardedWrite,
+  MutationContext,
+  StoreId,
 } from '../../index.js';
 import { reconcileOrphanSwarms, type SwarmState, type SwarmStore } from './shared.js';
+import { swarmShutdownInvariants } from '../../invariants/swarm/index.js';
 
 /**
  * Mutation payload mirroring the CLI tool's `swarm_shutdown` input shape
@@ -118,7 +119,7 @@ export const shutdownSwarmHandler: GuardedWrite<SwarmShutdownPayload> =
       });
     },
     {
-      invariants: [], // wired by invariants-author per ADR-0180 §Mutation invariants
+      invariants: swarmShutdownInvariants,
       cacheScope: 'global',
     },
   );

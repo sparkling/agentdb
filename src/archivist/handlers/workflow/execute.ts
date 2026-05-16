@@ -22,6 +22,7 @@
 
 import { registerMutationHandler } from '../../registration.js';
 import type { GuardedWrite, MutationContext, StoreId } from '../../index.js';
+import { executeInvariants } from '../../invariants/workflow/execute.js';
 import type { WorkflowStore } from './shared.js';
 
 /** Mutation payload for workflow_execute. `workflowId` required; `variables`
@@ -73,7 +74,7 @@ export const executeWorkflowHandler: GuardedWrite<WorkflowExecutePayload> =
       });
     },
     {
-      invariants: [], // wired by invariants-author per ADR-0180 §Mutation invariants
+      invariants: executeInvariants,
       cacheScope: 'store',
     },
   );

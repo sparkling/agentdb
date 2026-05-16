@@ -19,6 +19,7 @@
 
 import { registerMutationHandler } from '../../registration.js';
 import type { GuardedWrite, MutationContext, StoreId } from '../../index.js';
+import { pauseInvariants } from '../../invariants/workflow/pause.js';
 import type { WorkflowStore } from './shared.js';
 
 /** Mutation payload for workflow_pause. `workflowId` required. */
@@ -55,7 +56,7 @@ export const pauseWorkflowHandler: GuardedWrite<WorkflowPausePayload> =
       });
     },
     {
-      invariants: [], // wired by invariants-author per ADR-0180 §Mutation invariants
+      invariants: pauseInvariants,
       cacheScope: 'store',
     },
   );

@@ -24,6 +24,7 @@
 
 import { registerMutationHandler } from '../../registration.js';
 import type { GuardedWrite, MutationContext, StoreId } from '../../index.js';
+import { runInvariants } from '../../invariants/workflow/run.js';
 import type { WorkflowRecord, WorkflowStep, WorkflowStore } from './shared.js';
 
 /** Workflow run options — mirrors the cli inputSchema. `dryRun=true` short-circuits
@@ -109,7 +110,7 @@ export const runWorkflowHandler: GuardedWrite<WorkflowRunPayload> =
       });
     },
     {
-      invariants: [], // wired by invariants-author per ADR-0180 §Mutation invariants
+      invariants: runInvariants,
       cacheScope: 'store',
     },
   );

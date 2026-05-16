@@ -20,6 +20,7 @@
 
 import { registerMutationHandler } from '../../registration.js';
 import type { GuardedWrite, MutationContext, StoreId } from '../../index.js';
+import { deleteInvariants } from '../../invariants/workflow/delete.js';
 import type { WorkflowStore } from './shared.js';
 
 /** Mutation payload for workflow_delete. `workflowId` required. */
@@ -56,7 +57,7 @@ export const deleteWorkflowHandler: GuardedWrite<WorkflowDeletePayload> =
       });
     },
     {
-      invariants: [], // wired by invariants-author per ADR-0180 §Mutation invariants
+      invariants: deleteInvariants,
       cacheScope: 'store',
     },
   );

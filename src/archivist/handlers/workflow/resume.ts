@@ -20,6 +20,7 @@
 
 import { registerMutationHandler } from '../../registration.js';
 import type { GuardedWrite, MutationContext, StoreId } from '../../index.js';
+import { resumeInvariants } from '../../invariants/workflow/resume.js';
 import type { WorkflowStore } from './shared.js';
 
 /** Mutation payload for workflow_resume. `workflowId` required. */
@@ -58,7 +59,7 @@ export const resumeWorkflowHandler: GuardedWrite<WorkflowResumePayload> =
       });
     },
     {
-      invariants: [], // wired by invariants-author per ADR-0180 §Mutation invariants
+      invariants: resumeInvariants,
       cacheScope: 'store',
     },
   );

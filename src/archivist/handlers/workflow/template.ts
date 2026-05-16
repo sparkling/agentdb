@@ -30,6 +30,7 @@
 
 import { registerMutationHandler } from '../../registration.js';
 import type { GuardedWrite, MutationContext, StoreId } from '../../index.js';
+import { templateInvariants } from '../../invariants/workflow/template.js';
 import type { WorkflowRecord, WorkflowStore } from './shared.js';
 
 /** Template action discriminator — matches the cli inputSchema enum. */
@@ -145,7 +146,7 @@ export const templateWorkflowHandler: GuardedWrite<WorkflowTemplatePayload> =
       });
     },
     {
-      invariants: [], // wired by invariants-author per ADR-0180 §Mutation invariants
+      invariants: templateInvariants,
       cacheScope: 'store',
     },
   );

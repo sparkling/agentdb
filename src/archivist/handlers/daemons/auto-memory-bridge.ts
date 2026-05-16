@@ -48,6 +48,7 @@ import type {
   MutationContext,
   StoreId,
 } from '../../index.js';
+import { autoMemoryBridgeInvariants } from '../../invariants/daemons/auto-memory-bridge.js';
 import { createHash } from 'node:crypto';
 
 /**
@@ -162,7 +163,7 @@ export const autoMemoryBridgeHandler: GuardedWrite<AutoMemoryBridgePayload> =
       });
     },
     {
-      invariants: [], // wired by invariants-author per ADR-0180 §Mutation invariants
+      invariants: autoMemoryBridgeInvariants,
       cacheScope: 'global',
     },
   );

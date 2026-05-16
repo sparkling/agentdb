@@ -20,6 +20,7 @@
 
 import { registerMutationHandler } from '../../registration.js';
 import type { GuardedWrite, MutationContext, StoreId } from '../../index.js';
+import { mapInvariants } from '../../invariants/daemons/map.js';
 
 /**
  * Mutation payload for the daemon-scheduled codebase-map worker.
@@ -71,7 +72,7 @@ export const mapWorkerHandler: GuardedWrite<MapWorkerPayload> =
       });
     },
     {
-      invariants: [], // wired by invariants-author per ADR-0180 §Mutation invariants
+      invariants: mapInvariants,
       cacheScope: 'global',
     },
   );

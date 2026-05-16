@@ -34,6 +34,7 @@
 
 import { registerMutationHandler } from '../../registration.js';
 import type { GuardedWrite, MutationContext, StoreId } from '../../index.js';
+import { benchmarkInvariants } from '../../invariants/daemons/benchmark.js';
 
 /**
  * Mutation payload for the daemon-scheduled benchmark worker.
@@ -81,7 +82,7 @@ export const benchmarkWorkerHandler: GuardedWrite<BenchmarkWorkerPayload> =
       });
     },
     {
-      invariants: [], // wired by invariants-author per ADR-0180 §Mutation invariants
+      invariants: benchmarkInvariants,
       cacheScope: 'global',
     },
   );

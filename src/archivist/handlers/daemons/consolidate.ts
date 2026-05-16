@@ -82,6 +82,7 @@
 
 import { registerMutationHandler } from '../../registration.js';
 import type { GuardedWrite, MutationContext, StoreId } from '../../index.js';
+import { consolidateInvariants } from '../../invariants/daemons/consolidate.js';
 
 /**
  * Mutation payload for daemon-scheduled consolidation passes (ADR-0180
@@ -178,7 +179,7 @@ export const consolidateDaemonHandler: GuardedWrite<ConsolidateWorkerPayload> =
       });
     },
     {
-      invariants: [], // wired by invariants-author per ADR-0180 §Mutation invariants
+      invariants: consolidateInvariants,
       cacheScope: 'global',
     },
   );

@@ -20,6 +20,7 @@
 
 import { registerMutationHandler } from '../../registration.js';
 import type { GuardedWrite, MutationContext, StoreId } from '../../index.js';
+import { testGapsInvariants } from '../../invariants/daemons/testgaps.js';
 
 /**
  * Mutation payload for the daemon-scheduled testgaps worker.
@@ -82,7 +83,7 @@ export const testGapsWorkerHandler: GuardedWrite<TestGapsWorkerPayload> =
       });
     },
     {
-      invariants: [], // wired by invariants-author per ADR-0180 §Mutation invariants
+      invariants: testGapsInvariants,
       cacheScope: 'global',
     },
   );

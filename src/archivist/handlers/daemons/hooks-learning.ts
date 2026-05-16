@@ -70,6 +70,7 @@
 
 import { registerMutationHandler } from '../../registration.js';
 import type { GuardedWrite, MutationContext, StoreId } from '../../index.js';
+import { hooksLearningInvariants } from '../../invariants/daemons/hooks-learning.js';
 
 /**
  * Mutation payload for the 60-second hooks-learning consolidation pass.
@@ -174,7 +175,7 @@ export const hooksLearningDaemonHandler: GuardedWrite<HooksLearningPayload> =
       });
     },
     {
-      invariants: [], // wired by invariants-author per ADR-0180 §Mutation invariants
+      invariants: hooksLearningInvariants,
       cacheScope: 'global',
     },
   );

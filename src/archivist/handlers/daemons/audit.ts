@@ -23,6 +23,7 @@
 
 import { registerMutationHandler } from '../../registration.js';
 import type { GuardedWrite, MutationContext, StoreId } from '../../index.js';
+import { auditInvariants } from '../../invariants/daemons/audit.js';
 
 /**
  * Mutation payload for the daemon-scheduled security-audit worker.
@@ -89,7 +90,7 @@ export const auditWorkerHandler: GuardedWrite<AuditWorkerPayload> =
       });
     },
     {
-      invariants: [], // wired by invariants-author per ADR-0180 §Mutation invariants
+      invariants: auditInvariants,
       cacheScope: 'global',
     },
   );

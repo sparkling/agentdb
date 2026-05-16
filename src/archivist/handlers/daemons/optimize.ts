@@ -30,6 +30,7 @@
 
 import { registerMutationHandler } from '../../registration.js';
 import type { GuardedWrite, MutationContext, StoreId } from '../../index.js';
+import { optimizeInvariants } from '../../invariants/daemons/optimize.js';
 
 /**
  * Mutation payload for the daemon-scheduled performance-optimize worker.
@@ -81,7 +82,7 @@ export const optimizeWorkerHandler: GuardedWrite<OptimizeWorkerPayload> =
       });
     },
     {
-      invariants: [], // wired by invariants-author per ADR-0180 §Mutation invariants
+      invariants: optimizeInvariants,
       cacheScope: 'global',
     },
   );

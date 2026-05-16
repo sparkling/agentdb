@@ -76,7 +76,15 @@ export type SubstrateFamily = 'rvf' | 'sqlite' | 'fs-json';
 const RVF_STORE_IDS: ReadonlySet<string> = new Set([
   'memory_store',
   'agentdb_pattern_store',
-  'agentdb_sona_trajectory_store',
+  // ADR-0181 Item 6 (2026-05-16) — `agentdb_sona_trajectory_store` removed
+  // from RVF and added to SQLITE_CARVE_OUT_STORE_IDS below. The
+  // SonaTrajectoryService now persists the trajectory corpus to a
+  // `sona_trajectories` SQLite table (dual-write alongside the in-memory
+  // Map). The matching read handler (sibling registerReadHandler for the
+  // 'stats' action) reads through the merged in-memory + SQLite getStats()
+  // surface — both sides now share the SQLite handle, so the read↔write
+  // pair classifies as carve-out together (matches Phase 7 reflexion /
+  // skill / hierarchical pattern).
   'agentdb_experience_record',
   'agentdb_route',
   'agentdb_feedback',
@@ -105,6 +113,7 @@ const RVF_STORE_IDS: ReadonlySet<string> = new Set([
 //   agentdb_reflexion_store      → ReflexionMemory.storeEpisode  (Phase 7, LIVE)
 //   agentdb_skill_create         → SkillLibrary.createSkill      (Phase 7, LIVE)
 //   agentdb_hierarchical_store   → HierarchicalMemory.store      (Phase 7, LIVE)
+//   agentdb_sona_trajectory_store → SonaTrajectoryService.recordTrajectory (Item 6, LIVE 2026-05-16)
 //
 // NOTE: `agentdb_pattern_search` (a GROUP-BY *read* over ReasoningBank) is
 // carve-out, while `agentdb_pattern_store` (a per-pattern *write*) is RVF —
@@ -146,6 +155,15 @@ const SQLITE_CARVE_OUT_STORE_IDS: ReadonlySet<string> = new Set([
   'agentdb_reflexion_store',
   'agentdb_skill_create',
   'agentdb_hierarchical_store',
+  // ADR-0181 Item 6 (2026-05-16): SonaTrajectoryService gained a
+  // `sona_trajectories` SQLite table (dual-write alongside the in-memory
+  // Map). The persistence model is now SQLite — `getStats()` SELECTs back
+  // the durable count + agentTypes (merged with same-process Map).
+  // Sibling registerReadHandler at handlers/agentdb/sona-trajectory-store.ts
+  // owns the 'stats' action; the cli wrapper routes 'record' →
+  // dispatch and 'stats' → dispatchRead (split-by-action matches Item 2's
+  // agentdb_neural_patterns/agentdb_gnn_stats split).
+  'agentdb_sona_trajectory_store',
 ]);
 
 // ── Classification ───────────────────────────────────────────────────────────

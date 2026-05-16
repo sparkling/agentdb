@@ -42,6 +42,7 @@ import {
   type ReflexionStoreWriter,
   type SemanticRouteReader,
   type SkillLibraryWriter,
+  type SonaTrajectoryReader,
   type SonaTrajectoryWriter,
   type TaskRouter,
 } from './capabilities.js';
@@ -132,6 +133,7 @@ export type {
   SemanticRouteReader,
   SkillLibraryWriter,
   SkillLibraryWriteResult,
+  SonaTrajectoryReader,
   SonaTrajectoryWriter,
   SonaTrajectoryWriteResult,
   TaskRouter,
@@ -366,6 +368,19 @@ export interface ArchivistInitConfig {
    * discipline; see `gnnTelemetryReaderFactory` rationale above).
    */
   readonly semanticRouteReaderFactory?: () => SemanticRouteReader;
+  /**
+   * Lazy `SonaTrajectoryReader` capability factory (ADR-0181 Item 6 wire-up,
+   * 2026-05-16). Adapts the cli's `getController('sonaTrajectory').getStats()`
+   * surface down to the narrow `SonaTrajectoryReader`. Threaded onto
+   * `ReadContext.capabilities.sonaTrajectoryReader` — used by the sibling
+   * read handler in `handlers/agentdb/sona-trajectory-store.ts` so the b5
+   * `adr0090-b5-sonaTrajectory` probe's `'stats'` action returns
+   * `{success:true, controller:"sonaTrajectory", trajectoryCount, ...}`.
+   *
+   * Adapter MUST resolve the controller PER CALL (per-call resolution
+   * discipline; see `gnnTelemetryReaderFactory` rationale above).
+   */
+  readonly sonaTrajectoryReaderFactory?: () => SonaTrajectoryReader;
 }
 
 /**
@@ -445,6 +460,7 @@ export class Archivist {
   private causalGraphWriter?: CausalGraphWriter;
   private gnnTelemetryReader?: GNNTelemetryReader;
   private semanticRouteReader?: SemanticRouteReader;
+  private sonaTrajectoryReader?: SonaTrajectoryReader;
 
   /**
    * Idempotent (the `initialized` guard is load-bearing — dispatch calls this on
@@ -529,6 +545,7 @@ export class Archivist {
     this.causalGraphWriter = config.causalGraphWriterFactory?.();
     this.gnnTelemetryReader = config.gnnTelemetryReaderFactory?.();
     this.semanticRouteReader = config.semanticRouteReaderFactory?.();
+    this.sonaTrajectoryReader = config.sonaTrajectoryReaderFactory?.();
 
     // FS-JSON stores are intentionally NOT pre-built — see `getSubstrate()`'s
     // lazy `mintLazy` closure. The `if (this.initialized) return` guard above
@@ -969,6 +986,7 @@ export class Archivist {
         patternReader: this.patternReader,
         gnnTelemetryReader: this.gnnTelemetryReader,
         semanticRouteReader: this.semanticRouteReader,
+        sonaTrajectoryReader: this.sonaTrajectoryReader,
       }),
     });
     return await handler(ctx, payload);

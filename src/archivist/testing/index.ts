@@ -34,6 +34,7 @@ import {
   type GNNTelemetryReader,
   type PatternReader,
   type SemanticRouteReader,
+  type SonaTrajectoryReader,
   type TaskRouter,
 } from '../capabilities.js';
 import { type AuditNode, treeDepth } from './audit-tree.js';
@@ -158,6 +159,8 @@ export interface WithTestReadContextOpts {
   readonly patternReader?: PatternReader;
   readonly gnnTelemetryReader?: GNNTelemetryReader;
   readonly semanticRouteReader?: SemanticRouteReader;
+  /** ADR-0181 Item 6 — SonaTrajectoryService stats reader for the sibling read handler. */
+  readonly sonaTrajectoryReader?: SonaTrajectoryReader;
 }
 
 // ---------------------------------------------------------------------------
@@ -566,6 +569,7 @@ export async function withTestReadContext<T, R>(
       patternReader: opts?.patternReader,
       gnnTelemetryReader: opts?.gnnTelemetryReader,
       semanticRouteReader: opts?.semanticRouteReader,
+      sonaTrajectoryReader: opts?.sonaTrajectoryReader,
     }),
   };
 

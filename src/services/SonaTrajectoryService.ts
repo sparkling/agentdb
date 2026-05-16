@@ -70,11 +70,69 @@ export interface RLMetrics {
   iterationCount: number;
 }
 
+/**
+ * Constructor options.
+ *
+ * `getDb` is a lazy resolver invoked per `recordTrajectory` / `getStats` /
+ * `getPatterns` call. Returning `null` falls back to the in-memory-only
+ * code paths (the pre-Item-6 default). The lazy form is required (NOT a
+ * cached `db` field) because the cli's `controller-registry.ts` constructs
+ * SonaTrajectoryService once via `getOrCreate(name, () => svc)` (the
+ * service handle is memoised forever) — but the AgentDB SQLite handle the
+ * resolver returns may not exist YET at construction time (`agentdb_health`
+ * runs first in the b5 probe to hydrate the registry; first
+ * `getController('sonaTrajectory')` may happen BEFORE
+ * `ensureSqliteWired()` installs the handle on the cli side). Per-call
+ * resolution defends against `feedback-singleton-frozen-state-desync`
+ * (the same class of trap Phase 7 r1 → r2 hit on archivist's path-repoint:
+ * cached the wrong handle, observed split-brain). Multi-project daemon
+ * scenarios benefit too — a daemon serving a different project root next
+ * dispatches against the new root's handle without a stale closure.
+ *
+ * Item 6 RL trade-off: SQLite persists the trajectory CORPUS only.
+ * RL training state (policy_weights, value_weights, experience_buffer,
+ * RLMetrics) stays in-memory by design. predict() falls through to
+ * frequencyPredict over the in-memory Map (NOT the SQLite table) to
+ * avoid the unbounded read on every probe — Item 6 doesn't fix
+ * cross-process predictability; that is a future-ADR scope.
+ */
+export interface SonaTrajectoryServiceOptions {
+  /** Lazy SQLite handle resolver. Re-invoked per durable method call. */
+  getDb?: () => any;
+}
+
 export class SonaTrajectoryService {
   private sona: any = null;
   private available: boolean = false;
   private engineType: 'native' | 'js' = 'js';
   private trajectories: Map<string, StoredTrajectory[]> = new Map();
+  private opts: SonaTrajectoryServiceOptions;
+
+  constructor(opts: SonaTrajectoryServiceOptions = {}) {
+    this.opts = opts;
+  }
+
+  /**
+   * Resolve the SQLite handle through the lazy resolver. Returns `null`
+   * when no resolver was supplied OR when the resolver itself returns
+   * null/undefined (handle not installed yet — fresh cold-start race).
+   * The three durable methods (recordTrajectory / getStats / getPatterns)
+   * branch on this; null = original in-memory-only behavior.
+   *
+   * Catches resolver throws so a transiently-failing handle (e.g.
+   * mid-shutdown) degrades to in-memory rather than poisoning the dispatch.
+   * The IN-MEMORY write/read path is always taken alongside (when db is
+   * present, dual-write); a thrown resolver therefore loses durability for
+   * THIS call only and never the in-memory write.
+   */
+  private resolveDb(): any | null {
+    try {
+      const db = this.opts.getDb?.();
+      return db ?? null;
+    } catch {
+      return null;
+    }
+  }
 
   // RL Training state
   private policyConfig: PolicyGradientConfig = {
@@ -183,11 +241,25 @@ export class SonaTrajectoryService {
       }
     }
 
-    // In-memory storage (always maintained for local analysis)
+    // In-memory storage (always maintained for local analysis + predict())
     if (!this.trajectories.has(agentType)) {
       this.trajectories.set(agentType, []);
     }
     this.trajectories.get(agentType)!.push({ steps, reward: totalReward });
+
+    // ADR-0181 Item 6 — durable write alongside the Map. Lazy-resolved per call
+    // (see resolveDb header on construction). When the handle is absent we keep
+    // pre-Item-6 in-memory-only behavior. When present, INSERT the corpus row;
+    // SQL errors RE-THROW per `feedback-best-effort-must-rethrow-fatals`
+    // (no silent fallback — a real corruption / locked-db must surface, not be
+    // swallowed under the in-memory success).
+    const db = this.resolveDb();
+    if (db) {
+      const stmt = db.prepare(
+        'INSERT INTO sona_trajectories (agent_type, steps, reward) VALUES (?, ?, ?)',
+      );
+      stmt.run(agentType, JSON.stringify(steps), totalReward);
+    }
   }
 
   /**
@@ -254,10 +326,35 @@ export class SonaTrajectoryService {
       }
     }
 
-    if (agentType) {
-      return this.trajectories.get(agentType) || [];
-    }
-    return Array.from(this.trajectories.values()).flat();
+    // ADR-0181 Item 6: when a SQLite handle is wired, merge in-memory + durable.
+    // Cap at 1000 rows per query to avoid unbounded reads from a long-running
+    // corpus. The Map preserves same-process inserts that may have racy
+    // visibility across concurrent SELECTs.
+    const inMem = agentType
+      ? this.trajectories.get(agentType) || []
+      : Array.from(this.trajectories.values()).flat();
+
+    const db = this.resolveDb();
+    if (!db) return inMem;
+
+    const rows = (agentType
+      ? db
+          .prepare(
+            'SELECT steps, reward FROM sona_trajectories WHERE agent_type = ? ORDER BY created_at DESC LIMIT 1000',
+          )
+          .all(agentType)
+      : db
+          .prepare(
+            'SELECT steps, reward FROM sona_trajectories ORDER BY created_at DESC LIMIT 1000',
+          )
+          .all()) as Array<{ steps: string; reward: number }>;
+
+    const fromDb: StoredTrajectory[] = rows.map((r) => ({
+      steps: JSON.parse(r.steps) as TrajectoryStep[],
+      reward: r.reward,
+    }));
+
+    return [...inMem, ...fromDb];
   }
 
   /**
@@ -268,14 +365,55 @@ export class SonaTrajectoryService {
   }
 
   /**
-   * Get service statistics
+   * Get service statistics.
+   *
+   * ADR-0181 Item 6: when a SQLite handle is wired, merges the in-memory
+   * Map snapshot with the durable rows so cross-process callers see
+   * trajectories recorded by other processes. Same-process additions stay
+   * visible immediately via the in-memory branch (a fresh INSERT may not
+   * be visible to a concurrent read in the same transaction window, but
+   * the Map IS).
+   *
+   * Merge semantics:
+   *   - trajectoryCount = MAX(in-memory total, SQLite COUNT) — the SQLite
+   *     count includes prior-process writes the Map doesn't know about;
+   *     the Map count includes same-process writes that may not yet be
+   *     visible to a separate SELECT (in practice better-sqlite3 is sync
+   *     so they match — but MAX is the safe answer).
+   *   - agentTypes = UNION of Map keys + SQLite distinct agent_type column.
+   *
+   * Returns sync to preserve the existing call signature (the cli wrapper
+   * relies on it). better-sqlite3 is sync so this is fine.
    */
   getStats(): SonaStats {
+    const inMemoryCount = Array.from(this.trajectories.values())
+      .reduce((sum, arr) => sum + arr.length, 0);
+    const inMemoryAgents = Array.from(this.trajectories.keys());
+
+    const db = this.resolveDb();
+    if (!db) {
+      return {
+        available: this.available,
+        trajectoryCount: inMemoryCount,
+        agentTypes: inMemoryAgents,
+      };
+    }
+
+    const countRow = db
+      .prepare('SELECT COUNT(*) AS c FROM sona_trajectories')
+      .get() as { c: number };
+    const agentRows = db
+      .prepare('SELECT DISTINCT agent_type FROM sona_trajectories')
+      .all() as Array<{ agent_type: string }>;
+    const dbAgents = agentRows.map((r) => r.agent_type);
+
+    const mergedAgents = Array.from(new Set([...inMemoryAgents, ...dbAgents]));
+    const trajectoryCount = Math.max(inMemoryCount, Number(countRow?.c ?? 0));
+
     return {
       available: this.available,
-      trajectoryCount: Array.from(this.trajectories.values())
-        .reduce((sum, arr) => sum + arr.length, 0),
-      agentTypes: Array.from(this.trajectories.keys())
+      trajectoryCount,
+      agentTypes: mergedAgents,
     };
   }
 

@@ -438,6 +438,36 @@ CREATE TABLE IF NOT EXISTS learning_state_embeddings (
 CREATE INDEX IF NOT EXISTS idx_learning_state_embeddings_session ON learning_state_embeddings(session_id);
 
 -- ============================================================================
+-- SonaTrajectoryService (ADR-0181 Item 6 — durable trajectory corpus)
+-- ============================================================================
+-- Durable persistence for the trajectory CORPUS only — recorded action
+-- sequences and aggregated reward. RL TRAINING STATE (policy_weights,
+-- value_weights, experience_buffer, RLMetrics) stays in-memory by design;
+-- a future ADR could persist those into a sona_rl_state table to give
+-- cross-process predictability, but that is out of scope for Item 6.
+--
+-- Win for Item 6:
+--   1. Cross-process `stats` reads see prior writes (durable trajectoryCount).
+--   2. `getPatterns()` from a fresh process sees the durable corpus.
+--   3. Audit chain on `record` via the archivist's withWrite envelope.
+-- Predict() quality is UNCHANGED — frequencyPredict still reads only the
+-- in-memory Map (no rehydrate), and the @ruvector/sona engine path is
+-- untouched.
+
+CREATE TABLE IF NOT EXISTS sona_trajectories (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  agent_type TEXT NOT NULL,
+  steps JSON NOT NULL,        -- TrajectoryStep[] array (state/action/reward tuples)
+  reward REAL NOT NULL,        -- aggregated reward (mean of step.reward, matches in-memory totalReward)
+  created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
+  metadata JSON
+);
+
+CREATE INDEX IF NOT EXISTS idx_sona_traj_agent ON sona_trajectories(agent_type);
+CREATE INDEX IF NOT EXISTS idx_sona_traj_created ON sona_trajectories(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_sona_traj_reward ON sona_trajectories(reward DESC);
+
+-- ============================================================================
 -- Initialization Complete
 -- ============================================================================
 -- Schema version: 1.0.0

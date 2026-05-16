@@ -77,14 +77,17 @@ export * from './experience-record.js';
 export * from './reflexion-store.js';
 export * from './skill-create.js';
 export * from './hierarchical-store.js';
-// export * from './sona-trajectory-store.js';
-//   PERMANENTLY CLI-ONLY pending follow-up ADR for SonaTrajectoryService
-//   SQLite-persistence design. The capability surface (SonaTrajectoryWriter)
-//   and handler body are wired and work; what's missing is a controller-level
-//   behavioural change — the service is pure-compute by design (in-memory
-//   `Map<string, StoredTrajectory[]>` at services/SonaTrajectoryService.ts:73-77),
-//   and there is no sibling read handler for the 'stats' action. Joins
-//   handover Section J's permanently-cli-only bucket alongside hooks/* and
-//   session_*; gating it here is not a "wire later" decision but a deliberate
-//   refusal to expose a write surface whose round-trip guarantee can't be
-//   honoured at the dispatch boundary.
+// ADR-0181 Item 6 (2026-05-16) — sona-trajectory-store now exports BOTH a
+// mutation handler (record action) AND a sibling read handler (stats
+// action). SonaTrajectoryService gained an optional `{ getDb }` lazy SQLite
+// resolver in its constructor (services/SonaTrajectoryService.ts) — the cli's
+// controller-registry passes `this.agentdb.database` so recordTrajectory
+// dual-writes to a `sona_trajectories` SQLite table alongside the in-memory
+// Map. getStats / getPatterns merge the two. RL training state stays
+// in-memory; predict() quality unchanged. The cli wrapper at
+// agentdb-tools.ts splits action='record' through dispatch and
+// action='stats' through dispatchRead. substrate-registry classification
+// moved RVF→SQLite carve-out to match the now-SQLite persistence model.
+// Removed from handover Section J's permanently-cli-only bucket — Item 6
+// is the follow-up ADR that section anticipated.
+export * from './sona-trajectory-store.js';

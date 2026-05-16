@@ -355,6 +355,32 @@ export interface SonaTrajectoryWriteResult {
 }
 
 /**
+ * Narrow READ surface for the SonaTrajectoryService stats path
+ * (`agentdb_sona_trajectory_store` `'stats'` action — sibling read handler in
+ * `handlers/agentdb/sona-trajectory-store.ts`, ADR-0181 Item 6 wire-up).
+ *
+ * Backed at the cli wiring point by an adapter over the same controller
+ * `getController('sonaTrajectory')` resolution the writer uses, calling
+ * `getStats()` (the durable-merge variant — see SonaTrajectoryService.ts).
+ * Per-call resolution discipline matches `GNNTelemetryReader` — closure-
+ * cached controller handles risk cli-vs-archivist split-brain (Phase 7
+ * r1 → r2 lesson).
+ */
+export interface SonaTrajectoryReader {
+  /**
+   * Return SonaTrajectoryService stats: engine type, available flag,
+   * trajectoryCount (durable + in-memory), and the agentTypes set.
+   * Implementation reads off `getController('sonaTrajectory')` per call.
+   */
+  getStats(): Promise<{
+    readonly engine: string;
+    readonly available: boolean;
+    readonly trajectoryCount: number;
+    readonly agentTypes: ReadonlyArray<string>;
+  }>;
+}
+
+/**
  * Narrow surface for the multi-controller feedback fan-out —
  * `handlers/agentdb/feedback.ts` (Phase 6 wire-up). Backed at the cli wiring
  * point by `recordFeedback(...)` (`agentdb-orchestration.ts:85`) which routes
@@ -471,6 +497,7 @@ export interface ReadCapabilities {
   readonly patternReader?: PatternReader;
   readonly gnnTelemetryReader?: GNNTelemetryReader;
   readonly semanticRouteReader?: SemanticRouteReader;
+  readonly sonaTrajectoryReader?: SonaTrajectoryReader;
   /** Fail-loud accessor for `embeddingScorer`. See `MutationCapabilities.requireTaskRouter`. */
   requireEmbeddingScorer(): EmbeddingScorer;
   /** Fail-loud accessor for `patternReader`. See `MutationCapabilities.requireTaskRouter`. */
@@ -479,6 +506,8 @@ export interface ReadCapabilities {
   requireGnnTelemetryReader(): GNNTelemetryReader;
   /** Fail-loud accessor for `semanticRouteReader`. See `MutationCapabilities.requireTaskRouter`. */
   requireSemanticRouteReader(): SemanticRouteReader;
+  /** Fail-loud accessor for `sonaTrajectoryReader` (ADR-0181 Item 6). */
+  requireSonaTrajectoryReader(): SonaTrajectoryReader;
 }
 
 /**
@@ -520,6 +549,8 @@ export interface CapabilityFactories {
   readonly gnnTelemetryReaderFactory?: () => GNNTelemetryReader;
   /** Lazy `SemanticRouteReader` — adapts the cli `getController('semanticRouter').route(...)` path. */
   readonly semanticRouteReaderFactory?: () => SemanticRouteReader;
+  /** Lazy `SonaTrajectoryReader` — adapts the cli `getController('sonaTrajectory').getStats()` path (ADR-0181 Item 6). */
+  readonly sonaTrajectoryReaderFactory?: () => SonaTrajectoryReader;
 }
 
 /**
@@ -656,12 +687,14 @@ export function makeReadCapabilities(resolved: {
   readonly patternReader?: PatternReader;
   readonly gnnTelemetryReader?: GNNTelemetryReader;
   readonly semanticRouteReader?: SemanticRouteReader;
+  readonly sonaTrajectoryReader?: SonaTrajectoryReader;
 }): ReadCapabilities {
   return {
     embeddingScorer: resolved.embeddingScorer,
     patternReader: resolved.patternReader,
     gnnTelemetryReader: resolved.gnnTelemetryReader,
     semanticRouteReader: resolved.semanticRouteReader,
+    sonaTrajectoryReader: resolved.sonaTrajectoryReader,
     requireEmbeddingScorer(): EmbeddingScorer {
       if (!resolved.embeddingScorer) {
         throw new Error(
@@ -697,6 +730,15 @@ export function makeReadCapabilities(resolved: {
         );
       }
       return resolved.semanticRouteReader;
+    },
+    requireSonaTrajectoryReader(): SonaTrajectoryReader {
+      if (!resolved.sonaTrajectoryReader) {
+        throw new Error(
+          'archivist: this handler needs the SonaTrajectoryReader capability, but no sonaTrajectoryReaderFactory ' +
+            'was supplied to initialize() — pass { sonaTrajectoryReaderFactory } in ArchivistInitConfig',
+        );
+      }
+      return resolved.sonaTrajectoryReader;
     },
   };
 }

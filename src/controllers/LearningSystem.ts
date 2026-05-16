@@ -140,7 +140,15 @@ export class LearningSystem {
       this.gnnEnabled = false;
     }
 
-    // Try to initialize Sona trajectory service
+    // Try to initialize Sona trajectory service.
+    //
+    // INTENTIONAL SPLIT (ADR-0181 Item 6, 2026-05-16): zero-arg construction
+    // here is correct — this is LearningSystem's PRIVATE Sona instance for
+    // its own RL machinery, and durability of that private corpus is not an
+    // Item 6 win. The cli's `controller-registry.ts` constructs a SEPARATE
+    // SonaTrajectoryService with `{ getDb }` lazy SQLite handle for the
+    // user-facing `agentdb_sona_trajectory_store` MCP tool path. Both are
+    // valid; do not collapse them.
     try {
       this.sonaService = new SonaTrajectoryService();
       const initialized = await this.sonaService.initialize();

@@ -118,8 +118,15 @@ export const searchMemoryHandler: GuardedRead<MemorySearchQuery, RankedResults<M
       // capability (ADR-0069 unified mpnet pipeline; same model the cli's
       // store path uses to mint storage embeddings — keeps query/document
       // vector spaces aligned).
+      //
+      // ADR-0181 task #100 root-cause fix: pass {intent: 'query'} so the
+      // asymmetric task-prefix matches the read-side semantics. mpnet/bge
+      // encode queries with a different prefix than documents — embedding
+      // the query with a document prefix puts it in the wrong subspace and
+      // tanks recall. The store-side (memory_store handler) leaves intent
+      // unset (defaults to 'document'), which is correct for stored content.
       const scorer = ctx.capabilities.requireEmbeddingScorer();
-      const queryVector = await scorer.embed(payload.text);
+      const queryVector = await scorer.embed(payload.text, { intent: 'query' });
 
       // Widen topK when scoped to a single namespace so the post-filter has
       // headroom. `limit` stays the final slice.

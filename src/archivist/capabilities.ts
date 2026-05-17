@@ -81,8 +81,22 @@ export interface RouteDecision {
  * one well-tested implementation rather than three handler-local copies.
  */
 export interface EmbeddingScorer {
-  /** Embed `text` to its vector. One model, shared across handlers (ADR-0069). */
-  embed(text: string): Promise<Float32Array>;
+  /**
+   * Embed `text` to its vector. One model, shared across handlers (ADR-0069).
+   *
+   * `opts.intent` selects the asymmetric task prefix applied before embedding
+   * (mpnet/bge/etc. encode queries and documents differently — same text with
+   * different intent produces vectors that are NOT directly comparable to each
+   * other). Defaults to `'document'` to match prior behaviour (and the typical
+   * write-side caller in `memory_store`). Read-side callers (`memory_search`,
+   * etc.) MUST pass `{intent: 'query'}` so the query vector lives in the same
+   * subspace as the stored document vectors.
+   *
+   * ADR-0181 task #100 root-cause fix: omitting intent on the search path
+   * gave the query a document-prefix embedding, breaking cosine recall
+   * (regression observed in e2e-0059-mem-search etc. on patch.168).
+   */
+  embed(text: string, opts?: { intent?: 'query' | 'document' }): Promise<Float32Array>;
   /**
    * Cosine similarity of two equal-length vectors, in `[-1, 1]`. Throws on a
    * length mismatch (`feedback-no-fallbacks` — a silent 0 would mask a

@@ -141,6 +141,12 @@ export const storeMemoryHandler: GuardedWrite<MemoryStorePayload> =
         const rvf = rvfHandle.rvf;
 
         const baseMetadata: Record<string, unknown> = {
+          // ADR-0183 §Architecture: shape_version discriminator. v2 = rich-meta
+          // shape written through this handler (both MCP and cli post-flip).
+          // Read handlers project against this field to dispatch v1 vs v2
+          // projection (A2). Legacy on-disk records (pre-A1) lack this field
+          // and are read as v1.
+          shape_version: 2,
           namespace,
           key: payload.key,
           content: payload.content,

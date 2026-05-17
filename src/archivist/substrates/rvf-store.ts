@@ -31,6 +31,31 @@ import type {
 } from '../types.js';
 import type { VectorBackendAsync } from '../../backends/VectorBackend.js';
 
+// ── Structural shape the substrate feature-detects on the backend ─────────────
+//
+// `VectorBackendAsync` is intentionally vector-only. The ADR-0181 task #99
+// `getByKey` / `list` operations need (namespace, key) + paginated scan
+// semantics that only the `MemoryRvfAdapter` provides (via `getByKeyAsync` /
+// `queryAsync`). Declared inline here — not imported from `adapters/memory-rvf-
+// adapter.ts` — to keep the substrate from coupling to a specific adapter type
+// (the same pattern `handlers/memory/store.ts` uses for its `RvfHandleShape`).
+//
+// A backend without these methods (e.g. a hand-rolled test stub or a future
+// non-adapter `VectorBackendAsync` implementation) makes the substrate throw
+// with the same fail-loud message style as the existing `query` / sqlite
+// `read` paths (`feedback-no-fallbacks`).
+interface RvfNamespacedReadShape {
+  getByKeyAsync?(
+    namespace: string,
+    key: string,
+  ): Promise<{ readonly id: string; readonly content?: string; readonly key?: string; readonly namespace?: string } | null>;
+  queryAsync?(q: {
+    readonly namespace?: string;
+    readonly limit: number;
+    readonly offset?: number;
+  }): Promise<ReadonlyArray<unknown>>;
+}
+
 // ── Handle augmentation ──────────────────────────────────────────────────────
 //
 // The base `SubstrateHandle` is substrate-agnostic and key/value-shaped. RVF is
@@ -157,6 +182,59 @@ export function makeRvfSubstrate(backend: VectorBackendAsync): SubstrateAccess {
         item: r as unknown as R,
         score: r.similarity,
       }));
+    },
+
+    // ADR-0181 task #99 commit 1 — `(namespace, key)` lookup delegates to the
+    // adapter's `getByKeyAsync` (which surfaces the cli `RvfBackend.getByKey`
+    // O(1) Map lookup at rvf-backend.ts:526). Returns `undefined` on miss so
+    // the substrate seam is uniform across families — FS-JSON returns
+    // `undefined` when the records scan misses; we do the same here, mapping
+    // the cli's `null` (no entry) to `undefined`.
+    async getByKey<R>(scope: {
+      storeId: StoreId;
+      namespace: string;
+      key: string;
+    }): Promise<R | undefined> {
+      const namespacedBackend = backend as unknown as RvfNamespacedReadShape;
+      if (typeof namespacedBackend.getByKeyAsync !== 'function') {
+        throw new Error(
+          `makeRvfSubstrate: getByKey is not available for store '${scope.storeId as string}' — ` +
+            `the wired RVF backend does not expose getByKeyAsync (expected the MemoryRvfAdapter). ` +
+            `Check that the cli passes MemoryRvfAdapter to Archivist.initialize({ rvfBackend }).`,
+        );
+      }
+      const result = await namespacedBackend.getByKeyAsync(scope.namespace, scope.key);
+      return (result ?? undefined) as R | undefined;
+    },
+
+    // ADR-0181 task #99 commit 1 — paginated namespace scan delegates to the
+    // adapter's `queryAsync` (which surfaces the cli `RvfBackend.query`
+    // vectorless scan at rvf-backend.ts:623, narrowed to the
+    // `MemoryQueryShape` projection per plan §6). `limit` is REQUIRED by the
+    // cli backend; we default to 1000 here (the same default the cli's
+    // `routeMemoryOp('list')` uses) when the caller omits it, so the
+    // substrate seam stays caller-friendly without breaking the underlying
+    // backend's bounded-scan contract.
+    async list<R>(scope: {
+      storeId: StoreId;
+      namespace?: string;
+      limit?: number;
+      offset?: number;
+    }): Promise<ReadonlyArray<R>> {
+      const namespacedBackend = backend as unknown as RvfNamespacedReadShape;
+      if (typeof namespacedBackend.queryAsync !== 'function') {
+        throw new Error(
+          `makeRvfSubstrate: list is not available for store '${scope.storeId as string}' — ` +
+            `the wired RVF backend does not expose queryAsync (expected the MemoryRvfAdapter). ` +
+            `Check that the cli passes MemoryRvfAdapter to Archivist.initialize({ rvfBackend }).`,
+        );
+      }
+      const results = await namespacedBackend.queryAsync({
+        ...(scope.namespace !== undefined ? { namespace: scope.namespace } : {}),
+        limit: scope.limit ?? 1000,
+        ...(scope.offset !== undefined ? { offset: scope.offset } : {}),
+      });
+      return results as ReadonlyArray<R>;
     },
   };
 

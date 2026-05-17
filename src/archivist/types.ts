@@ -63,6 +63,30 @@ export interface ReadOnlySubstrateHandle {
     vector: Float32Array;
     topK: number;
   }): Promise<ReadonlyArray<{ item: R; score: number }>>;
+  /**
+   * ADR-0181 substrate-seam expansion (task #99 commit 1) — `(namespace, key)`
+   * lookup. Each substrate honors it natively where the addressing model fits:
+   * FS-JSON walks document records, RVF delegates to `RvfBackend.getByKey`
+   * (O(1) map lookup, no embedding cost). SQLite throws — it is SQL-addressed,
+   * not key/value (`feedback-no-fallbacks`: misroutes fail loud rather than
+   * silently no-op). Returns `undefined` on miss; never empty `{}`.
+   */
+  getByKey<R>(scope: { storeId: StoreId; namespace: string; key: string }): Promise<R | undefined>;
+  /**
+   * ADR-0181 substrate-seam expansion (task #99 commit 1) — paginated namespace
+   * enumeration. `namespace` filter is optional (omitted → all entries in the
+   * store). `limit` / `offset` are pagination knobs; `limit` defaults are the
+   * substrate's responsibility (`list` without a limit returns every record,
+   * which is honest for small FS-JSON files but a footgun for RVF — handlers
+   * supply explicit limits per the narrow-projection ruling in the plan §6).
+   * SQLite throws (same reason as `getByKey`).
+   */
+  list<R>(scope: {
+    storeId: StoreId;
+    namespace?: string;
+    limit?: number;
+    offset?: number;
+  }): Promise<ReadonlyArray<R>>;
 }
 
 /**
@@ -79,7 +103,7 @@ export interface ReadOnlySubstrateHandle {
  * rather than silently no-op (`feedback-no-fallbacks`).
  */
 export type ReadCapableSubstrate = SubstrateHandle &
-  Pick<ReadOnlySubstrateHandle, 'query' | 'vectorSearch'>;
+  Pick<ReadOnlySubstrateHandle, 'query' | 'vectorSearch' | 'getByKey' | 'list'>;
 
 /**
  * Guarded mutation handler. Returned by `registerMutationHandler<T>`. The brand

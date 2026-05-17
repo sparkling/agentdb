@@ -156,6 +156,18 @@ function makeStubMemoryBackend(): IMemoryRvfBackend {
     async getStoredDimension(): Promise<number> {
       return 0;
     },
+    async getByKey(): Promise<MemoryEntryShape | null> {
+      return null;
+    },
+    async update(): Promise<MemoryEntryShape | null> {
+      return null;
+    },
+    async query(): Promise<readonly MemoryEntryShape[]> {
+      return [];
+    },
+    async listNamespaces(): Promise<readonly string[]> {
+      return [];
+    },
   };
 }
 

@@ -118,6 +118,29 @@ function makeStubBackend(dimension: number): IMemoryRvfBackend & {
       entries.set(id, updated);
       return updated;
     },
+    // ADR-0181 task #99 commit 1 — vectorless scan over stored entries with
+    // namespace / limit / offset filters. Mirrors `RvfBackend.query` (the
+    // cli's filter pipeline minus the semantic-vector branch we don't need
+    // here). Sorts by createdAt ascending so pagination is deterministic.
+    async query(q: {
+      readonly type: 'exact';
+      readonly namespace?: string;
+      readonly limit: number;
+      readonly offset?: number;
+    }): Promise<readonly MemoryEntryShape[]> {
+      let rows = Array.from(entries.values());
+      if (q.namespace !== undefined) {
+        rows = rows.filter((e) => e.namespace === q.namespace);
+      }
+      rows.sort((a, b) => a.createdAt - b.createdAt);
+      const offset = q.offset ?? 0;
+      return rows.slice(offset, offset + q.limit);
+    },
+    async listNamespaces(): Promise<readonly string[]> {
+      const ns = new Set<string>();
+      for (const e of entries.values()) ns.add(e.namespace);
+      return Array.from(ns);
+    },
   };
 }
 
@@ -285,6 +308,22 @@ describe('MemoryRvfAdapter — typed bridge from @claude-flow/memory RvfBackend 
         getStoredDimension: () => {
           touched = true;
           return baseline.getStoredDimension();
+        },
+        getByKey: (ns, key) => {
+          touched = true;
+          return baseline.getByKey(ns, key);
+        },
+        update: (id, u) => {
+          touched = true;
+          return baseline.update(id, u);
+        },
+        query: (q) => {
+          touched = true;
+          return baseline.query(q);
+        },
+        listNamespaces: () => {
+          touched = true;
+          return baseline.listNamespaces();
         },
       };
 

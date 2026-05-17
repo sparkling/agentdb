@@ -147,6 +147,24 @@ export interface MemoryBackendStatsShape {
 }
 
 /**
+ * Narrow structural mirror of the subset of `@claude-flow/memory`'s
+ * `MemoryQuery` the adapter forwards. The full shape (`memory/types.ts:151`)
+ * carries tags / memoryType / time-ranges / semantic-embedding fields that
+ * this substrate seam intentionally does NOT expose (ADR-0181 task #99 plan §6:
+ * narrow projection — handlers that need filter dimensions extend then).
+ *
+ * The `limit` field is required on memory's `MemoryQuery`; the adapter mirrors
+ * it (1000 is the default the cli's `routeMemoryOp('list')` uses when the
+ * caller omits one — but we make it explicit at the seam so the substrate
+ * never has to invent a bound).
+ */
+export interface MemoryQueryShape {
+  readonly namespace?: string;
+  readonly limit: number;
+  readonly offset?: number;
+}
+
+/**
  * Narrow structural mirror of `@claude-flow/memory`'s `IMemoryBackend`,
  * trimmed to exactly the methods this adapter invokes. The cli's
  * `RvfBackend` instance satisfies this structurally with no cast.
@@ -188,6 +206,36 @@ export interface IMemoryRvfBackend {
       readonly embedding?: Float32Array;
     },
   ): Promise<MemoryEntryShape | null>;
+  /**
+   * ADR-0181 task #99 commit 1 — vectorless predicate scan over the in-memory
+   * `entries` map. Mirrors `RvfBackend.query(MemoryQuery)` (rvf-backend.ts:623).
+   * Used by the RVF substrate's `list` operation through `MemoryRvfAdapter.queryAsync`.
+   * Caller passes the full `@claude-flow/memory` MemoryQuery shape; the adapter
+   * narrows public exposure to `MemoryQueryShape` so the substrate seam never
+   * leaks unbounded filter dimensions (plan §6 narrow-projection ruling).
+   *
+   * The `type` field uses `'exact'` deliberately — the cli's `RvfBackend.query`
+   * only switches on `type === 'semantic'` (to add a vector-similarity filter,
+   * rvf-backend.ts:649). For every other type value the filter loop runs the
+   * same namespace/limit/offset predicate. `'exact'` with no `key` field is
+   * benign (the `q.key && e.key !== q.key` check skips) and is the closest
+   * semantic match for "vectorless metadata scan" in the cli's QueryType enum.
+   */
+  query(q: {
+    readonly type: 'exact';
+    readonly namespace?: string;
+    readonly limit: number;
+    readonly offset?: number;
+  }): Promise<readonly MemoryEntryShape[]>;
+  /**
+   * ADR-0181 task #99 commit 1 — enumerate all distinct namespaces in the
+   * backend. Mirrors `RvfBackend.listNamespaces()` (rvf-backend.ts:896). Not
+   * currently called by the substrate `list` implementation, but plumbed
+   * symmetrically with `query` so the adapter's `IMemoryRvfBackend` surface
+   * tracks the cli's `RvfBackend` shape for future multi-namespace dispatch
+   * (e.g. search-unified's per-namespace iteration in commit 2).
+   */
+  listNamespaces(): Promise<readonly string[]>;
 }
 
 // ─── Adapter config + errors ───
@@ -361,6 +409,36 @@ export class MemoryRvfAdapter implements VectorBackendAsync {
     },
   ): Promise<MemoryEntryShape | null> {
     return this.memory.update(id, update);
+  }
+
+  /**
+   * ADR-0181 task #99 commit 1 — paginated vectorless scan over the memory
+   * backend's entries. Surfaces a narrow projection (`MemoryQueryShape`:
+   * namespace + limit + offset only) to the substrate seam so the broader
+   * MemoryQuery filter dimensions (tags / memoryType / time-ranges) do NOT
+   * leak through `ReadOnlySubstrateHandle.list` (plan §6 narrow-projection
+   * ruling). The adapter widens to the cli's full `MemoryQuery` shape via
+   * `type: 'exact'` (benign — only `'semantic'` triggers a vector branch;
+   * see the `IMemoryRvfBackend.query` doc-block for the cli-side reasoning).
+   */
+  async queryAsync(q: MemoryQueryShape): Promise<readonly MemoryEntryShape[]> {
+    return this.memory.query({
+      type: 'exact',
+      ...(q.namespace !== undefined ? { namespace: q.namespace } : {}),
+      limit: q.limit,
+      ...(q.offset !== undefined ? { offset: q.offset } : {}),
+    });
+  }
+
+  /**
+   * ADR-0181 task #99 commit 1 — enumerate all distinct namespaces. Mirrors
+   * `RvfBackend.listNamespaces()` (rvf-backend.ts:896). Not currently called
+   * by the substrate `list` implementation, but plumbed symmetrically with
+   * `queryAsync` so the adapter surface tracks the cli's `RvfBackend` shape
+   * for commit-2 search-unified's per-namespace iteration.
+   */
+  async listNamespacesAsync(): Promise<readonly string[]> {
+    return this.memory.listNamespaces();
   }
 
   async getStatsAsync(): Promise<VectorStats> {

@@ -215,6 +215,41 @@ export function makeSqliteSubstrate(db: BetterSqlite3.Database): SubstrateAccess
           `A vector query must route to an RVF-family store.`,
       );
     },
+
+    // ADR-0181 task #99 commit 1 — `(namespace, key)` lookup is NOT a SQLite
+    // operation at this seam. The SQLite carve-out stores are SQL-addressed
+    // aggregations (episodes ⨝ episode_embeddings, skills ⨝ skill_embeddings,
+    // hierarchical_memory) whose lookup model is per-table-specific SQL, not a
+    // shared `(namespace, key)` schema. A `getByKey` call routed here is the
+    // same class of misroute as a key/value `read` — fail loud rather than
+    // silently no-op (`feedback-no-fallbacks`). Mirrors the `read`/`write` stub
+    // pattern above.
+    async getByKey<R>(_scope: {
+      storeId: StoreId;
+      namespace: string;
+      key: string;
+    }): Promise<R | undefined> {
+      throw new Error(
+        'makeSqliteSubstrate: getByKey is not supported — the SQLite carve-out is SQL-addressed ' +
+          '(no shared (namespace, key) schema). Use `query({ sql, params })` against `handle.db` directly.',
+      );
+    },
+
+    // ADR-0181 task #99 commit 1 — paginated list is likewise NOT a SQLite
+    // operation at this seam (same reasoning as `getByKey`). The carve-out
+    // tables don't share a uniform pagination shape; callers must run their
+    // own `LIMIT ? OFFSET ?` SQL via `query`.
+    async list<R>(_scope: {
+      storeId: StoreId;
+      namespace?: string;
+      limit?: number;
+      offset?: number;
+    }): Promise<ReadonlyArray<R>> {
+      throw new Error(
+        'makeSqliteSubstrate: list is not supported — the SQLite carve-out is SQL-addressed ' +
+          '(no shared pagination shape). Use `query({ sql, params })` against `handle.db` directly.',
+      );
+    },
   };
 
   return makeSubstrateAccess(handle);

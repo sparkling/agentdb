@@ -435,6 +435,59 @@ export function makeFsJsonSubstrate<S>(opts: MakeFsJsonSubstrateOpts<S>): Substr
           `A vector query must route to an RVF-family store.`,
       );
     },
+
+    // ADR-0181 task #99 commit 1 — `(namespace, key)` exact lookup over the
+    // document's records. Reuses `documentRecords` (array elements OR object
+    // values) so the same scan model `query` uses applies here. A record's
+    // namespace + key are read off the record itself (the FS-JSON convention:
+    // records are flat objects with `namespace` / `key` fields, mirroring the
+    // shape `RvfBackend.getByKey` returns and the cli's `MemoryRecord`). A
+    // record without those fields cannot match — returns `undefined`. Same
+    // point-in-time snapshot semantics as `query` (one `loadJson`, atomic
+    // rename means no torn read).
+    async getByKey<R>(scope: {
+      storeId: StoreId;
+      namespace: string;
+      key: string;
+    }): Promise<R | undefined> {
+      void scope.storeId;
+      const doc = loadJson(opts);
+      const records = documentRecords(doc);
+      const match = records.find((r): boolean => {
+        if (r === null || typeof r !== 'object') return false;
+        const rec = r as Record<string, unknown>;
+        return rec.namespace === scope.namespace && rec.key === scope.key;
+      });
+      return match as R | undefined;
+    },
+
+    // ADR-0181 task #99 commit 1 — paginated list over the document's records.
+    // `namespace` filter is optional; when supplied, only records whose
+    // `.namespace` field equals it are kept. `offset` / `limit` apply AFTER the
+    // namespace filter so pagination math is consistent. Without `limit`, every
+    // (filtered) record is returned — honest for the small FS-JSON files that
+    // host the ~17-store group, and the caller's responsibility to bound for
+    // larger collections (per plan §6, narrow projection).
+    async list<R>(scope: {
+      storeId: StoreId;
+      namespace?: string;
+      limit?: number;
+      offset?: number;
+    }): Promise<ReadonlyArray<R>> {
+      void scope.storeId;
+      const doc = loadJson(opts);
+      let records = documentRecords(doc);
+      if (scope.namespace !== undefined) {
+        const ns = scope.namespace;
+        records = records.filter((r): boolean => {
+          if (r === null || typeof r !== 'object') return false;
+          return (r as Record<string, unknown>).namespace === ns;
+        });
+      }
+      const offset = scope.offset ?? 0;
+      const end = scope.limit !== undefined ? offset + scope.limit : records.length;
+      return records.slice(offset, end) as ReadonlyArray<R>;
+    },
   };
 
   return makeSubstrateAccess(handle);

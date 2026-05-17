@@ -711,6 +711,13 @@ export class Archivist {
       read: (scope) => resolve(scope.storeId).read(scope),
       query: (scope) => resolve(scope.storeId).query(scope),
       vectorSearch: (scope) => resolve(scope.storeId).vectorSearch(scope),
+      // ADR-0181 task #99 commit 1 — `getByKey` / `list` route through the
+      // same per-call resolver. Substrates that cannot honor the operation
+      // (sqlite: SQL-addressed; rvf-without-adapter: missing methods) throw
+      // their own fail-loud message rather than this router pre-empting them
+      // (matches the existing query/vectorSearch routing posture above).
+      getByKey: (scope) => resolve(scope.storeId).getByKey(scope),
+      list: (scope) => resolve(scope.storeId).list(scope),
     };
   }
 

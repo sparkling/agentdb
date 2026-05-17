@@ -1,6 +1,6 @@
 {
   "name": "agentdb-search",
-  "version": "0.1.70",
+  "version": "0.1.71",
   "description": "Advanced retrieval for AgentDB — MMR diversity rerank, explainable recall, metadata filters, hybrid (BM25 + dense) search.",
   "author": {
     "name": "ruvnet",

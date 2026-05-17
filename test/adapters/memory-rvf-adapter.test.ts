@@ -165,7 +165,19 @@ describe('MemoryRvfAdapter — typed bridge from @claude-flow/memory RvfBackend 
       expect(results[0]!.id).toBe(id);
       expect(results[0]!.similarity).toBeCloseTo(1, 6);
       expect(results[0]!.distance).toBeCloseTo(0, 6);
-      expect(results[0]!.metadata).toEqual({ tag: 'alpha' });
+      // ADR-0181 task #100 (cli-flip prep) — searchAsync MERGES top-level
+      // entry fields (namespace/key/content/tags) into result.metadata so
+      // dispatched read handlers see a uniform shape regardless of which
+      // write path produced the entry. The caller-supplied `tag: 'alpha'`
+      // is preserved (spread-at-end semantics); the synthesized top-level
+      // fields appear alongside it.
+      expect(results[0]!.metadata).toEqual({
+        namespace: 'agentdb-vector', // adapter defaultNamespace
+        key: id,
+        content: '',
+        tags: [],
+        tag: 'alpha',
+      });
     });
 
     it('searchAsync threshold prunes low-similarity matches', async () => {
@@ -215,7 +227,18 @@ describe('MemoryRvfAdapter — typed bridge from @claude-flow/memory RvfBackend 
       await adapter.insertAsync('m', vec(1, 0, 0, 0), meta);
 
       const results = await adapter.searchAsync(vec(1, 0, 0, 0), 1);
-      expect(results[0]!.metadata).toEqual({ source: 'phase4' });
+      // ADR-0181 task #100 (cli-flip prep) — merged metadata carries
+      // namespace/key/content/tags alongside the caller-supplied `source`.
+      // Identity (`not.toBe`) check still proves the substrate-semantic
+      // immutability invariant — the adapter returns a fresh map, not the
+      // caller's reference.
+      expect(results[0]!.metadata).toEqual({
+        namespace: 'agentdb-vector',
+        key: 'm',
+        content: '',
+        tags: [],
+        source: 'phase4',
+      });
       expect(results[0]!.metadata).not.toBe(meta);
     });
 
@@ -414,6 +437,203 @@ describe('MemoryRvfAdapter — typed bridge from @claude-flow/memory RvfBackend 
       const adapter = new MemoryRvfAdapter(stub, { dimension: DIM });
       await adapter.insertAsync('id4', vec(1, 0, 0, 0), { key: 'custom-key' });
       expect(stub.entries.get('id4')!.key).toBe('custom-key');
+    });
+  });
+
+  // ─── ADR-0181 task #100 (cli-flip prep) — top-level→metadata merge ───
+  //
+  // Production sees two write paths into the same memory backend:
+  //   1. archivist.dispatch('memory_store') writes rich metadata that
+  //      already carries {namespace, key, content, tags, ...}.
+  //   2. routeMemoryOp({type:'store'}) writes EMPTY metadata; the
+  //      namespace/key/content/tags live ONLY on the top-level MemoryEntry.
+  // Read handlers project off result.metadata, so the adapter MERGES top-
+  // level entry fields into the result/entry metadata so dispatched read
+  // handlers see a uniform shape across both write paths.
+  //
+  // Spread-at-end semantics: dispatch-written entries (rich metadata)
+  // keep their explicit values verbatim; routeMemoryOp-written entries
+  // (empty metadata) get the top-level fields filled in. These tests
+  // simulate both write paths by seeding the backend directly with the
+  // two shapes and verifying each read method surfaces the merge.
+  describe('top-level → metadata merge (cli-flip prep, ADR-0181 task #100)', () => {
+    function seedEntry(
+      stub: ReturnType<typeof makeStubBackend>,
+      opts: {
+        id: string;
+        embedding: Float32Array;
+        namespace: string;
+        key: string;
+        content: string;
+        tags: readonly string[];
+        metadata: Record<string, unknown>;
+      },
+    ): void {
+      const now = Date.now();
+      stub.entries.set(opts.id, {
+        id: opts.id,
+        key: opts.key,
+        content: opts.content,
+        embedding: opts.embedding,
+        type: 'semantic',
+        namespace: opts.namespace,
+        tags: opts.tags,
+        metadata: opts.metadata,
+        accessLevel: 'private',
+        createdAt: now,
+        updatedAt: now,
+        version: 1,
+        references: [],
+        accessCount: 0,
+        lastAccessedAt: now,
+      });
+    }
+
+    describe('searchAsync', () => {
+      it('fills in top-level fields when entry.metadata is empty (routeMemoryOp-store shape)', async () => {
+        const stub = makeStubBackend(DIM);
+        const adapter = new MemoryRvfAdapter(stub, { dimension: DIM });
+        seedEntry(stub, {
+          id: 'route:k1',
+          embedding: vec(1, 0, 0, 0),
+          namespace: 'route-ns',
+          key: 'k1',
+          content: 'hello',
+          tags: ['t1', 't2'],
+          metadata: {}, // empty — routeMemoryOp-store write path
+        });
+
+        const results = await adapter.searchAsync(vec(1, 0, 0, 0), 1);
+        expect(results).toHaveLength(1);
+        expect(results[0]!.metadata).toEqual({
+          namespace: 'route-ns',
+          key: 'k1',
+          content: 'hello',
+          tags: ['t1', 't2'],
+        });
+      });
+
+      it('preserves explicit metadata values when both shapes overlap (dispatch-store shape)', async () => {
+        const stub = makeStubBackend(DIM);
+        const adapter = new MemoryRvfAdapter(stub, { dimension: DIM });
+        // Dispatch-store path: top-level AND metadata both carry the
+        // canonical values. Spread-at-end means the metadata spread
+        // overwrites the synthesized top-level defaults — explicit values
+        // win, no regression.
+        seedEntry(stub, {
+          id: 'disp:k1',
+          embedding: vec(1, 0, 0, 0),
+          namespace: 'disp-ns',
+          key: 'k1',
+          content: 'top-level-content',
+          tags: ['top-tag'],
+          metadata: {
+            namespace: 'disp-ns',
+            key: 'k1',
+            content: 'metadata-content',
+            tags: ['md-tag'],
+            extra: 'kept',
+          },
+        });
+
+        const results = await adapter.searchAsync(vec(1, 0, 0, 0), 1);
+        expect(results[0]!.metadata).toEqual({
+          namespace: 'disp-ns',
+          key: 'k1',
+          content: 'metadata-content', // explicit metadata wins
+          tags: ['md-tag'], // explicit metadata wins
+          extra: 'kept',
+        });
+      });
+    });
+
+    describe('getByKeyAsync', () => {
+      it('surfaces merged metadata while preserving top-level entry fields', async () => {
+        const stub = makeStubBackend(DIM);
+        const adapter = new MemoryRvfAdapter(stub, { dimension: DIM });
+        seedEntry(stub, {
+          id: 'route:k1',
+          embedding: vec(1, 0, 0, 0),
+          namespace: 'route-ns',
+          key: 'k1',
+          content: 'hello',
+          tags: ['t1'],
+          metadata: {}, // routeMemoryOp-store shape
+        });
+
+        const entry = await adapter.getByKeyAsync('route-ns', 'k1');
+        expect(entry).not.toBeNull();
+        // Top-level fields preserved as first-class properties.
+        expect(entry!.namespace).toBe('route-ns');
+        expect(entry!.key).toBe('k1');
+        expect(entry!.content).toBe('hello');
+        expect(entry!.tags).toEqual(['t1']);
+        // Metadata field carries the merged shape.
+        expect(entry!.metadata).toEqual({
+          namespace: 'route-ns',
+          key: 'k1',
+          content: 'hello',
+          tags: ['t1'],
+        });
+      });
+
+      it('returns null on miss (no merge attempted on null)', async () => {
+        const stub = makeStubBackend(DIM);
+        const adapter = new MemoryRvfAdapter(stub, { dimension: DIM });
+        const entry = await adapter.getByKeyAsync('any', 'missing');
+        expect(entry).toBeNull();
+      });
+    });
+
+    describe('queryAsync', () => {
+      it('surfaces merged metadata on every row (mixed write paths)', async () => {
+        const stub = makeStubBackend(DIM);
+        const adapter = new MemoryRvfAdapter(stub, { dimension: DIM });
+        seedEntry(stub, {
+          id: 'route:1',
+          embedding: vec(1, 0, 0, 0),
+          namespace: 'shared-ns',
+          key: 'k1',
+          content: 'route-content',
+          tags: ['rt'],
+          metadata: {}, // routeMemoryOp-store
+        });
+        seedEntry(stub, {
+          id: 'disp:1',
+          embedding: vec(0, 1, 0, 0),
+          namespace: 'shared-ns',
+          key: 'k2',
+          content: 'top-level',
+          tags: ['top'],
+          metadata: {
+            namespace: 'shared-ns',
+            key: 'k2',
+            content: 'md-content',
+            tags: ['md'],
+          }, // dispatch-store
+        });
+
+        const rows = await adapter.queryAsync({ namespace: 'shared-ns', limit: 10 });
+        expect(rows).toHaveLength(2);
+
+        const k1 = rows.find((r) => r.key === 'k1');
+        expect(k1).toBeDefined();
+        expect(k1!.metadata).toEqual({
+          namespace: 'shared-ns',
+          key: 'k1',
+          content: 'route-content',
+          tags: ['rt'],
+        });
+
+        const k2 = rows.find((r) => r.key === 'k2');
+        expect(k2).toBeDefined();
+        expect(k2!.metadata).toEqual({
+          namespace: 'shared-ns',
+          key: 'k2',
+          content: 'md-content', // explicit metadata wins
+          tags: ['md'], // explicit metadata wins
+        });
+      });
     });
   });
 });

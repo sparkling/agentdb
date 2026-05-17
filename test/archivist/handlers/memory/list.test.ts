@@ -38,6 +38,10 @@ interface FakeRecord {
   readonly createdAt?: number;
   readonly updatedAt?: number;
   readonly accessCount?: number;
+  // ADR-0181 task #100 (cli-flip prep) — substrate row may carry tags
+  // (`MemoryEntryShape.tags`). The handler now surfaces them on the
+  // projected MemoryListRecord.
+  readonly tags?: readonly string[];
 }
 
 function makeListSubstrateFake(records: FakeRecord[] = []): {
@@ -177,6 +181,11 @@ describe('memory_list handler (ADR-0181 task #99 commit 2)', () => {
       namespace: 'n',
     }, { substrate: fake.access });
     expect(result).toHaveLength(1);
+    // ADR-0181 task #100 (cli-flip prep) — the envelope now surfaces
+    // `content` (raw) + `tags` so `session_save → session_restore` round-
+    // trips with real values (session-tools.ts:227 reads `entry.content`)
+    // and cli callers iterating `entry.tags` never NPE. `tags` defaults to
+    // [] when the substrate row carries no tags field.
     expect(result[0].item).toEqual({
       key: 'k1',
       namespace: 'n',
@@ -185,6 +194,8 @@ describe('memory_list handler (ADR-0181 task #99 commit 2)', () => {
       accessCount: 7,
       hasEmbedding: true,
       size: 'hello world'.length,
+      content: 'hello world',
+      tags: [],
     });
   });
 
@@ -192,5 +203,55 @@ describe('memory_list handler (ADR-0181 task #99 commit 2)', () => {
     const fake = makeListSubstrateFake();
     await withTestReadContext(listMemoryHandler, {}, { substrate: fake.access });
     expect(fake.state.calls[0].storeId).toBe('memory_store');
+  });
+
+  // ─── ADR-0181 task #100 (cli-flip prep) — widened MemoryListRecord ───
+  //
+  // The cli's pre-flip envelope dropped `content` and `tags` from
+  // `routeMemoryOp({type:'list'})` results. session_save reads
+  // `entry.content || entry.value` (session-tools.ts:227-228), so dropping
+  // content caused `session_save → session_restore` to round-trip empty
+  // values. The handler now surfaces both fields on every list row.
+  describe('widened MemoryListRecord shape (cli-flip prep)', () => {
+    it('surfaces raw content on each list row (session_save round-trip)', async () => {
+      const fake = makeListSubstrateFake([
+        { key: 'k1', namespace: 'n', content: 'first value' },
+        { key: 'k2', namespace: 'n', content: 'second value' },
+      ]);
+      const { result } = await withTestReadContext(listMemoryHandler, {
+        namespace: 'n',
+      }, { substrate: fake.access });
+      expect(result).toHaveLength(2);
+      expect(result[0].item.content).toBe('first value');
+      expect(result[1].item.content).toBe('second value');
+    });
+
+    it('content defaults to empty string (not undefined) so the envelope shape is uniform', async () => {
+      // FakeRecord.content is required for the test fixture, but production
+      // entries could in principle carry an empty content. The handler
+      // surfaces '' rather than omitting the field so cli readers get a
+      // stable shape.
+      const fake = makeListSubstrateFake([
+        { key: 'k', namespace: 'n', content: '' },
+      ]);
+      const { result } = await withTestReadContext(listMemoryHandler, {
+        namespace: 'n',
+      }, { substrate: fake.access });
+      expect(result[0].item.content).toBe('');
+    });
+
+    it('surfaces tags when the substrate row carries them; defaults to [] otherwise', async () => {
+      const fake = makeListSubstrateFake([
+        { key: 'k1', namespace: 'n', content: 'a', tags: ['t1', 't2'] },
+        { key: 'k2', namespace: 'n', content: 'b' }, // no tags field
+      ]);
+      const { result } = await withTestReadContext(listMemoryHandler, {
+        namespace: 'n',
+      }, { substrate: fake.access });
+      expect(result).toHaveLength(2);
+      expect(result[0].item.tags).toEqual(['t1', 't2']);
+      // Default [] — cli callers iterating entry.tags never NPE.
+      expect(result[1].item.tags).toEqual([]);
+    });
   });
 });

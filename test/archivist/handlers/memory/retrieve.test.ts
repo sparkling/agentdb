@@ -33,6 +33,12 @@ interface RetrieveFakeOpts {
     readonly namespace: string;
     readonly content: string;
     readonly metadata?: Record<string, unknown>;
+    // ADR-0181 task #100 (cli-flip prep) — substrate-returned entry may
+    // carry top-level tags/accessCount/embedding which the handler now
+    // surfaces on the projected MemoryRecord.
+    readonly tags?: readonly string[];
+    readonly accessCount?: number;
+    readonly embedding?: Float32Array;
   };
 }
 
@@ -176,5 +182,87 @@ describe('memory_retrieve handler (ADR-0181 task #99 commit 2)', () => {
       key: 'k',
     }, { substrate: fake.access });
     expect(fake.state.calls[0].storeId).toBe('memory_store');
+  });
+
+  // ─── ADR-0181 task #100 (cli-flip prep) — widened MemoryRecord shape ───
+  //
+  // The cli's pre-flip envelope (cli/src/mcp-tools/memory-tools.ts:405-416)
+  // exposes `tags`, `accessCount`, `hasEmbedding` on the retrieve response.
+  // Cli callers iterating `entry.tags.length` crash when these fields are
+  // dropped. The handler now surfaces them on the projected MemoryRecord:
+  //   - tags: copied from entry.tags, defaulting to []
+  //   - accessCount: copied from entry.accessCount, defaulting to 0
+  //   - hasEmbedding: !!entry.embedding (boolean derived from raw Float32Array)
+  describe('widened MemoryRecord shape (cli-flip prep)', () => {
+    it('surfaces tags from the substrate entry on the projected MemoryRecord', async () => {
+      const fake = makeRetrieveSubstrateFake({
+        hit: {
+          id: 'n:k',
+          key: 'k',
+          namespace: 'n',
+          content: 'v',
+          tags: ['greeting', 'urgent'],
+        },
+      });
+      const { result } = await withTestReadContext(retrieveMemoryHandler, {
+        namespace: 'n',
+        key: 'k',
+      }, { substrate: fake.access });
+      expect(result).toHaveLength(1);
+      expect(result[0].item.tags).toEqual(['greeting', 'urgent']);
+    });
+
+    it('defaults tags to [] when the substrate entry omits the field (no NPE)', async () => {
+      const fake = makeRetrieveSubstrateFake({
+        hit: { id: 'n:k', key: 'k', namespace: 'n', content: 'v' },
+      });
+      const { result } = await withTestReadContext(retrieveMemoryHandler, {
+        namespace: 'n',
+        key: 'k',
+      }, { substrate: fake.access });
+      expect(result[0].item.tags).toEqual([]);
+      // Critical invariant — cli callers do `entry.tags.length`; an
+      // undefined tags would throw `Cannot read properties of undefined`.
+      expect(result[0].item.tags!.length).toBe(0);
+    });
+
+    it('surfaces accessCount when present, defaults to 0 when omitted', async () => {
+      const withCount = makeRetrieveSubstrateFake({
+        hit: { id: 'n:k', key: 'k', namespace: 'n', content: 'v', accessCount: 42 },
+      });
+      const r1 = await withTestReadContext(retrieveMemoryHandler, {
+        namespace: 'n', key: 'k',
+      }, { substrate: withCount.access });
+      expect(r1.result[0].item.accessCount).toBe(42);
+
+      const withoutCount = makeRetrieveSubstrateFake({
+        hit: { id: 'n:k', key: 'k', namespace: 'n', content: 'v' },
+      });
+      const r2 = await withTestReadContext(retrieveMemoryHandler, {
+        namespace: 'n', key: 'k',
+      }, { substrate: withoutCount.access });
+      expect(r2.result[0].item.accessCount).toBe(0);
+    });
+
+    it('hasEmbedding is true when the substrate entry has an embedding, false otherwise', async () => {
+      const withEmbedding = makeRetrieveSubstrateFake({
+        hit: {
+          id: 'n:k', key: 'k', namespace: 'n', content: 'v',
+          embedding: new Float32Array([0.1, 0.2, 0.3]),
+        },
+      });
+      const r1 = await withTestReadContext(retrieveMemoryHandler, {
+        namespace: 'n', key: 'k',
+      }, { substrate: withEmbedding.access });
+      expect(r1.result[0].item.hasEmbedding).toBe(true);
+
+      const withoutEmbedding = makeRetrieveSubstrateFake({
+        hit: { id: 'n:k', key: 'k', namespace: 'n', content: 'v' },
+      });
+      const r2 = await withTestReadContext(retrieveMemoryHandler, {
+        namespace: 'n', key: 'k',
+      }, { substrate: withoutEmbedding.access });
+      expect(r2.result[0].item.hasEmbedding).toBe(false);
+    });
   });
 });

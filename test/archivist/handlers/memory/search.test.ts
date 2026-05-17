@@ -31,7 +31,14 @@ interface RecordedSearch {
 interface FakeHit {
   readonly id: string;
   readonly score: number;
-  readonly metadata: { namespace?: string; key?: string; content?: string };
+  // ADR-0181 task #100 (cli-flip prep) — `tags` flows through metadata
+  // (the adapter's Fix A merges top-level entry.tags into result metadata).
+  readonly metadata: {
+    namespace?: string;
+    key?: string;
+    content?: string;
+    tags?: readonly string[];
+  };
 }
 
 function makeSearchSubstrateFake(hits: FakeHit[] = []): {
@@ -196,5 +203,35 @@ describe('memory_search handler (ADR-0181 task #99 commit 2)', () => {
       embeddingScorer: scorer,
     });
     expect(fake.state.calls[0].storeId).toBe('memory_store');
+  });
+
+  // ─── ADR-0181 task #100 (cli-flip prep) — widened MemoryRecord ───
+  //
+  // The shared MemoryRecord type now carries optional tags/accessCount/
+  // hasEmbedding so retrieve.ts can populate them. search.ts populates
+  // `tags` off the merged metadata (Fix A in memory-rvf-adapter.ts).
+  describe('widened MemoryRecord shape (cli-flip prep)', () => {
+    it('surfaces tags from merged metadata on each hit', async () => {
+      const fake = makeSearchSubstrateFake([
+        { id: 'n:k1', score: 0.95, metadata: { namespace: 'n', key: 'k1', content: 'hello', tags: ['greeting'] } },
+      ]);
+      const scorer = makeEmbeddingScorerStub(queryVector);
+      const { result } = await withTestReadContext(searchMemoryHandler, {
+        text: 'q',
+      }, { substrate: fake.access, embeddingScorer: scorer });
+      expect(result).toHaveLength(1);
+      expect(result[0].item.tags).toEqual(['greeting']);
+    });
+
+    it('defaults tags to [] when the merged metadata lacks the field (no NPE)', async () => {
+      const fake = makeSearchSubstrateFake([
+        { id: 'n:k1', score: 0.95, metadata: { namespace: 'n', key: 'k1', content: 'hello' } },
+      ]);
+      const scorer = makeEmbeddingScorerStub(queryVector);
+      const { result } = await withTestReadContext(searchMemoryHandler, {
+        text: 'q',
+      }, { substrate: fake.access, embeddingScorer: scorer });
+      expect(result[0].item.tags).toEqual([]);
+    });
   });
 });

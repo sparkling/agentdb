@@ -67,7 +67,12 @@ interface VectorSearchHit {
   readonly metadata?: Readonly<Record<string, unknown>>;
 }
 
-/** Internal candidate shape — substrate hit lifted to `MemoryRecord` fields. */
+/** Internal candidate shape — substrate hit lifted to `MemoryRecord` fields.
+ *
+ * ADR-0181 task #100 (cli-flip prep) — `tags` surfaces on the candidate so
+ * the final `MemoryRecord` projection can expose them (cli pre-flip envelope
+ * shape). Read off the merged metadata Fix A produces.
+ */
 interface UnifiedCandidate {
   readonly id: string;
   readonly namespace: string;
@@ -76,6 +81,7 @@ interface UnifiedCandidate {
   readonly score: number;
   readonly metadata: Readonly<Record<string, unknown>>;
   readonly source: string;
+  readonly tags: readonly string[];
 }
 
 export const searchUnifiedMemoryHandler: GuardedRead<MemorySearchUnifiedQuery, RankedResults<MemoryRecord>> =
@@ -114,6 +120,13 @@ export const searchUnifiedMemoryHandler: GuardedRead<MemorySearchUnifiedQuery, R
         if (score < threshold) continue;
         const recordKey = typeof meta.key === 'string' ? meta.key : '';
         const recordContent = typeof meta.content === 'string' ? meta.content : '';
+        // ADR-0181 task #100 (cli-flip prep) — surface tags off the merged
+        // metadata (Fix A in memory-rvf-adapter.ts). Defaults to [] when the
+        // metadata field is missing or non-array.
+        const rawTags = meta.tags;
+        const recordTags = Array.isArray(rawTags)
+          ? rawTags.filter((t): t is string => typeof t === 'string')
+          : [];
         candidates.push({
           id: hit.item.id,
           namespace: recordNamespace,
@@ -122,6 +135,7 @@ export const searchUnifiedMemoryHandler: GuardedRead<MemorySearchUnifiedQuery, R
           score,
           metadata: { ...meta },
           source: recordNamespace,
+          tags: recordTags,
         });
       }
 
@@ -173,6 +187,7 @@ export const searchUnifiedMemoryHandler: GuardedRead<MemorySearchUnifiedQuery, R
             content: cand.content,
             score: cand.score,
             metadata: cand.metadata,
+            tags: cand.tags,
           },
           score: cand.score,
           provenance: {

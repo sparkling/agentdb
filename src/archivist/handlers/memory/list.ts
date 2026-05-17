@@ -43,6 +43,20 @@ export interface MemoryListRecord {
   readonly accessCount?: number;
   readonly hasEmbedding?: boolean;
   readonly size?: number;
+  /**
+   * ADR-0181 task #100 (cli-flip prep) — surface the raw content + tags on
+   * each list row. The cli's pre-flip envelope at
+   * `cli/src/mcp-tools/memory-tools.ts` strips `content` from the list
+   * response, but `session_save → session_restore` (session-tools.ts:224-231)
+   * round-trips through `routeMemoryOp({type:'list'})` whose envelope keeps
+   * `entry.content`/`entry.value`; the dispatched read path was dropping
+   * `content` so restored sessions came back with empty values. `tags`
+   * defaults to `[]` so cli callers iterating `entry.tags` never NPE.
+   * Both fields are optional on the type so callers that only need the
+   * legacy projection can ignore them.
+   */
+  readonly content?: string;
+  readonly tags?: readonly string[];
 }
 
 const STORE_ID = 'memory_store' as StoreId;
@@ -54,6 +68,11 @@ const STORE_ID = 'memory_store' as StoreId;
  * handler maps to `MemoryListRecord` are listed. `createdAt` / `updatedAt`
  * are unix-millis on the wire; the handler converts to ISO strings for the
  * cli envelope's `storedAt` / `updatedAt` fields.
+ *
+ * ADR-0181 task #100 (cli-flip prep) — `tags` added so the projection can
+ * surface them on `MemoryListRecord`. `content` was already read for `size`;
+ * it now also flows into the output envelope so `session_save →
+ * session_restore` round-trips with real values.
  */
 interface MemoryStoreRecord {
   readonly key: string;
@@ -63,6 +82,7 @@ interface MemoryStoreRecord {
   readonly createdAt?: number;
   readonly updatedAt?: number;
   readonly accessCount?: number;
+  readonly tags?: readonly string[];
 }
 
 export const listMemoryHandler: GuardedRead<MemoryListQuery, RankedResults<MemoryListRecord>> =
@@ -96,6 +116,13 @@ export const listMemoryHandler: GuardedRead<MemoryListQuery, RankedResults<Memor
           ...(typeof entry.accessCount === 'number' ? { accessCount: entry.accessCount } : {}),
           hasEmbedding: !!entry.embedding,
           size: entry.content ? entry.content.length : 0,
+          // ADR-0181 task #100 (cli-flip prep) — surface raw content + tags
+          // so session_save → session_restore round-trips with real values
+          // and cli callers iterating `entry.tags` never NPE. `content`
+          // defaults to '' (not omitted) so the envelope shape is uniform
+          // across entries; `tags` defaults to [].
+          content: entry.content ?? '',
+          tags: entry.tags ? [...entry.tags] : [],
         },
         score: 0,
         provenance: {

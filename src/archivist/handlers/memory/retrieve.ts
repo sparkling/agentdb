@@ -47,6 +47,15 @@ const STORE_ID = 'memory_store' as StoreId;
  * (the `MemoryEntryShape` the cli's `RvfBackend.getByKey` returns). Declared
  * inline so the handler does not import the adapter type; only the fields the
  * handler maps to `MemoryRecord` are listed.
+ *
+ * ADR-0181 task #100 (cli-flip prep) — widened to expose `tags`,
+ * `accessCount`, `embedding`. The pre-flip cli envelope at
+ * `cli/src/mcp-tools/memory-tools.ts:405-416` surfaces these on the retrieve
+ * response (`tags`, `accessCount`, `hasEmbedding`); dropping them caused
+ * `cli memory retrieve` to crash on `entry.tags.length` against the
+ * dispatched read path. `embedding` is read only to derive `hasEmbedding`
+ * (boolean) for the projected `MemoryRecord` — the raw Float32Array does not
+ * leak past the handler boundary.
  */
 interface MemoryStoreRecord {
   readonly id: string;
@@ -54,6 +63,9 @@ interface MemoryStoreRecord {
   readonly namespace: string;
   readonly content: string;
   readonly metadata?: Readonly<Record<string, unknown>>;
+  readonly tags?: readonly string[];
+  readonly accessCount?: number;
+  readonly embedding?: Float32Array;
 }
 
 export const retrieveMemoryHandler: GuardedRead<MemoryRetrieveQuery, RankedResults<MemoryRecord>> =
@@ -84,6 +96,15 @@ export const retrieveMemoryHandler: GuardedRead<MemoryRetrieveQuery, RankedResul
           content: entry.content,
           score: 1,
           metadata: entry.metadata ? { ...entry.metadata } : undefined,
+          // ADR-0181 task #100 (cli-flip prep) — surface cli pre-flip
+          // envelope fields. `tags` defaults to `[]` so cli callers iterating
+          // `entry.tags.length` never NPE. `accessCount` defaults to 0 when
+          // the backend does not track it. `hasEmbedding` is computed from
+          // the raw Float32Array presence so the response is uniform across
+          // backends that may or may not carry embeddings.
+          tags: entry.tags ? [...entry.tags] : [],
+          accessCount: typeof entry.accessCount === 'number' ? entry.accessCount : 0,
+          hasEmbedding: !!entry.embedding,
         },
         score: 1,
         provenance: {

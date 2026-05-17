@@ -53,6 +53,18 @@ export interface MemoryRecord {
   readonly content: string;
   readonly score: number;
   readonly metadata?: Record<string, unknown>;
+  /**
+   * ADR-0181 task #100 (cli-flip prep) — fields the cli's pre-flip envelope
+   * exposed (memory-tools.ts retrieve/search). Optional so the substrate seam
+   * surfaces them when available without forcing every projection to compute
+   * them (search hits don't carry `embedding` in the substrate result; only
+   * `retrieve.ts` populates `hasEmbedding` today). Adding them here keeps the
+   * `MemoryRecord` type stable across retrieve / search / search_unified —
+   * widening shared shapes per the trace investigation for task #100.
+   */
+  readonly tags?: readonly string[];
+  readonly accessCount?: number;
+  readonly hasEmbedding?: boolean;
 }
 
 export interface Provenance {
@@ -146,6 +158,14 @@ export const searchMemoryHandler: GuardedRead<MemorySearchQuery, RankedResults<M
         if (score < threshold) continue;
         const recordKey = typeof meta.key === 'string' ? meta.key : '';
         const recordContent = typeof meta.content === 'string' ? meta.content : '';
+        // ADR-0181 task #100 (cli-flip prep) — surface tags off the merged
+        // metadata (Fix A in memory-rvf-adapter.ts) so cli callers iterating
+        // `entry.tags` never NPE on dispatched search hits. `tags` defaults
+        // to [] when the metadata field is missing or non-array.
+        const rawTags = meta.tags;
+        const recordTags = Array.isArray(rawTags)
+          ? rawTags.filter((t): t is string => typeof t === 'string')
+          : [];
         const record: MemoryRecord = {
           id: hit.item.id,
           namespace: recordNamespace,
@@ -153,6 +173,7 @@ export const searchMemoryHandler: GuardedRead<MemorySearchQuery, RankedResults<M
           content: recordContent,
           score,
           metadata: { ...meta },
+          tags: recordTags,
         };
         ranked.push({
           item: record,

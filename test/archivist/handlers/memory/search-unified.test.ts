@@ -24,7 +24,14 @@ import type {
 interface FakeHit {
   readonly id: string;
   readonly score: number;
-  readonly metadata: { namespace?: string; key?: string; content?: string };
+  // ADR-0181 task #100 (cli-flip prep) — `tags` flows through metadata
+  // (the adapter's Fix A merges top-level entry.tags into result metadata).
+  readonly metadata: {
+    namespace?: string;
+    key?: string;
+    content?: string;
+    tags?: readonly string[];
+  };
 }
 
 interface RecordedSearch {
@@ -188,5 +195,39 @@ describe('memory_search_unified handler (ADR-0181 task #99 commit 2)', () => {
       embeddingScorer: scorer,
     });
     expect(fake.state.calls[0].storeId).toBe('memory_store');
+  });
+
+  // ─── ADR-0181 task #100 (cli-flip prep) — widened MemoryRecord ───
+  //
+  // search-unified.ts populates MemoryRecord.tags off the merged metadata
+  // (Fix A in memory-rvf-adapter.ts) so cli callers iterating entry.tags
+  // never NPE on unified search results.
+  describe('widened MemoryRecord shape (cli-flip prep)', () => {
+    it('surfaces tags from merged metadata on each deduped hit', async () => {
+      const fake = makeUnifiedSubstrateFake([
+        { id: 'a:k1', score: 0.9, metadata: { namespace: 'a', key: 'k1', content: 'A', tags: ['t1'] } },
+        { id: 'b:k2', score: 0.85, metadata: { namespace: 'b', key: 'k2', content: 'B', tags: ['t2', 't3'] } },
+      ]);
+      const scorer = makeEmbeddingScorerStub(queryVector);
+      const { result } = await withTestReadContext(searchUnifiedMemoryHandler, {
+        query: 'q',
+      }, { substrate: fake.access, embeddingScorer: scorer });
+      expect(result).toHaveLength(2);
+      const k1 = result.find((r) => r.item.key === 'k1');
+      const k2 = result.find((r) => r.item.key === 'k2');
+      expect(k1!.item.tags).toEqual(['t1']);
+      expect(k2!.item.tags).toEqual(['t2', 't3']);
+    });
+
+    it('defaults tags to [] when merged metadata lacks the field (no NPE)', async () => {
+      const fake = makeUnifiedSubstrateFake([
+        { id: 'a:k1', score: 0.9, metadata: { namespace: 'a', key: 'k1', content: 'A' } },
+      ]);
+      const scorer = makeEmbeddingScorerStub(queryVector);
+      const { result } = await withTestReadContext(searchUnifiedMemoryHandler, {
+        query: 'q',
+      }, { substrate: fake.access, embeddingScorer: scorer });
+      expect(result[0].item.tags).toEqual([]);
+    });
   });
 });

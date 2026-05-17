@@ -369,11 +369,29 @@ export class MemoryRvfAdapter implements VectorBackendAsync {
     const memResults = await this.memory.search(query, memOptions);
 
     // Build the agentdb-shape result array from scratch (substrate-semantic).
+    //
+    // ADR-0181 task #100 (cli-flip prep) — MERGE top-level entry fields
+    // (namespace, key, content, tags) into result metadata. Production sees
+    // two write paths into the same RVF store:
+    //   1. `archivist.dispatch('memory_store')` writes rich metadata that
+    //      already carries `{namespace, key, content, tags, ...}` (see
+    //      `handlers/memory/store.ts` `baseMetadata`).
+    //   2. `routeMemoryOp({type:'store'})` writes EMPTY metadata; the
+    //      namespace/key/content live ONLY on the top-level `MemoryEntry`.
+    // Read handlers (search, retrieve, list) project off `result.metadata`,
+    // so without the merge entries from path (2) appear with `meta.namespace`
+    // undefined and namespace filters exclude every hit — the exact
+    // regression observed in task #100.
+    //
+    // Spread-at-end: dispatch-written entries keep their explicit metadata
+    // values (the spread overwrites the top-level defaults); routeMemoryOp-
+    // written entries get the top-level fields filled in. Either way the
+    // downstream handler reads a uniformly populated metadata shape.
     return memResults.map((r): AgentdbSearchResult => ({
       id: r.entry.id,
       distance: r.distance,
       similarity: r.score,
-      metadata: { ...r.entry.metadata },
+      metadata: this.mergeEntryMetadata(r.entry),
     }));
   }
 
@@ -385,11 +403,18 @@ export class MemoryRvfAdapter implements VectorBackendAsync {
    * ADR-0181 §C — memory_store RC-2 idempotency probe. Surfaces the cli
    * `RvfBackend.getByKey` over the adapter so the archivist's memory_store
    * handler can detect duplicate-key writes without searching the vector
-   * index. Returns the underlying `MemoryEntryShape` (handler reads
-   * `.content` / `.id` only).
+   * index.
+   *
+   * ADR-0181 task #100 (cli-flip prep) — returns the entry with its
+   * `metadata` field merged to carry top-level fields (namespace/key/content/
+   * tags), matching the shape `searchAsync` produces. See `searchAsync`
+   * doc-block for the rationale (two write paths, one read projection).
+   * Top-level entry fields are preserved as first-class properties so callers
+   * that read them directly (e.g. `retrieve.ts` handler) still see them.
    */
   async getByKeyAsync(namespace: string, key: string): Promise<MemoryEntryShape | null> {
-    return this.memory.getByKey(namespace, key);
+    const entry = await this.memory.getByKey(namespace, key);
+    return entry === null ? null : this.withMergedMetadata(entry);
   }
 
   /**
@@ -422,12 +447,17 @@ export class MemoryRvfAdapter implements VectorBackendAsync {
    * see the `IMemoryRvfBackend.query` doc-block for the cli-side reasoning).
    */
   async queryAsync(q: MemoryQueryShape): Promise<readonly MemoryEntryShape[]> {
-    return this.memory.query({
+    const rows = await this.memory.query({
       type: 'exact',
       ...(q.namespace !== undefined ? { namespace: q.namespace } : {}),
       limit: q.limit,
       ...(q.offset !== undefined ? { offset: q.offset } : {}),
     });
+    // ADR-0181 task #100 (cli-flip prep) — merge top-level entry fields into
+    // each row's metadata so list/handler projections see a uniform shape
+    // regardless of which write path produced the entry. See `searchAsync`
+    // doc-block for the rationale.
+    return rows.map((entry) => this.withMergedMetadata(entry));
   }
 
   /**
@@ -576,5 +606,39 @@ export class MemoryRvfAdapter implements VectorBackendAsync {
   private resolveKey(id: string, metadata: Record<string, unknown> | undefined): string {
     const raw = metadata?.key;
     return typeof raw === 'string' && raw.length > 0 ? raw : id;
+  }
+
+  /**
+   * ADR-0181 task #100 (cli-flip prep) — build a uniformly populated metadata
+   * map for read-path projection. Top-level entry fields (namespace, key,
+   * content, tags) are written first; the entry's own metadata is spread
+   * last so dispatch-written entries (which carry these keys explicitly in
+   * metadata) keep their explicit values verbatim. routeMemoryOp-store
+   * entries (empty entry.metadata) get the top-level fields filled in.
+   *
+   * Used by `searchAsync` (where the result envelope's `metadata` is the
+   * only projection surface) and by `withMergedMetadata` for `getByKeyAsync`
+   * / `queryAsync` (which return `MemoryEntryShape` with this map as the
+   * `metadata` field).
+   */
+  private mergeEntryMetadata(entry: MemoryEntryShape): Record<string, unknown> {
+    return {
+      namespace: entry.namespace,
+      key: entry.key,
+      content: entry.content,
+      tags: entry.tags,
+      ...entry.metadata,
+    };
+  }
+
+  /**
+   * ADR-0181 task #100 (cli-flip prep) — return a `MemoryEntryShape` whose
+   * `metadata` field has the merge applied. Top-level fields are preserved
+   * as first-class properties so callers that read top-level (e.g. the
+   * `retrieve.ts` handler) still see them. Used by `getByKeyAsync` and
+   * `queryAsync`.
+   */
+  private withMergedMetadata(entry: MemoryEntryShape): MemoryEntryShape {
+    return { ...entry, metadata: this.mergeEntryMetadata(entry) };
   }
 }

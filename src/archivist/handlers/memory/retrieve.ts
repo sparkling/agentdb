@@ -2,33 +2,32 @@
 // memory_retrieve read handler (ADR-0180 Phase 3, §Architecture · Read-path return shape).
 // Registers as `GuardedRead<MemoryRetrieveQuery, RankedResults<MemoryRecord>>` so
 // even single-entry reads carry provenance verbatim. `key` resolves an exact
-// (namespace, key) lookup; `id` resolves by storage row id. The legacy
-// memory_retrieve tool returns at most one entry, so we return either a
-// 1-element ranked-results array on hit, or an empty array on miss — shape
-// parity with `memory_search` avoids a second result type.
+// (namespace, key) lookup via the substrate's `getByKey` (ADR-0181 task #99
+// commit 2). The legacy memory_retrieve tool returns at most one entry, so we
+// return either a 1-element ranked-results array on hit, or an empty array on
+// miss — shape parity with `memory_search` avoids a second result type.
 //
-// ADR-0181 Phase 3 Amendment (2026-05-15): the cli's `routeMemoryOp` case 'get'
-// (memory-router.ts:1223 — `storage.getByKey` + JSON-value reparse against the
-// RVF backend) stays authoritative during the migration window. This handler
-// reads from the same FS-JSON candidate store `memory_search` does (cli writes
-// candidates ahead of dispatch); a key match is a `rawScore: 1` exact hit per
-// ADR-0180 §Provenance rollout scope.
+// ADR-0181 task #99 commit 2 (2026-05-17): STORE_ID flipped from
+// `memory_search_index` (FS-JSON, never populated in production) to
+// `memory_store` (the canonical RVF content store the `memory_store` write
+// handler persists into). The read path now collapses to the same RVF backend
+// the cli's `routeMemoryOp` case 'get' (memory-router.ts:1223 —
+// `storage.getByKey(namespace, key)`) reads from — closing the longstanding
+// "PHASE 6+: route through archivist when memory_search_index→memory_store
+// collapse lands" gap flagged at memory-tools.ts:384/500/750/1179.
 //
 // Provenance shape mirrors the cli's pre-shaped envelope verbatim
 // (memory-tools.ts:347-356):
 //   { storeId: 'memory_store', matchType: 'exact', rawScore: 1, rank: 1 }
 // No `matchedField` — cli omits it; strict cli-parity per Phase 3 DA ruling
-// (round 2, item 4). The cli surface uses storeId='memory_store' (the canonical
-// RVF content store) for back-compat with existing scripts that inspect the
-// provenance fields directly. Phase 4 collapses the indirection when the cli
-// boundary flips through the archivist.
+// (round 2, item 4).
 //
-// TODO(ADR-0181 Phase 4): until the cli→agentdb RVF adapter is wired and the
-// `memory_search_index` FS-JSON store is populated, this handler returns an
-// empty RankedResults for every dispatched read — the provenance shape is
-// preserved and the registration is live, but no real candidate ever matches.
-// The cli's tool handler at memory-tools.ts:303-375 stays authoritative until
-// Phase 4 flips the dispatch boundary.
+// `id` field on the payload is a legacy parameter (the prior FS-JSON corpus
+// could be addressed by storage row id). The substrate's `getByKey` exposes
+// `(namespace, key)` only — the production cli has never had an id-only path
+// (`routeMemoryOp` case 'get' takes only namespace+key). When `key` is absent,
+// the handler returns an empty RankedResults rather than synthesizing an
+// alternative lookup — `feedback-no-fallbacks`.
 
 import { registerReadHandler } from '../../registration.js';
 import type { GuardedRead, ReadContext, StoreId } from '../../index.js';
@@ -41,38 +40,51 @@ export interface MemoryRetrieveQuery {
   readonly limit?: number;
 }
 
-const STORE_ID = 'memory_search_index' as StoreId;
+const STORE_ID = 'memory_store' as StoreId;
 
-interface MemoryRetrieveStore {
-  readonly candidates: ReadonlyArray<MemoryRecord>;
+/**
+ * Shape the substrate's `getByKey` yields for the `memory_store` RVF backend
+ * (the `MemoryEntryShape` the cli's `RvfBackend.getByKey` returns). Declared
+ * inline so the handler does not import the adapter type; only the fields the
+ * handler maps to `MemoryRecord` are listed.
+ */
+interface MemoryStoreRecord {
+  readonly id: string;
+  readonly key: string;
+  readonly namespace: string;
+  readonly content: string;
+  readonly metadata?: Readonly<Record<string, unknown>>;
 }
 
 export const retrieveMemoryHandler: GuardedRead<MemoryRetrieveQuery, RankedResults<MemoryRecord>> =
   registerReadHandler<MemoryRetrieveQuery, RankedResults<MemoryRecord>>(
     'memory_retrieve',
     async (ctx: ReadContext, payload: MemoryRetrieveQuery): Promise<RankedResults<MemoryRecord>> => {
-      const store = await ctx.substrate.read<MemoryRetrieveStore>({ storeId: STORE_ID, key: 'root' });
-      const corpus = store?.candidates ?? [];
+      // Substrate `getByKey` requires both namespace and key. Cli parity
+      // (memory-router.ts:1225 — `storage.getByKey(namespace || 'default', key || '')`):
+      // namespace defaults to 'default'; empty key is a miss (no synthesized
+      // alternative lookup — `feedback-no-fallbacks`).
+      const key = payload.key;
+      if (key === undefined || key === '') return [];
+      const namespace =
+        payload.namespace && payload.namespace !== 'all' ? payload.namespace : 'default';
 
-      const ns = payload.namespace && payload.namespace !== 'all' ? payload.namespace : undefined;
-
-      // Match priority: explicit id wins; otherwise (namespace, key) exact match.
-      // Both filters are pure equality — matchType: 'exact' per ADR-0180 §Read-path
-      // return shape (the closed Provenance union in ./search).
-      const matched = corpus.find((r) => {
-        if (payload.id !== undefined && r.id === payload.id) return true;
-        if (payload.key !== undefined) {
-          if (r.key !== payload.key) return false;
-          if (ns !== undefined && r.namespace !== ns) return false;
-          return true;
-        }
-        return false;
+      const entry = await ctx.substrate.getByKey<MemoryStoreRecord>({
+        storeId: STORE_ID,
+        namespace,
+        key,
       });
-
-      if (!matched) return [];
+      if (!entry) return [];
 
       const hit: RankedResult<MemoryRecord> = {
-        item: matched,
+        item: {
+          id: entry.id,
+          namespace: entry.namespace,
+          key: entry.key,
+          content: entry.content,
+          score: 1,
+          metadata: entry.metadata ? { ...entry.metadata } : undefined,
+        },
         score: 1,
         provenance: {
           storeId: 'memory_store',

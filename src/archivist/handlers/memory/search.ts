@@ -5,37 +5,35 @@
 // `{id, content, score}[]`) vs full RankedResult shape is gated by the
 // includeProvenance parameter wired at the cli boundary (memory-tools.ts).
 //
-// ADR-0181 Phase 3 Amendment (2026-05-15): the cli's RVF-backed `routeMemoryOp`
-// case 'search' (memory-router.ts:1094 — BM25/ONNX/hash-fallback fusion, MMR
-// diversity, AttentionService boost) stays authoritative during the migration
-// window. This handler reads from a separate FS-JSON candidate store the cli
-// writes to ahead of dispatch — Phase 4 inherits the RVF-substrate wire-up
-// (cli → agentdb-typed `RvfBackend` adapter) which collapses this two-store
-// shape back to a single `ctx.substrate.vectorSearch` against `memory_store`.
+// ADR-0181 task #99 commit 2 (2026-05-17): STORE_ID flipped from
+// `memory_search_index` (FS-JSON, never populated in production) to
+// `memory_store` (the canonical RVF content store the `memory_store` write
+// handler persists into). The handler now drives the substrate's
+// `vectorSearch` (HNSW similarity over the wired `MemoryRvfAdapter`) —
+// the same path the cli's `routeMemoryOp` case 'search' (memory-router.ts:1205
+// — `storage.search(embedding, {k, threshold, filters})`) runs in production.
+// Query-side embedding is generated through the read-side EmbeddingScorer
+// capability (`ctx.capabilities.requireEmbeddingScorer()` — ADR-0069 unified
+// mpnet pipeline), mirroring how `store.ts` mints the storage-side embedding.
 //
-// STORE_ID `memory_search_index` is FS-JSON-classified (not in RVF_STORE_IDS /
-// SQLITE_CARVE_OUT_STORE_IDS — falls through to the structural default in
-// substrate-registry.ts `classifyStore`). The cli's QueryOptimizer + MetadataFilter
-// + MMRDiversityRanker + AttentionService composition is OUT OF SCOPE here —
-// those branch on the cli controllers, not on the substrate seam; they re-enter
-// in the Phase 4 cli boundary flip.
+// Out of scope here (preserved at the cli boundary post-dispatch, NOT pulled
+// in by this collapse):
+//   - QueryOptimizer / MetadataFilter / MMRDiversityRanker / AttentionService
+//     fusion (memory-tools.ts:397-583 — those branch on the cli controllers,
+//     not on the substrate seam).
+//   - BM25 hash-fallback path (memory-router.ts:1155-1185 — gated on
+//     `pipelineProvider === 'hash-fallback'`; the cli still owns the
+//     pipeline-mode detection).
+//   - Response-envelope wrapping (Phase 3 DA ruling, round 2, item 7): the cli
+//     constructs `{ query, results, total, searchTime, backend, attention, ... }`
+//     at the boundary POST-dispatchRead, NOT in this handler. This handler
+//     returns ONLY `RankedResults<MemoryRecord>` (the array).
 //
-// Response-envelope split (Phase 3 DA ruling, round 2, item 7): the cli's tool
-// response wrapper — `{ query, results, total, searchTime, backend, attention,
-// ...synthesis? }` (memory-tools.ts:556-564) — is constructed at the cli
-// boundary POST-dispatchRead, NOT in this handler. This handler returns ONLY
-// `RankedResults<MemoryRecord>` (the array). Phase 4's cli boundary flip
-// preserves the split: the cli tool handler calls `dispatch('memory_search', q)`
-// to get the ranked array, then wraps it with timing/backend/attention metadata
-// before returning to the MCP edge. The handler must not widen its return type.
-//
-// TODO(ADR-0181 Phase 4): until the cli→agentdb RVF adapter is wired and the
-// `memory_search_index` FS-JSON store is populated by the cli's `routeMemoryOp`
-// case 'search', this handler returns an empty RankedResults for every
-// dispatched read — the provenance shape is preserved and the registration is
-// live, but no real candidates ever materialize. The cli's tool handler at
-// memory-tools.ts:397-583 stays authoritative until Phase 4 flips the dispatch
-// boundary.
+// Namespace filtering: the substrate `vectorSearch` is namespace-agnostic
+// (HNSW similarity over the full store). The cli passes `filters: { namespace }`
+// to `storage.search`; here we post-filter the substrate's results by
+// `metadata.namespace`. Topk is widened by a small factor so the post-filter
+// has headroom — `topK * NS_OVERFETCH` per cli search heuristics.
 
 import { registerReadHandler } from '../../registration.js';
 import type { GuardedRead, ReadContext, StoreId } from '../../index.js';
@@ -74,48 +72,96 @@ export interface RankedResult<T> {
 
 export type RankedResults<T> = ReadonlyArray<RankedResult<T>>;
 
-const STORE_ID = 'memory_search_index' as StoreId;
+const STORE_ID = 'memory_store' as StoreId;
 
 /**
- * On-disk FS-JSON document the `memory_search` substrate owns. The cli writes a
- * candidate corpus into this store ahead of dispatch (Phase 3 migration window).
- * Each candidate carries a precomputed `score` (the semantic similarity captured
- * at write time by the cli's embedding pipeline) so the read path is a
- * lock-free filter+rank+shape — no vector math here.
+ * Overfetch factor for the namespace post-filter. The substrate's
+ * `vectorSearch` returns top-K across all namespaces; when the caller scopes
+ * to a single namespace we widen the request to `topK * NS_OVERFETCH` so the
+ * filter has headroom before slicing back to `limit`. Tuned conservatively —
+ * the cli's `storage.search` does push-down namespace filtering and never
+ * needs overfetch, but the substrate seam is content-store-agnostic and the
+ * RVF backend's HNSW search has no namespace-aware partition today.
  */
-interface MemorySearchStore {
-  readonly candidates: ReadonlyArray<MemoryRecord>;
+const NS_OVERFETCH = 4;
+
+/**
+ * Shape the substrate's `vectorSearch` yields for an RVF store
+ * (`{ item: SearchResult, score: number }`, where `SearchResult` carries
+ * `{ id, distance, similarity, metadata }`). Declared inline so the handler
+ * does not import `SearchResult`; the `metadata` map carries the
+ * `MemoryEntryShape`-derived fields the `store.ts` handler writes
+ * (`namespace`, `key`, `content`, `tags`, ...).
+ */
+interface VectorSearchHit {
+  readonly id: string;
+  readonly distance?: number;
+  readonly similarity?: number;
+  readonly metadata?: Readonly<Record<string, unknown>>;
 }
 
 export const searchMemoryHandler: GuardedRead<MemorySearchQuery, RankedResults<MemoryRecord>> =
   registerReadHandler<MemorySearchQuery, RankedResults<MemoryRecord>>(
     'memory_search',
     async (ctx: ReadContext, payload: MemorySearchQuery): Promise<RankedResults<MemoryRecord>> => {
-      const store = await ctx.substrate.read<MemorySearchStore>({ storeId: STORE_ID, key: 'root' });
-      const corpus = store?.candidates ?? [];
-
       const threshold = payload.threshold ?? 0.3;
       const limit = payload.limit ?? 10;
       const ns = payload.namespace && payload.namespace !== 'all' ? payload.namespace : undefined;
 
-      const ranked = corpus
-        .filter((r) => (ns ? r.namespace === ns : true))
-        .filter((r) => r.score >= threshold)
-        .slice()
-        .sort((a, b) => b.score - a.score)
-        .slice(0, limit);
+      // Empty query text is a miss (cli parity: `bm25Rank` throws on empty
+      // tokens at memory-router.ts:1172; the semantic path would embed an
+      // empty string and rank no-better than random). `feedback-no-fallbacks`:
+      // surface the no-results outcome rather than synthesize a result set.
+      if (!payload.text) return [];
 
-      return ranked.map((record, index): RankedResult<MemoryRecord> => ({
-        item: record,
-        score: record.score,
-        provenance: {
-          storeId: STORE_ID as string,
-          matchType: 'semantic',
-          rawScore: record.score,
-          rank: index + 1,
-          matchedField: 'content',
-        },
-      }));
+      // Generate the query embedding via the read-side EmbeddingScorer
+      // capability (ADR-0069 unified mpnet pipeline; same model the cli's
+      // store path uses to mint storage embeddings — keeps query/document
+      // vector spaces aligned).
+      const scorer = ctx.capabilities.requireEmbeddingScorer();
+      const queryVector = await scorer.embed(payload.text);
+
+      // Widen topK when scoped to a single namespace so the post-filter has
+      // headroom. `limit` stays the final slice.
+      const topK = ns ? limit * NS_OVERFETCH : limit;
+      const hits = await ctx.substrate.vectorSearch<VectorSearchHit>({
+        storeId: STORE_ID,
+        vector: queryVector,
+        topK,
+      });
+
+      const ranked: RankedResult<MemoryRecord>[] = [];
+      for (const hit of hits) {
+        const meta = hit.item.metadata ?? {};
+        const recordNamespace = typeof meta.namespace === 'string' ? meta.namespace : '';
+        if (ns !== undefined && recordNamespace !== ns) continue;
+        const score = hit.score;
+        if (score < threshold) continue;
+        const recordKey = typeof meta.key === 'string' ? meta.key : '';
+        const recordContent = typeof meta.content === 'string' ? meta.content : '';
+        const record: MemoryRecord = {
+          id: hit.item.id,
+          namespace: recordNamespace,
+          key: recordKey,
+          content: recordContent,
+          score,
+          metadata: { ...meta },
+        };
+        ranked.push({
+          item: record,
+          score,
+          provenance: {
+            storeId: STORE_ID as string,
+            matchType: 'semantic',
+            rawScore: score,
+            rank: ranked.length + 1,
+            matchedField: 'content',
+          },
+        });
+        if (ranked.length >= limit) break;
+      }
+
+      return ranked;
     },
     { cacheScope: 'namespace' },
   );

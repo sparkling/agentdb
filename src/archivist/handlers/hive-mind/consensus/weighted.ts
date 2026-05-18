@@ -4,11 +4,12 @@
 // Requires `state.queen` defined at propose AND vote — throws
 // MissingQueenForWeightedConsensusError on either path (cli ~2026, ~2230).
 
-import type { MutationContext } from '../../../index.js';
+import type { MutationContext, SubstrateHandle } from '../../../index.js';
 import type { HiveMindConsensusPayload } from '../consensus.js';
 
 export async function handleWeightedConsensus(
   _ctx: MutationContext<false>,
+  _handle: SubstrateHandle,
   _payload: HiveMindConsensusPayload,
 ): Promise<void> {
   throw new Error(

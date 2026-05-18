@@ -102,6 +102,11 @@ export type HiveMindConsensusPayload =
       readonly timeoutMs?: number;
       readonly roundTimeoutMs?: number;
       readonly voterId?: string;
+      /** Wave 6 cli pre-mint per ADR-0184 Wave 2 DA Concern 3 — sidesteps
+       *  the pre/post-snapshot race for parallel propose calls (mirrors
+       *  task_create's pre-minted taskId pattern). When omitted the handler
+       *  mints `proposal-${Date.now()}-${rand}` (back-compat). */
+      readonly proposalId?: string;
     }
   | {
       readonly action: 'vote';
@@ -129,6 +134,22 @@ export type HiveMindConsensusPayload =
     };
 
 const STORE_ID = 'hive-mind_consensus' as StoreId;
+
+/** Type-guard for the dispatch switch. Used when peeking at a stored
+ *  proposal's `strategy` field for status/list dispatch — the on-disk shape
+ *  is `string`, not the typed `ConsensusStrategy` union. */
+function isKnownStrategy(
+  s: string,
+): s is 'bft' | 'raft' | 'quorum' | 'weighted' | 'gossip' | 'crdt' {
+  return (
+    s === 'bft' ||
+    s === 'raft' ||
+    s === 'quorum' ||
+    s === 'weighted' ||
+    s === 'gossip' ||
+    s === 'crdt'
+  );
+}
 
 // ADR-0184 Wave 1: parent dispatcher routes `payload.strategy` to per-strategy
 // handler modules under `./consensus/<strategy>.ts`. Each per-strategy module's
@@ -164,29 +185,62 @@ export const consensusHiveMindHandler: GuardedWrite<HiveMindConsensusPayload> =
       // `strategy` field; the original wire payload is no longer referenced.
       const rawStrategy =
         'strategy' in payload ? payload.strategy : undefined;
-      const strategy: Exclude<typeof rawStrategy, 'byzantine' | undefined> =
+      const propStrategy: 'bft' | 'raft' | 'quorum' | 'weighted' | 'gossip' | 'crdt' =
         rawStrategy === 'byzantine'
           ? 'bft'
           : (rawStrategy ?? 'raft');
-      const normalisedPayload = {
-        ...payload,
-        strategy,
-      } as HiveMindConsensusPayload;
 
-      await ctx.substrate.withWrite({ storeId: STORE_ID }, async (_handle) => {
+      // ADR-0184 Wave 2 DA Concern 1 resolution: per-strategy handlers receive
+      // the parent's `handle` so each strategy's read/write happens within the
+      // parent's single `withWrite` scope. The substrate O_EXCL lock is NOT
+      // reentrant; the per-strategy bodies must not re-enter `withWrite`. One
+      // `handle.write` per scope = one audit entry per call (ADR-0180
+      // §Confirmation).
+      await ctx.substrate.withWrite({ storeId: STORE_ID }, async (handle) => {
+        // For status/list, the payload has no `strategy` field — look up
+        // the proposal's strategy from state so the per-strategy handler
+        // sees a consistent value. `list` is strategy-agnostic but routes
+        // through bft's handler (any strategy's list arm is a no-op);
+        // `status` looks up the specific proposal.
+        let strategy = propStrategy;
+        if (payload.action === 'status') {
+          const state = await handle.read<{
+            consensus?: {
+              pending?: Array<{ proposalId: string; strategy: string }>;
+              history?: Array<{ proposalId: string; strategy: string }>;
+            };
+          }>({ storeId: STORE_ID, key: 'root' });
+          const pending = state?.consensus?.pending ?? [];
+          const history = state?.consensus?.history ?? [];
+          const found =
+            pending.find((p) => p.proposalId === payload.proposalId) ??
+            history.find((h) => h.proposalId === payload.proposalId);
+          if (found && isKnownStrategy(found.strategy)) {
+            strategy = found.strategy;
+          }
+          // If proposal not found, fall through to the default (raft) so the
+          // per-strategy handler throws ProposalNotFoundError with a coherent
+          // strategy attribution.
+        }
+
+        const normalisedPayload = {
+          ...payload,
+          strategy,
+        } as HiveMindConsensusPayload;
+
         switch (strategy) {
           case 'bft':
-            return handleBftConsensus(ctx, normalisedPayload);
+            return handleBftConsensus(ctx, handle, normalisedPayload);
           case 'raft':
-            return handleRaftConsensus(ctx, normalisedPayload);
+            return handleRaftConsensus(ctx, handle, normalisedPayload);
           case 'quorum':
-            return handleQuorumConsensus(ctx, normalisedPayload);
+            return handleQuorumConsensus(ctx, handle, normalisedPayload);
           case 'weighted':
-            return handleWeightedConsensus(ctx, normalisedPayload);
+            return handleWeightedConsensus(ctx, handle, normalisedPayload);
           case 'gossip':
-            return handleGossipConsensus(ctx, normalisedPayload);
+            return handleGossipConsensus(ctx, handle, normalisedPayload);
           case 'crdt':
-            return handleCrdtConsensus(ctx, normalisedPayload);
+            return handleCrdtConsensus(ctx, handle, normalisedPayload);
           default: {
             // Unknown strategy — per `feedback-no-fallbacks`, throw rather
             // than silently route to a default. Exhaustiveness checked via

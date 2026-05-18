@@ -1,7 +1,8 @@
 // charter: mutation-invariants
-// ADR-0184 Wave 1 skeleton — raft invariants land alongside the Wave 2 port.
-// Per ADR-0184 Open Follow-up #3, raft invariants gate term monotonicity and
-// `timeoutMs` well-formedness (ADR-0117).
+// ADR-0184 Wave 2 follow-up — raft invariants stay empty until commit 2.2
+// lands the real port. Per ADR-0184 Open Follow-up #3, raft invariants gate
+// payload well-formedness (term positive integer, timeoutMs positive,
+// proposalId non-empty).
 
 import type { Invariant } from '../../../registration.js';
 import type { HiveMindConsensusPayload } from '../../../handlers/hive-mind/consensus.js';

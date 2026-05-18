@@ -36,26 +36,42 @@ import { executeInvariants } from '../../invariants/agents/execute.js';
 /**
  * Mutation payload — record-update half of `agent_execute`. The Anthropic
  * Messages API call (agent-tools.ts:303-318 → executeAgentTask) executes in
- * cli; this handler persists the outcome under one audit-traced withWrite.
+ * cli; this handler persists the outcome under audit-traced withWrite scopes.
  *
- * `status` after execution is typically 'idle' on success, may be
- * 'terminated' if the cli explicitly reaped the agent.
+ * Two distinct dispatches per execution (ADR-0181 Phase C, 2026-05-18):
+ *   - Pre-LLM busy reservation:
+ *       { agentId, status: 'busy', taskCountDelta: 1 }
+ *     `lastResult` omitted — existing field is preserved (caller hasn't
+ *     produced a new result yet).
+ *   - Post-LLM idle release:
+ *       { agentId, status: 'idle', lastResult }
+ *     `taskCountDelta` omitted (defaults to 0) — the count already bumped at
+ *     reservation time.
+ *
+ * Two audit entries per execution honour ADR-0180 §Confirmation's
+ * "audit-entry count equals mutation count" invariant — pre-LLM reservation
+ * and post-LLM release are two distinct mutations.
+ *
+ * Both fields are optional so partial updates are safe; omit a field to
+ * preserve the existing AgentRecord value.
  */
 export interface AgentExecutePayload {
   readonly agentId: string;
-  readonly lastResult: Record<string, unknown>;
   readonly status: AgentRecord['status'];
+  /** When present, overwrites `agent.lastResult`. Omit on pre-LLM busy
+   *  reservation so the prior execution's lastResult is preserved. */
+  readonly lastResult?: Record<string, unknown>;
+  /** Defaults to 0. Pre-LLM busy reservation passes 1; post-LLM idle release
+   *  passes 0 (or omits). Negative deltas reserved for future rollback paths. */
   readonly taskCountDelta?: number;
 }
 
 const STORE_ID = 'agent_spawn' as StoreId;
 
-// TODO(ADR-0180 Phase 5 wire-up): port the persistence half of agent-tools.ts
-// `agent_execute` callsite once the dispatch boundary is wired through cli.
-// Body: read store → if agents[agentId] exists, set lastResult/status/
-// taskCount += delta → write store back. The LLM call (executeAgentTask)
-// remains in cli pre-dispatch; this handler is invoked once the result is
-// in hand.
+// ADR-0181 Phase C wire-up (2026-05-18): cli's `agent-execute-core.ts` now
+// dispatches through this handler. Two dispatches per execution: pre-LLM
+// busy reservation + post-LLM idle release. The Anthropic Messages API call
+// remains in cli pre-dispatch (between the two dispatches).
 export const executeAgentHandler: GuardedWrite<AgentExecutePayload> =
   registerMutationHandler<AgentExecutePayload>(
     'agent_execute',
@@ -70,12 +86,14 @@ export const executeAgentHandler: GuardedWrite<AgentExecutePayload> =
         }
 
         const existing = current.agents[payload.agentId];
-        const delta = payload.taskCountDelta ?? 1;
+        const delta = payload.taskCountDelta ?? 0;
         const patched: AgentRecord = {
           ...existing,
           status: payload.status,
           taskCount: existing.taskCount + delta,
-          lastResult: payload.lastResult,
+          // Preserve existing lastResult when caller omits the field
+          // (pre-LLM busy reservation case).
+          ...(payload.lastResult !== undefined ? { lastResult: payload.lastResult } : {}),
         };
 
         const next: AgentStore = {

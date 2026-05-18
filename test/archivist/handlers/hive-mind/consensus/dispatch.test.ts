@@ -113,13 +113,13 @@ describe('hive-mind_consensus parent dispatcher (ADR-0184)', () => {
     ).resolves.toBeDefined();
   });
 
-  it('routes strategy:crdt to the crdt per-strategy stub (Wave 5 pending)', async () => {
+  it('routes strategy:crdt to the crdt handler (Wave 5 ported)', async () => {
     const fixture = makePrimedFixture();
     await expect(
       withTestContext(consensusHiveMindHandler, proposePayload('crdt'), {
         substrate: fixture,
       }),
-    ).rejects.toThrow(/hive-mind_consensus\[crdt\] handler body pending ADR-0184 Wave 5/);
+    ).resolves.toBeDefined();
   });
 
   it('defaults to raft when strategy is omitted (cli parity, Wave 2 ported)', async () => {

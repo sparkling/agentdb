@@ -21,6 +21,13 @@ import type {
   HiveMemoryEntry,
   HiveStateDoc,
 } from '../hive-state.js';
+import type { CRDTState } from './_crdt-types.js';
+
+// Re-export the vendored CRDT triple type so per-strategy handlers + tests can
+// import from a single module (`_shared.ts`) rather than reaching into the
+// vendored crdt-types directly. Wave 5 narrows `crdtState?: unknown` (Wave 2
+// placeholder) to `crdtState?: CRDTState`.
+export type { CRDTState };
 
 /** Consensus strategy — re-exported from the parent for handler convenience. */
 export type ConsensusStrategy =
@@ -67,8 +74,11 @@ export interface ConsensusProposal {
    *  `feedback-no-fallbacks`). Wave 6 cli reads this flag directly rather
    *  than re-running `settleCheckGossip` to surface `exhausted` in responses. */
   gossipExhausted?: boolean;
-  /** CRDT-only fields (ADR-0121). Wave 5 narrows the `unknown` type. */
-  crdtState?: unknown;
+  /** CRDT-only fields (ADR-0121). Wave 5 narrowed to the vendored
+   *  `CRDTState` triple — three components (`votes: GCounterState`,
+   *  `approvers: ORSetState`, `verdict: LWWRegisterState`) backed by
+   *  JSON-serialisable shapes. */
+  crdtState?: CRDTState;
   crdtExpectedVoters?: number;
 }
 

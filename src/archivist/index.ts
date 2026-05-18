@@ -197,6 +197,24 @@ export type { MultiFileTarget, MultiFileWriteResult } from './substrates/fs-json
 // be called before the first dispatch (it throws once the audit fd is open).
 export { setAuditLogPath, __resetAuditWriterForTests } from './audit-writer.js';
 
+// ADR-0184 Wave 6: hive-mind_consensus typed-error classes exported so cli
+// (and other external callers) can `instanceof`-discriminate the typed
+// throws emitted by per-strategy handler bodies. The cli's Wave 6 flip
+// reshapes some of these into `{action, error}` envelopes (RaftTermCollision,
+// RaftVoteChange, DuplicateVote, VoterIdRequired, ProposalNotFound) and
+// re-throws others synchronously (MissingQueenForWeightedConsensus,
+// WorkerAlreadyFailed, ProposalAlreadyFailed) per cli's pre-flip contract.
+export {
+  MissingQueenForWeightedConsensusError,
+  WorkerAlreadyFailedError,
+  ProposalAlreadyFailedError,
+  ProposalNotFoundError,
+  VoterIdRequiredError,
+  RaftTermCollisionError,
+  RaftVoteChangeError,
+  DuplicateVoteError,
+} from './handlers/hive-mind/consensus/_shared.js';
+
 /**
  * Construction-time wiring for `Archivist.initialize()` (ADR-0180 §Architecture
  * · Init). The archivist does not *own* the substrate backends — it receives

@@ -51,6 +51,20 @@ import {
   type MutationContext,
   type StoreId,
 } from '../../index.js';
+import { handleBftConsensus } from './consensus/bft.js';
+import { handleRaftConsensus } from './consensus/raft.js';
+import { handleQuorumConsensus } from './consensus/quorum.js';
+import { handleWeightedConsensus } from './consensus/weighted.js';
+import { handleGossipConsensus } from './consensus/gossip.js';
+import { handleCrdtConsensus } from './consensus/crdt.js';
+import {
+  bftConsensusInvariants,
+  raftConsensusInvariants,
+  quorumConsensusInvariants,
+  weightedConsensusInvariants,
+  gossipConsensusInvariants,
+  crdtConsensusInvariants,
+} from '../../invariants/hive-mind/consensus/index.js';
 
 /** Consensus strategy — matches the CLI inputSchema enum.
  *  'byzantine' is a wire-boundary alias for 'bft' (carry-forward from ADR-0106
@@ -116,33 +130,85 @@ export type HiveMindConsensusPayload =
 
 const STORE_ID = 'hive-mind_consensus' as StoreId;
 
-// TODO(ADR-0180 Phase 4 wire-up): port the action-switch body of
-// hive-mind-tools.ts `hive-mind_consensus` callsite once the dispatch boundary
-// is wired through cli. The wrapper-in-cli pattern (loadHiveState → action-
-// switch → mutate → saveHiveState under `withHiveStoreLock`) collapses to a
-// single `ctx.substrate.withWrite` here because the primitive owns the lock
-// semantics. The cli's outer call to `withHiveStoreLock` becomes redundant and
-// is removed in the same commit that flips the dispatch wire-up.
+// ADR-0184 Wave 1: parent dispatcher routes `payload.strategy` to per-strategy
+// handler modules under `./consensus/<strategy>.ts`. Each per-strategy module's
+// body is a `pending` throw until its wave (Wave 2 ports bft/raft/quorum, Wave
+// 3 weighted, Wave 4 gossip, Wave 5 crdt). Wave 6 retires the cli surface.
 //
-// Strategy-specific branches (ADR-0119 weighted, ADR-0120 gossip, ADR-0121
-// CRDT, ADR-0131 auto-status-transition) port verbatim — they all reduce to
-// "read state, mutate accumulator, write state" which is exactly one substrate
-// write per call. The CRDT branch's `mergeCRDTState(before, voterSnapshot)` is
-// pure JSON merging; no special substrate path needed.
+// Strategy normalisation (`byzantine → bft`) happens once at the parent entry
+// — mirroring cli `hive-mind-tools.ts` line 2056 (`input.strategy = 'bft'`).
+// Because the wire payload type uses `readonly` fields, the normalised payload
+// is built as a new object rather than mutating in place; per-strategy modules
+// receive the normalised value via `normalisedPayload.strategy` and MUST NOT
+// re-read the original `payload.strategy` carrying `'byzantine'` (per ADR-0184
+// Wave 1 DA Axis (a) resolution).
+//
+// One `withWrite` scope wraps the entire dispatch — every action
+// (propose/vote/status/list) needs the same `state.consensus` mutation surface
+// and the substrate's O_EXCL lock is NOT reentrant. Per-strategy handlers are
+// called inside the lock-held scope. `list` flows through `withWrite` per the
+// existing doc-comment rationale; short-circuit to a read is a Wave 6+ decision.
+//
+// Per-strategy invariant arrays (`bftConsensusInvariants`, etc.) start empty in
+// Wave 1; each wave grows its own array independently. The parent
+// `registerMutationHandler` spreads all six at registration so wave-N additions
+// pick up automatically without re-touching this file.
 export const consensusHiveMindHandler: GuardedWrite<HiveMindConsensusPayload> =
   registerMutationHandler<HiveMindConsensusPayload>(
     'hive-mind_consensus',
-    async (ctx: MutationContext<false>, _payload: HiveMindConsensusPayload): Promise<void> => {
+    async (ctx: MutationContext<false>, payload: HiveMindConsensusPayload): Promise<void> => {
+      // Normalise `byzantine → bft` at handler entry and apply the cli's
+      // `'raft'` default when strategy is omitted. Build a new payload object
+      // because the discriminated-union fields are `readonly`. Per-strategy
+      // handlers receive this normalised payload and dispatch on its
+      // `strategy` field; the original wire payload is no longer referenced.
+      const rawStrategy =
+        'strategy' in payload ? payload.strategy : undefined;
+      const strategy: Exclude<typeof rawStrategy, 'byzantine' | undefined> =
+        rawStrategy === 'byzantine'
+          ? 'bft'
+          : (rawStrategy ?? 'raft');
+      const normalisedPayload = {
+        ...payload,
+        strategy,
+      } as HiveMindConsensusPayload;
+
       await ctx.substrate.withWrite({ storeId: STORE_ID }, async (_handle) => {
-        throw new Error(
-          'archivist: hive-mind_consensus handler body pending Phase 4 wire-up; ' +
-          'callers currently route through cli/src/mcp-tools/hive-mind-tools.ts ' +
-          '\'hive-mind_consensus\' handler',
-        );
+        switch (strategy) {
+          case 'bft':
+            return handleBftConsensus(ctx, normalisedPayload);
+          case 'raft':
+            return handleRaftConsensus(ctx, normalisedPayload);
+          case 'quorum':
+            return handleQuorumConsensus(ctx, normalisedPayload);
+          case 'weighted':
+            return handleWeightedConsensus(ctx, normalisedPayload);
+          case 'gossip':
+            return handleGossipConsensus(ctx, normalisedPayload);
+          case 'crdt':
+            return handleCrdtConsensus(ctx, normalisedPayload);
+          default: {
+            // Unknown strategy — per `feedback-no-fallbacks`, throw rather
+            // than silently route to a default. Exhaustiveness checked via
+            // `_exhaustive: never` so adding a new strategy without a case
+            // arm fails the compile.
+            const _exhaustive: never = strategy;
+            throw new Error(
+              `hive-mind_consensus: unknown strategy ${JSON.stringify(_exhaustive)}`,
+            );
+          }
+        }
       });
     },
     {
-      invariants: [], // wired by invariants-author per ADR-0180 §Mutation invariants
+      invariants: [
+        ...bftConsensusInvariants,
+        ...raftConsensusInvariants,
+        ...quorumConsensusInvariants,
+        ...weightedConsensusInvariants,
+        ...gossipConsensusInvariants,
+        ...crdtConsensusInvariants,
+      ],
       cacheScope: 'global',
     },
   );

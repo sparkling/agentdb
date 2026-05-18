@@ -17,11 +17,9 @@ export * from './spawn.js';
 // throwing when the cli eventually flips.
 export * from './status.js';
 
-// STUB handlers — pending Phase N wire-up; dispatch surfaces
-// `tool not registered` → acceptance skip-accepted.
-// consensus.ts: 1000+ lines of strategy-specific orchestration (BFT/Raft/
-// Quorum/Weighted/Gossip/CRDT) with cross-strategy resolution + ADR-0131
-// auto-status-transition + ADR-0121 CRDT merge — too entangled for a
-// single-handler port. Cli explicitly defers (hive-mind-tools.ts:1995).
-// Phase 6+ split into per-strategy handlers is the canonical path.
-//   export * from './consensus.js';
+// ADR-0184 Wave 1: per-strategy split landed. consensus.ts is the parent
+// dispatcher (per-strategy bodies live under handlers/hive-mind/consensus/
+// <strategy>.ts). All six strategies still throw `pending` in Wave 1; cli
+// `hive-mind_consensus` (hive-mind-tools.ts:~1984-2910) remains load-bearing
+// until Wave 6 retirement.
+export * from './consensus.js';

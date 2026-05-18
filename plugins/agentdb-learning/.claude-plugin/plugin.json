@@ -1,6 +1,6 @@
 {
   "name": "agentdb-learning",
-  "version": "0.1.102",
+  "version": "0.1.103",
   "description": "RL routing + Thompson Sampling bandit for AgentDB. 9 algorithms (Q-Learning, SARSA, DQN, PPO, Actor-Critic, Policy Gradient, Decision Transformer, MCTS, Model-Based RL); /learn-task, /route-task.",
   "author": {
     "name": "ruvnet",

@@ -61,6 +61,12 @@ export interface ConsensusProposal {
   currentRoundBroadcastSet?: string[];
   roundTimeoutMs?: number;
   roundStartedAt?: string;
+  /** Gossip hard-budget exhaustion signal — ADR-0184 Wave 4 DA Concern 2.
+   *  Set to `true` when `settleCheckGossip` returns `exhausted: true` and the
+   *  proposal stays in 'pending' (no silent settled-coerce per
+   *  `feedback-no-fallbacks`). Wave 6 cli reads this flag directly rather
+   *  than re-running `settleCheckGossip` to surface `exhausted` in responses. */
+  gossipExhausted?: boolean;
   /** CRDT-only fields (ADR-0121). Wave 5 narrows the `unknown` type. */
   crdtState?: unknown;
   crdtExpectedVoters?: number;
@@ -446,4 +452,147 @@ export function ensureConsensusContainer(state: HiveStateDoc): {
   if (!Array.isArray(consensus.pending)) consensus.pending = [];
   if (!Array.isArray(consensus.history)) consensus.history = [];
   return consensus;
+}
+
+// ── ADR-0120 (T2) gossip helpers — vendored from cli hive-mind-tools.ts ──
+
+/**
+ * Settle-check result shape per ADR-0120 §Pseudocode `settle_check`. Mirrors
+ * cli `GossipSettleStatus` (hive-mind-tools.ts line 794-801).
+ */
+export interface GossipSettleStatus {
+  settled: boolean;
+  exhausted?: boolean;
+  gossipRound: number;
+  bound: number;
+  result?: 'approved' | 'rejected';
+  noVotes?: boolean;
+}
+
+/**
+ * Mirrors cli `gossipFanout` (hive-mind-tools.ts line 318-321). Returns
+ * `ceil(log2(N))` for `N > 1`, else `0`. This is the per-round fanout bound
+ * driving the O(log N) convergence guarantee.
+ */
+export function gossipFanout(totalNodes: number): number {
+  if (totalNodes <= 1) return 0;
+  return Math.ceil(Math.log2(totalNodes));
+}
+
+/**
+ * Mirrors cli `selectGossipTargets` (hive-mind-tools.ts line 335-365).
+ * Deterministic-per-round target selection — two voters seeing the same
+ * `(proposalId, gossipRound, voterSet)` MUST pick the same target subset for
+ * the `O(log N)` bound to hold (per ADR-0120 §Risks). The voter set is
+ * canonicalised (lexicographic sort) before the seeded shuffle.
+ *
+ * Implementation: FNV-1a hash of `${proposalId}:${gossipRound}` → mulberry32-
+ * style mixing → Fisher-Yates shuffle → top `fanoutSize` results.
+ * Determinism is the contract; cryptographic randomness is not required.
+ */
+export function selectGossipTargets(
+  proposalId: string,
+  gossipRound: number,
+  voterSet: string[],
+  excludeIds: Set<string>,
+  fanoutSize: number,
+): string[] {
+  // Canonicalise: lexicographic sort gives same input order across nodes.
+  const candidates = [...voterSet].sort().filter((v) => !excludeIds.has(v));
+  if (candidates.length === 0 || fanoutSize === 0) return [];
+
+  // Seeded RNG (mulberry32-style) keyed on (proposalId, gossipRound).
+  // Hash the seed string to a 32-bit int via FNV-1a.
+  const seedStr = `${proposalId}:${gossipRound}`;
+  let h = 2166136261 >>> 0; // FNV-1a basis
+  for (let i = 0; i < seedStr.length; i++) {
+    h = Math.imul(h ^ seedStr.charCodeAt(i), 16777619) >>> 0;
+  }
+  // Fisher-Yates shuffle deriving each random pick from `h`.
+  const shuffled = [...candidates];
+  for (let i = shuffled.length - 1; i > 0; i--) {
+    h = Math.imul(h ^ (h >>> 15), 2246822507) >>> 0;
+    h = Math.imul(h ^ (h >>> 13), 3266489909) >>> 0;
+    h = (h ^ (h >>> 16)) >>> 0;
+    const j = h % (i + 1);
+    const tmp = shuffled[i]!;
+    shuffled[i] = shuffled[j]!;
+    shuffled[j] = tmp;
+  }
+  return shuffled.slice(0, Math.min(fanoutSize, shuffled.length));
+}
+
+/**
+ * Mirrors cli `maybeAdvanceGossipRoundOnTimeout` (hive-mind-tools.ts line
+ * 818-832). If the current round has been open longer than `roundTimeoutMs`,
+ * force-advance `gossipRound` and clear `currentRoundBroadcastSet`. Returns
+ * `true` if mutation happened (caller's surrounding `withWrite` persists the
+ * change atomically — no separate write needed here).
+ *
+ * Defensive strategy guard retained per ADR-0184 Wave 4 DA Concern 3:
+ * function is safely callable on any proposal; the gossip body only invokes
+ * it on gossip proposals by construction (parent dispatcher).
+ */
+export function maybeAdvanceGossipRoundOnTimeout(
+  proposal: ConsensusProposal,
+  now: number = Date.now(),
+): boolean {
+  if (proposal.strategy !== 'gossip') return false;
+  if (!proposal.roundStartedAt) return false;
+  const roundTimeoutMs = proposal.roundTimeoutMs ?? GOSSIP_ROUND_TIMEOUT_MS_DEFAULT;
+  const elapsed = now - new Date(proposal.roundStartedAt).getTime();
+  if (elapsed < roundTimeoutMs) return false;
+  proposal.gossipRound = (proposal.gossipRound ?? 0) + 1;
+  proposal.currentRoundBroadcastSet = [];
+  proposal.roundStartedAt = new Date(now).toISOString();
+  return true;
+}
+
+/**
+ * Mirrors cli `settleCheckGossip` (hive-mind-tools.ts line 850-887). Computes
+ * the settle status of a gossip proposal per ADR-0120 §Pseudocode `settle_check`.
+ *
+ * Predicate: settled iff
+ *   `gossipRound >= ceil(log2(totalNodes))`
+ *     AND
+ *   `(gossipRound > lastVoteChangedRound OR totalNodes == 1)`
+ *
+ * Hard budget: `gossipRound > 2 * ceil(log2(totalNodes))` returns
+ *   `{ settled: false, exhausted: true }` per `feedback-no-fallbacks.md`.
+ *
+ * No-vote rejection: a settle_check on a proposal with zero votes returns
+ *   `{ settled: false, gossipRound: 0, noVotes: true }`. Per ADR-0184 Wave 4
+ *   DA Concern 4: no-votes is checked BEFORE hard-budget exhaustion — an
+ *   exhausted proposal with zero votes returns `noVotes: true`, not
+ *   `exhausted: true`.
+ */
+export function settleCheckGossip(proposal: ConsensusProposal): GossipSettleStatus {
+  const totalNodes = proposal.totalNodes ?? 1;
+  const bound = gossipFanout(totalNodes);
+  const gossipRound = proposal.gossipRound ?? 0;
+  const lastVoteChangedRound = proposal.lastVoteChangedRound ?? 0;
+  const hasVotes = Object.keys(proposal.votes).length > 0;
+
+  // No-vote rejection per cli line 859 — checked BEFORE hard-budget.
+  if (!hasVotes) {
+    return { settled: false, gossipRound, bound, noVotes: true };
+  }
+
+  // Hard budget exhaustion per cli line 864.
+  if (gossipRound > 2 * bound) {
+    return { settled: false, exhausted: true, gossipRound, bound };
+  }
+
+  if (
+    gossipRound >= bound &&
+    (gossipRound > lastVoteChangedRound || totalNodes === 1)
+  ) {
+    const votesFor = Object.values(proposal.votes).filter((v) => v).length;
+    const votesAgainst = Object.values(proposal.votes).filter((v) => !v).length;
+    const result: 'approved' | 'rejected' =
+      votesFor > votesAgainst ? 'approved' : 'rejected';
+    return { settled: true, gossipRound, bound, result };
+  }
+
+  return { settled: false, gossipRound, bound };
 }

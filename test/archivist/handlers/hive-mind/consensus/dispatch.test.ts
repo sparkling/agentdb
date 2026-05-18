@@ -104,13 +104,13 @@ describe('hive-mind_consensus parent dispatcher (ADR-0184)', () => {
     ).rejects.toThrow(/weighted strategy requires an elected queen/);
   });
 
-  it('routes strategy:gossip to the gossip per-strategy stub (Wave 4 pending)', async () => {
+  it('routes strategy:gossip to the gossip handler (Wave 4 ported)', async () => {
     const fixture = makePrimedFixture();
     await expect(
       withTestContext(consensusHiveMindHandler, proposePayload('gossip'), {
         substrate: fixture,
       }),
-    ).rejects.toThrow(/hive-mind_consensus\[gossip\] handler body pending ADR-0184 Wave 4/);
+    ).resolves.toBeDefined();
   });
 
   it('routes strategy:crdt to the crdt per-strategy stub (Wave 5 pending)', async () => {

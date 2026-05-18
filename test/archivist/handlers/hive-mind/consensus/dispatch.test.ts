@@ -92,13 +92,16 @@ describe('hive-mind_consensus parent dispatcher (ADR-0184)', () => {
     ).resolves.toBeDefined();
   });
 
-  it('routes strategy:weighted to the weighted per-strategy stub (Wave 3 pending)', async () => {
+  it('routes strategy:weighted to the weighted handler (Wave 3 ported — no-queen state triggers queen-guard throw)', async () => {
+    // makePrimedFixture has no queen → weighted handler throws
+    // MissingQueenForWeightedConsensusError at propose. Confirms the dispatch
+    // routes to the weighted body, which then enforces the propose-time guard.
     const fixture = makePrimedFixture();
     await expect(
       withTestContext(consensusHiveMindHandler, proposePayload('weighted'), {
         substrate: fixture,
       }),
-    ).rejects.toThrow(/hive-mind_consensus\[weighted\] handler body pending ADR-0184 Wave 3/);
+    ).rejects.toThrow(/weighted strategy requires an elected queen/);
   });
 
   it('routes strategy:gossip to the gossip per-strategy stub (Wave 4 pending)', async () => {

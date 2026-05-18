@@ -104,22 +104,41 @@ const STORE_ID = 'autopilot_learn' as StoreId;
 //       `ArchivistInitConfig` (less aligned with the narrow-surface
 //       capability discipline of ADR-0180 §Type enforcement; option (i) is
 //       preferred).
+// ADR-0181 Phase F wire-up (2026-05-18): AutopilotLearner capability landed.
+// Handler now resolves the narrow capability and delegates `discover()` —
+// the adapter calls cli's `tryLoadLearning()` + `getMetrics()` +
+// `discoverSuccessPatterns()` per call. Result is recorded onto the audit
+// chain via the substrate seam (one withWrite envelope per dispatch).
+//
+// Unavailable-learning path: cli adapter returns
+// `{ available: false, reason }`; this handler stores the same envelope —
+// matches the legacy cli return shape (autopilot-tools.ts:211).
+//
+// Mutation classification preserved: even though `discover()` reads-then-
+// computes from the AutopilotLearning controller, the controller itself
+// materializes derived pattern records as a side-effect of
+// `discoverSuccessPatterns()` (per learn.ts module header lines 14-21).
+// The audit envelope records the intent + outcome shape; the side-effect
+// is owned by the controller, not the substrate.
 export const learnAutopilotHandler: GuardedWrite<AutopilotLearnPayload> =
   registerMutationHandler<AutopilotLearnPayload>(
     'autopilot_learn',
     async (ctx: MutationContext<false>, _payload: AutopilotLearnPayload): Promise<void> => {
-      await ctx.substrate.withWrite({ storeId: STORE_ID }, async (_handle) => {
-        throw new Error(
-          'archivist: autopilot_learn carry-forward to Phase 5+ — requires an ' +
-          'AutopilotLearning controller handle (from agentic-flow/dist/coordination/' +
-          'autopilot-learning.js, instantiated by cli/src/autopilot-state.ts:314-324 ' +
-          'tryLoadLearning()), exposing getMetrics() + discoverSuccessPatterns(). ' +
-          'NOT in the Phase 4 F4-3-callsite capability set (TaskRouter / ' +
-          'EmbeddingScorer / PatternReader) and NOT on the PERMANENT_SQLITE_CARVE_OUT ' +
-          'roster. Un-stub path: add AutopilotLearner narrow capability to ' +
-          'capabilities.ts + autopilotLearnerFactory in CapabilityFactories + ' +
-          'archivist-init.ts wiring',
-        );
+      const learner = ctx.capabilities.requireAutopilotLearner();
+      const result = await learner.discover();
+      await ctx.substrate.withWrite({ storeId: STORE_ID }, async (handle) => {
+        // Persist the latest discovery envelope under a single 'latest'
+        // anchor key — gives the audit chain a substrate-visible record and
+        // a deterministic read target for any future read handler. Shape:
+        // `{ available, metrics?, patterns?, reason?, discoveredAt }`.
+        await handle.write({
+          storeId: STORE_ID,
+          key: 'root',
+          payload: {
+            ...result,
+            discoveredAt: new Date().toISOString(),
+          },
+        });
       });
     },
     {

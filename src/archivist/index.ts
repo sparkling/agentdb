@@ -31,6 +31,7 @@ import { createReadContext } from './read-context.js';
 import {
   makeMutationCapabilities,
   makeReadCapabilities,
+  type AutopilotLearner,
   type CausalGraphWriter,
   type EmbeddingScorer,
   type FeedbackRecorder,
@@ -341,6 +342,21 @@ export interface ArchivistInitConfig {
    */
   readonly causalGraphWriterFactory?: () => CausalGraphWriter;
   /**
+   * Lazy `AutopilotLearner` capability factory (ADR-0181 Phase F wire-up).
+   * Adapts the cli's `tryLoadLearning()` path
+   * (`autopilot-state.ts:314-324` → `agentic-flow/dist/coordination/
+   * autopilot-learning.js` `AutopilotLearning` instance) down to the narrow
+   * `discover()` surface. Threaded onto
+   * `MutationContext.capabilities.autopilotLearner` — used by the
+   * `autopilot_learn` handler.
+   *
+   * Adapter MUST call `tryLoadLearning()` per `discover()` call (no module/
+   * closure caching) so a controller swap mid-process is observed at the next
+   * dispatch. Null returns surface as `{ available: false, reason }` per
+   * the legacy cli envelope (autopilot-tools.ts:211).
+   */
+  readonly autopilotLearnerFactory?: () => AutopilotLearner;
+  /**
    * Lazy `GNNTelemetryReader` capability factory (ADR-0181 Item 2 wire-up,
    * 2026-05-15). Adapts the cli's `getController('gnnService')` telemetry
    * surface down to the narrow `GNNTelemetryReader`. Threaded onto
@@ -458,6 +474,7 @@ export class Archivist {
   private sonaTrajectoryWriter?: SonaTrajectoryWriter;
   private feedbackRecorder?: FeedbackRecorder;
   private causalGraphWriter?: CausalGraphWriter;
+  private autopilotLearner?: AutopilotLearner;
   private gnnTelemetryReader?: GNNTelemetryReader;
   private semanticRouteReader?: SemanticRouteReader;
   private sonaTrajectoryReader?: SonaTrajectoryReader;
@@ -543,6 +560,7 @@ export class Archivist {
     this.sonaTrajectoryWriter = config.sonaTrajectoryWriterFactory?.();
     this.feedbackRecorder = config.feedbackRecorderFactory?.();
     this.causalGraphWriter = config.causalGraphWriterFactory?.();
+    this.autopilotLearner = config.autopilotLearnerFactory?.();
     this.gnnTelemetryReader = config.gnnTelemetryReaderFactory?.();
     this.semanticRouteReader = config.semanticRouteReaderFactory?.();
     this.sonaTrajectoryReader = config.sonaTrajectoryReaderFactory?.();
@@ -937,6 +955,7 @@ export class Archivist {
         sonaTrajectoryWriter: this.sonaTrajectoryWriter,
         feedbackRecorder: this.feedbackRecorder,
         causalGraphWriter: this.causalGraphWriter,
+        autopilotLearner: this.autopilotLearner,
       }),
       bulkDispatch: async () => {
         throw new Error('archivist: bulk dispatch not yet wired (Phase 4 substrate seam)');

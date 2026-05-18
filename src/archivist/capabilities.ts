@@ -452,6 +452,34 @@ export interface CausalGraphWriteResult {
 }
 
 /**
+ * Narrow surface for the AutopilotLearning pattern-discovery path —
+ * `handlers/autopilot/learn.ts` (ADR-0181 Phase F wire-up). Backed at the cli
+ * wiring point by `tryLoadLearning()` (`autopilot-state.ts:314-324`) which
+ * lazy-imports `agentic-flow/dist/coordination/autopilot-learning.js` and
+ * returns the initialized `AutopilotLearning` instance (or null when AgentDB
+ * is not available).
+ *
+ * `available: false` is the documented neutral-fallback envelope —
+ * NOT a silent error swallow. The cli adapter resolves availability per call
+ * via `tryLoadLearning()`; an explicit `{ available: false, reason }` shape
+ * lets the handler return the same shape the legacy cli call did
+ * (autopilot-tools.ts:211) without inventing a new contract.
+ */
+export interface AutopilotLearner {
+  discover(): Promise<AutopilotLearnResult>;
+}
+
+export interface AutopilotLearnResult {
+  readonly available: boolean;
+  /** Aggregated metrics from `(learning).getMetrics()`. Present iff `available`. */
+  readonly metrics?: unknown;
+  /** Pattern records from `(learning).discoverSuccessPatterns()`. Present iff `available`. */
+  readonly patterns?: unknown;
+  /** Reason for unavailability (when `available: false`). */
+  readonly reason?: string;
+}
+
+/**
  * The capability bundle threaded onto `MutationContext` (ADR-0180 F4-2 Phase C).
  * Every field is OPTIONAL — `initialize(config)` wires whatever subset of
  * factories was supplied. A handler reaching for an unwired capability fails
@@ -472,6 +500,7 @@ export interface MutationCapabilities {
   readonly sonaTrajectoryWriter?: SonaTrajectoryWriter;
   readonly feedbackRecorder?: FeedbackRecorder;
   readonly causalGraphWriter?: CausalGraphWriter;
+  readonly autopilotLearner?: AutopilotLearner;
   /**
    * Fail-loud accessor for `taskRouter`. Handlers call
    * `ctx.capabilities.requireTaskRouter()` instead of `ctx.capabilities
@@ -497,6 +526,8 @@ export interface MutationCapabilities {
   requireFeedbackRecorder(): FeedbackRecorder;
   /** Fail-loud accessor for `causalGraphWriter`. */
   requireCausalGraphWriter(): CausalGraphWriter;
+  /** Fail-loud accessor for `autopilotLearner` (ADR-0181 Phase F). */
+  requireAutopilotLearner(): AutopilotLearner;
 }
 
 /**
@@ -565,6 +596,15 @@ export interface CapabilityFactories {
   readonly semanticRouteReaderFactory?: () => SemanticRouteReader;
   /** Lazy `SonaTrajectoryReader` — adapts the cli `getController('sonaTrajectory').getStats()` path (ADR-0181 Item 6). */
   readonly sonaTrajectoryReaderFactory?: () => SonaTrajectoryReader;
+  /**
+   * Lazy `AutopilotLearner` — adapts the cli `tryLoadLearning()` path
+   * (`autopilot-state.ts:314-324` →
+   * `agentic-flow/dist/coordination/autopilot-learning.js` `AutopilotLearning`
+   * instance) down to the narrow `discover()` surface. The adapter resolves
+   * availability per call via `tryLoadLearning()`; null returns surface as
+   * `{ available: false, reason }` per the legacy cli envelope.
+   */
+  readonly autopilotLearnerFactory?: () => AutopilotLearner;
 }
 
 /**
@@ -586,6 +626,7 @@ export function makeMutationCapabilities(resolved: {
   readonly sonaTrajectoryWriter?: SonaTrajectoryWriter;
   readonly feedbackRecorder?: FeedbackRecorder;
   readonly causalGraphWriter?: CausalGraphWriter;
+  readonly autopilotLearner?: AutopilotLearner;
 }): MutationCapabilities {
   return {
     taskRouter: resolved.taskRouter,
@@ -598,6 +639,7 @@ export function makeMutationCapabilities(resolved: {
     sonaTrajectoryWriter: resolved.sonaTrajectoryWriter,
     feedbackRecorder: resolved.feedbackRecorder,
     causalGraphWriter: resolved.causalGraphWriter,
+    autopilotLearner: resolved.autopilotLearner,
     requireTaskRouter(): TaskRouter {
       if (!resolved.taskRouter) {
         throw new Error(
@@ -687,6 +729,15 @@ export function makeMutationCapabilities(resolved: {
         );
       }
       return resolved.causalGraphWriter;
+    },
+    requireAutopilotLearner(): AutopilotLearner {
+      if (!resolved.autopilotLearner) {
+        throw new Error(
+          'archivist: this handler needs the AutopilotLearner capability, but no autopilotLearnerFactory ' +
+            'was supplied to initialize() — pass { autopilotLearnerFactory } in ArchivistInitConfig',
+        );
+      }
+      return resolved.autopilotLearner;
     },
   };
 }

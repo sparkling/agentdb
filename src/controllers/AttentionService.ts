@@ -108,22 +108,39 @@ export class AttentionService {
 
   /**
    * Internal initialization implementation
+   *
+   * NOTE: We use a per-invocation unique suffix for the perf-mark names
+   * (`attention-service-init-start-<id>`). performance.clearMarks(name) and
+   * performance.getEntriesByName(name) are process-global, so if two
+   * AttentionService instances run initialize() concurrently with a shared
+   * mark name, the first one to finish (which calls
+   * clearPerformanceEntries('attention-service-init')) will yank the start
+   * mark out from under the other in-flight initialize(s), making their
+   * subsequent performance.measure(...) throw
+   * `The "attention-service-init-start" performance mark has not been set`.
+   * The unique suffix scopes each pair to a single _doInitialize call.
    */
   private async _doInitialize(): Promise<void> {
-    performance.mark('attention-service-init-start');
+    // Unique per-invocation marker prefix to avoid cross-instance races
+    // (see method-level comment above).
+    const markerBase = `attention-service-init-${AttentionService.nextInitId()}`;
+    const startMark = `${markerBase}-start`;
+    const endMark = `${markerBase}-end`;
+    performance.mark(startMark);
 
     try {
       await this.wasmManager.initialize();
 
       this.initialized = true;
-      performance.mark('attention-service-init-end');
-      performance.measure('attention-service-init', 'attention-service-init-start', 'attention-service-init-end');
+      performance.mark(endMark);
+      performance.measure(markerBase, startMark, endMark);
 
-      const measure = performance.getEntriesByName('attention-service-init')[0];
+      const measure = performance.getEntriesByName(markerBase)[0];
       console.log(`✅ AttentionService initialized in ${measure.duration.toFixed(2)}ms (${this.wasmManager.getRuntime()})`);
 
-      // Clear performance entries to prevent memory leak
-      this.metricsTracker.clearPerformanceEntries('attention-service-init');
+      // Clear performance entries to prevent memory leak. Safe to clear by
+      // the unique base name — only this invocation's entries are touched.
+      this.metricsTracker.clearPerformanceEntries(markerBase);
 
       // Warm up JIT with small computation
       if (!this.warmedUp) {
@@ -131,6 +148,11 @@ export class AttentionService {
         this.warmedUp = true;
       }
     } catch (error) {
+      // Clean up any marks we set so they don't leak when init throws.
+      performance.clearMarks(startMark);
+      performance.clearMarks(endMark);
+      performance.clearMeasures(markerBase);
+
       const errorMessage = error instanceof Error ? error.message : String(error);
       console.error(`❌ AttentionService initialization failed: ${errorMessage}`);
 
@@ -140,6 +162,15 @@ export class AttentionService {
       }
       throw new Error(`Failed to initialize AttentionService: ${errorMessage}`);
     }
+  }
+
+  // Monotonic counter used to give each _doInitialize() its own perf-mark
+  // namespace. Class-level (not instance) so concurrent inits on separate
+  // instances within the same process still get distinct ids.
+  private static initIdCounter = 0;
+  private static nextInitId(): string {
+    AttentionService.initIdCounter = (AttentionService.initIdCounter + 1) >>> 0;
+    return `${AttentionService.initIdCounter}`;
   }
 
   /**

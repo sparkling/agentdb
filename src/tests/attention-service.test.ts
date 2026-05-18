@@ -53,6 +53,34 @@ describe('AttentionService', () => {
       const info = service.getInfo();
       expect(info.initialized).toBe(true);
     });
+
+    // Regression: prior to the perf-mark uniquification fix, two concurrent
+    // initialize() calls on separate AttentionService instances would race —
+    // the first to finish would call clearMarks('attention-service-init-start'),
+    // process-globally yanking the start mark out from under any other
+    // in-flight init, making its performance.measure(...) throw
+    // `The "attention-service-init-start" performance mark has not been set`.
+    // This was visible in `ruflo memory stats` as two stderr lines per run.
+    it('should support concurrent initialization across instances without perf-mark races', async () => {
+      const s1 = new AttentionService(config);
+      const s2 = new AttentionService(config);
+      const s3 = new AttentionService(config);
+
+      // Run all three inits concurrently. If the race regresses, at least one
+      // promise rejects with the "performance mark has not been set" error.
+      const results = await Promise.allSettled([
+        s1.initialize(),
+        s2.initialize(),
+        s3.initialize(),
+      ]);
+
+      for (const r of results) {
+        expect(r.status).toBe('fulfilled');
+      }
+      expect(s1.getInfo().initialized).toBe(true);
+      expect(s2.getInfo().initialized).toBe(true);
+      expect(s3.getInfo().initialized).toBe(true);
+    });
   });
 
   describe('Multi-Head Attention', () => {

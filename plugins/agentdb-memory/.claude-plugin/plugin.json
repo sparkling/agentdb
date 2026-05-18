@@ -1,6 +1,6 @@
 {
   "name": "agentdb-memory",
-  "version": "0.1.92",
+  "version": "0.1.93",
   "description": "Episodic replay (Reflexion) + skill library for AgentDB. Adds /remember, /recall, and a curator agent for nightly consolidation.",
   "author": {
     "name": "ruvnet",

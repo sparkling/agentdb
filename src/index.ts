@@ -168,6 +168,25 @@ export {
 // Re-export all controllers for convenience
 export * from './controllers/index.js';
 
+// QUIC sync types + CRDT primitives — ADR-0196 Phase 5 federation interface
+// needs `VectorClock` + `incrementVectorClock` at the top-level so agentic-flow's
+// `FederatedSyncProvider` can populate episode identity without reaching into
+// agentdb's subpath imports.
+export type {
+  VectorClock,
+  VectorClockComparison,
+  SyncMessage,
+  SyncPayload,
+  EpisodeSync,
+  SyncableEpisode,
+} from './types/quic.js';
+export {
+  incrementVectorClock,
+  createVectorClock,
+  compareVectorClocks,
+  mergeVectorClocks,
+} from './types/quic.js';
+
 // LLM Router - Multi-provider LLM integration with RuvLLM support
 export {
   LLMRouter,

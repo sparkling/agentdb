@@ -85,6 +85,11 @@ export class QUICServer {
   // ADR-0199: real transport (WebTransport with HTTP/2 fallback). Lifecycle
   // mirrors `isRunning`; created in start(), closed in stop().
   private transport: ServerTransport | null = null;
+  // Actual bound port + host (resolved after listen()). When config.port is 0
+  // the transport picks an ephemeral port — this field surfaces it for tests
+  // and external observers.
+  private boundHost: string | null = null;
+  private boundPort: number | null = null;
   private cleanupInterval: NodeJS.Timeout | null = null;
 
   constructor(db: Database, config: QUICServerConfig = {}) {
@@ -131,6 +136,8 @@ export class QUICServer {
         await frame.reply(res);
       });
       const bound = await this.transport.listen(this.config.host, this.config.port, tls);
+      this.boundHost = bound.host;
+      this.boundPort = bound.port;
 
       // Initialize server state
       this.isRunning = true;
@@ -178,6 +185,8 @@ export class QUICServer {
         await this.transport.close();
         this.transport = null;
       }
+      this.boundHost = null;
+      this.boundPort = null;
 
       // Close server
       if (this.server) {
@@ -192,6 +201,16 @@ export class QUICServer {
       console.error(chalk.red('✗ Error stopping QUIC server:'), err.message);
       throw new Error(`QUIC server stop failed: ${err.message}`);
     }
+  }
+
+  /**
+   * Get the actual bound host/port pair. Useful when `config.port` was 0 to
+   * pick an ephemeral port — callers (tests, dynamic peers) need to discover
+   * the actual address the transport bound to. Returns `null` when not running.
+   */
+  getBoundAddress(): { host: string; port: number } | null {
+    if (!this.isRunning || this.boundHost === null || this.boundPort === null) return null;
+    return { host: this.boundHost, port: this.boundPort };
   }
 
   /**

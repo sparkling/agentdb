@@ -14,6 +14,11 @@
  */
 
 import chalk from 'chalk';
+import {
+  createServerTransport,
+  type ServerTransport,
+  type TransportTLSConfig,
+} from './QUICConnection.js';
 
 // Database type from db-fallback
 type Database = any;
@@ -77,6 +82,9 @@ export class QUICServer {
   private connections: Map<string, ClientConnection> = new Map();
   private rateLimitState: Map<string, RateLimitState> = new Map();
   private server: any = null;
+  // ADR-0199: real transport (WebTransport with HTTP/2 fallback). Lifecycle
+  // mirrors `isRunning`; created in start(), closed in stop().
+  private transport: ServerTransport | null = null;
   private cleanupInterval: NodeJS.Timeout | null = null;
 
   constructor(db: Database, config: QUICServerConfig = {}) {
@@ -108,14 +116,28 @@ export class QUICServer {
       console.log(chalk.gray(`   Host: ${this.config.host}`));
       console.log(chalk.gray(`   Port: ${this.config.port}`));
 
-      // Note: Actual QUIC implementation would use a library like @fails-components/webtransport
-      // or node-quic. This is a reference implementation showing the interface.
+      // ADR-0199: pick a real transport (WebTransport preferred, HTTP/2 fallback)
+      this.transport = await createServerTransport();
+      const tls: TransportTLSConfig = {
+        cert: this.config.tlsConfig.cert,
+        key: this.config.tlsConfig.key,
+        ca: this.config.tlsConfig.ca,
+      };
+      this.transport.onFrame(async (frame) => {
+        const env = (frame.payload ?? {}) as SyncRequest & { clientId?: string; authToken?: string };
+        const clientId = env.clientId ?? 'anonymous';
+        const authToken = env.authToken ?? '';
+        const res = await this.processSyncRequest(clientId, env, authToken);
+        await frame.reply(res);
+      });
+      const bound = await this.transport.listen(this.config.host, this.config.port, tls);
 
       // Initialize server state
       this.isRunning = true;
       this.startCleanupInterval();
 
       console.log(chalk.green('✓ QUIC server started successfully'));
+      console.log(chalk.gray(`  Transport: ${this.transport.kind()} on ${bound.host}:${bound.port}`));
       console.log(chalk.gray(`  Max connections: ${this.config.maxConnections}`));
       console.log(chalk.gray(`  Rate limit: ${this.config.rateLimit.maxRequestsPerMinute} req/min`));
     } catch (error) {
@@ -149,6 +171,12 @@ export class QUICServer {
       if (this.cleanupInterval) {
         clearInterval(this.cleanupInterval);
         this.cleanupInterval = null;
+      }
+
+      // ADR-0199: close the real transport
+      if (this.transport) {
+        await this.transport.close();
+        this.transport = null;
       }
 
       // Close server

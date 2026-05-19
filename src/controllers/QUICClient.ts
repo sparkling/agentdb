@@ -14,6 +14,11 @@
  */
 
 import chalk from 'chalk';
+import {
+  createClientTransport,
+  type ClientTransport,
+  type TransportTLSConfig,
+} from './QUICConnection.js';
 
 export interface QUICClientConfig {
   serverHost: string;
@@ -95,6 +100,9 @@ export class QUICClient {
   private connectionPool: Map<string, Connection> = new Map();
   private isConnected: boolean = false;
   private retryCount: number = 0;
+  // ADR-0199: real transport (WebTransport with HTTP/2 fallback). Created in
+  // connect(), closed in disconnect().
+  private transport: ClientTransport | null = null;
 
   constructor(config: QUICClientConfig) {
     this.config = {
@@ -123,8 +131,16 @@ export class QUICClient {
       console.log(chalk.gray(`   Host: ${this.config.serverHost}`));
       console.log(chalk.gray(`   Port: ${this.config.serverPort}`));
 
-      // Note: Actual QUIC implementation would use a library like @fails-components/webtransport
-      // or node-quic. This is a reference implementation showing the interface.
+      // ADR-0199: pick a real transport (WebTransport preferred, HTTP/2 fallback)
+      this.transport = await createClientTransport();
+      const tls: TransportTLSConfig = {
+        cert: this.config.tlsConfig.cert,
+        key: this.config.tlsConfig.key,
+        ca: this.config.tlsConfig.ca,
+        rejectUnauthorized: this.config.tlsConfig.rejectUnauthorized,
+      };
+      await this.transport.connect(this.config.serverHost, this.config.serverPort, tls);
+      console.log(chalk.gray(`   Transport: ${this.transport.kind()}`));
 
       // Initialize connection pool
       for (let i = 0; i < this.config.poolSize; i++) {
@@ -168,6 +184,12 @@ export class QUICClient {
         // Close connection logic here
       }
       this.connectionPool.clear();
+
+      // ADR-0199: close the real transport
+      if (this.transport) {
+        await this.transport.close();
+        this.transport = null;
+      }
 
       this.isConnected = false;
       console.log(chalk.green('✓ Disconnected from QUIC server'));

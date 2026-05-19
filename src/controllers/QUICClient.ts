@@ -14,6 +14,7 @@
  */
 
 import chalk from 'chalk';
+import { randomUUID } from 'node:crypto';
 import {
   createClientTransport,
   type ClientTransport,
@@ -27,7 +28,6 @@ export interface QUICClientConfig {
   maxRetries?: number;
   retryDelayMs?: number;
   timeoutMs?: number;
-  poolSize?: number;
   tlsConfig?: {
     cert?: string;
     key?: string;
@@ -87,31 +87,17 @@ export interface PushResult {
   failedItems?: any[];
 }
 
-/**
- * Pool-side bookkeeping for a logical Connection. Post-ADR-0199, the actual
- * wire send goes through ONE shared `this.transport.send()` regardless of
- * which pool entry was acquired — the per-Connection state (`inUse`,
- * `createdAt`, `lastUsedAt`, `requestCount`) is vestigial bookkeeping
- * retained for log lines (`connection.id` in stdout traces) and metrics
- * (`requestCount` for rate-limit visibility).
- *
- * Architectural follow-up: this layer can be removed in a future cleanup
- * pass once log messages are tied to transport-level identifiers instead
- * of synthetic `conn-N` ids. Not removed in ADR-0199 because the call
- * graph touches `sync()`, `pushData()`, and `sendWithRetry` — too invasive
- * relative to the value.
- */
-interface Connection {
-  id: string;
-  inUse: boolean;
-  createdAt: number;
-  lastUsedAt: number;
-  requestCount: number;
-}
-
 export class QUICClient {
   private config: Required<QUICClientConfig>;
-  private connectionPool: Map<string, Connection> = new Map();
+  // ADR-0199 follow-up: dropped the per-Connection pool. The underlying
+  // transport (WebTransport or HTTP/2 fallback) multiplexes streams natively,
+  // so wrapping it in a synthetic pool of `conn-N` entries with an `inUse`
+  // flag added no concurrency benefit. `clientId` (minted UUIDv4 on each
+  // connect()) replaces the synthetic `conn-N` identifier — gives the
+  // server-side rate-limit + per-client logs a stable real identity per
+  // session. `totalRequests` is a simple counter for getStatus().
+  private clientId: string = '';
+  private totalRequests: number = 0;
   private isConnected: boolean = false;
   private retryCount: number = 0;
   // ADR-0199: real transport (WebTransport with HTTP/2 fallback). Created in
@@ -126,7 +112,6 @@ export class QUICClient {
       maxRetries: config.maxRetries || 3,
       retryDelayMs: config.retryDelayMs || 1000,
       timeoutMs: config.timeoutMs || 30000,
-      poolSize: config.poolSize || 5,
       tlsConfig: config.tlsConfig || { rejectUnauthorized: true },
     };
   }
@@ -156,23 +141,16 @@ export class QUICClient {
       await this.transport.connect(this.config.serverHost, this.config.serverPort, tls);
       console.log(chalk.gray(`   Transport: ${this.transport.kind()}`));
 
-      // Initialize connection pool
-      for (let i = 0; i < this.config.poolSize; i++) {
-        const connectionId = `conn-${i}`;
-        this.connectionPool.set(connectionId, {
-          id: connectionId,
-          inUse: false,
-          createdAt: Date.now(),
-          lastUsedAt: 0,
-          requestCount: 0,
-        });
-      }
-
+      // Mint a session-scoped clientId. UUIDv4 so server-side per-client rate
+      // limits + logs get a stable real identity (replaces the prior
+      // synthetic `conn-N` ids from the removed connection pool).
+      this.clientId = randomUUID();
+      this.totalRequests = 0;
       this.isConnected = true;
       this.retryCount = 0;
 
       console.log(chalk.green('✓ Connected to QUIC server'));
-      console.log(chalk.gray(`  Connection pool size: ${this.config.poolSize}`));
+      console.log(chalk.gray(`  Client session: ${this.clientId}`));
     } catch (error) {
       const err = error as Error;
       console.error(chalk.red('✗ Connection failed:'), err.message);
@@ -192,19 +170,13 @@ export class QUICClient {
     try {
       console.log(chalk.blue('🔌 Disconnecting from QUIC server...'));
 
-      // Close all connections in pool
-      for (const [connId, conn] of this.connectionPool.entries()) {
-        console.log(chalk.gray(`  Closing connection: ${connId}`));
-        // Close connection logic here
-      }
-      this.connectionPool.clear();
-
       // ADR-0199: close the real transport
       if (this.transport) {
         await this.transport.close();
         this.transport = null;
       }
 
+      this.clientId = '';
       this.isConnected = false;
       console.log(chalk.green('✓ Disconnected from QUIC server'));
     } catch (error) {
@@ -231,13 +203,10 @@ export class QUICClient {
         phase: 'connecting',
       });
 
-      // Get connection from pool
-      const connection = await this.acquireConnection();
-
       console.log(chalk.blue('📤 Sending sync request...'));
       console.log(chalk.gray(`   Type: ${options.type}`));
       console.log(chalk.gray(`   Since: ${options.since || 'full sync'}`));
-      console.log(chalk.gray(`   Connection: ${connection.id}`));
+      console.log(chalk.gray(`   Client: ${this.clientId}`));
 
       // Report progress: syncing
       options.onProgress?.({
@@ -253,7 +222,7 @@ export class QUICClient {
       };
 
       // Send request with retry logic
-      const response = await this.sendWithRetry(connection, request);
+      const response = await this.sendWithRetry(request);
 
       if (!response.success) {
         throw new Error(response.error || 'Sync request failed');
@@ -267,9 +236,6 @@ export class QUICClient {
         itemsSynced: response.count,
         bytesTransferred,
       });
-
-      // Release connection
-      this.releaseConnection(connection);
 
       const durationMs = Date.now() - startTime;
 
@@ -315,17 +281,17 @@ export class QUICClient {
   }
 
   /**
-   * Send request with automatic retry
+   * Send request with automatic retry. Uses the single shared transport
+   * (ADR-0199) — concurrency is handled by the underlying protocol's
+   * multiplexing (HTTP/2 streams or WebTransport bidirectional streams),
+   * not by a connection-pool layer above.
    */
   private async sendWithRetry(
-    connection: Connection,
     request: any,
     attempt: number = 0
   ): Promise<any> {
     try {
-      // Simulate sending request
-      // In real implementation, this would use QUIC protocol
-      const response = await this.sendRequest(connection, request);
+      const response = await this.sendRequest(request);
 
       // Reset retry count on success
       this.retryCount = 0;
@@ -340,7 +306,7 @@ export class QUICClient {
         console.log(chalk.gray(`   Error: ${err.message}`));
 
         await this.sleep(delay);
-        return this.sendWithRetry(connection, request, attempt + 1);
+        return this.sendWithRetry(request, attempt + 1);
       }
 
       throw new Error(`Sync failed after ${this.config.maxRetries} retries: ${err.message}`);
@@ -348,23 +314,24 @@ export class QUICClient {
   }
 
   /**
-   * Send request to server
+   * Send a single envelope through the ADR-0199 transport (WebTransport
+   * preferred, HTTP/2 fallback). Carries `clientId` (UUIDv4 per session) +
+   * `authToken` so server-side `processSyncRequest` receives them at the
+   * existing auth/rate-limit boundaries.
+   *
+   * Throws when transport is uninitialised — per feedback-no-fallbacks,
+   * no silent mock-response branch.
    */
-  private async sendRequest(connection: Connection, request: any): Promise<any> {
-    // ADR-0199: route data through the real transport (WebTransport or HTTP/2
-    // fallback). Throws if connect() was not called or already disconnected —
-    // per feedback-no-fallbacks, no silent mock-response branch.
+  private async sendRequest(request: any): Promise<any> {
     if (!this.transport) {
       throw new Error('QUICClient.sendRequest: transport not initialised — call connect() first');
     }
 
-    connection.requestCount++;
-    connection.lastUsedAt = Date.now();
+    this.totalRequests++;
 
-    // Carry caller-context fields the server uses for auth + bookkeeping.
     const envelope = {
       ...request,
-      clientId: connection.id,
+      clientId: this.clientId,
       authToken: this.config.authToken,
     };
 
@@ -372,59 +339,21 @@ export class QUICClient {
   }
 
   /**
-   * Acquire connection from pool
-   */
-  private async acquireConnection(): Promise<Connection> {
-    const timeout = Date.now() + this.config.timeoutMs;
-
-    while (Date.now() < timeout) {
-      for (const connection of this.connectionPool.values()) {
-        if (!connection.inUse) {
-          connection.inUse = true;
-          return connection;
-        }
-      }
-
-      // Wait and retry
-      await this.sleep(100);
-    }
-
-    throw new Error('Connection pool exhausted (timeout)');
-  }
-
-  /**
-   * Release connection back to pool
-   */
-  private releaseConnection(connection: Connection): void {
-    connection.inUse = false;
-    connection.lastUsedAt = Date.now();
-  }
-
-  /**
-   * Get client status
+   * Get client status. `totalRequests` is the count of `sendRequest` calls
+   * since the most recent `connect()`; resets on reconnect.
    */
   getStatus(): {
     isConnected: boolean;
-    poolSize: number;
-    activeConnections: number;
+    clientId: string;
     totalRequests: number;
+    transport: 'webtransport' | 'http2' | null;
     config: QUICClientConfig;
   } {
-    let activeConnections = 0;
-    let totalRequests = 0;
-
-    for (const connection of this.connectionPool.values()) {
-      if (connection.inUse) {
-        activeConnections++;
-      }
-      totalRequests += connection.requestCount;
-    }
-
     return {
       isConnected: this.isConnected,
-      poolSize: this.connectionPool.size,
-      activeConnections,
-      totalRequests,
+      clientId: this.clientId,
+      totalRequests: this.totalRequests,
+      transport: this.transport?.kind() ?? null,
       config: this.config,
     };
   }
@@ -440,12 +369,8 @@ export class QUICClient {
         await this.connect();
       }
 
-      const connection = await this.acquireConnection();
-
-      // Send ping request
-      await this.sendRequest(connection, { type: 'ping' });
-
-      this.releaseConnection(connection);
+      // Send ping request directly through the transport.
+      await this.sendRequest({ type: 'ping' });
 
       const latencyMs = Date.now() - startTime;
 
@@ -490,14 +415,11 @@ export class QUICClient {
         totalItems: options.data.length,
       });
 
-      // Get connection from pool
-      const connection = await this.acquireConnection();
-
       console.log(chalk.blue('📤 Pushing data to remote...'));
       console.log(chalk.gray(`   Type: ${options.type}`));
       console.log(chalk.gray(`   Items: ${options.data.length}`));
       console.log(chalk.gray(`   Batch size: ${batchSize}`));
-      console.log(chalk.gray(`   Connection: ${connection.id}`));
+      console.log(chalk.gray(`   Client: ${this.clientId}`));
 
       // Calculate total batches
       const totalBatches = Math.ceil(options.data.length / batchSize);
@@ -528,8 +450,8 @@ export class QUICClient {
         };
 
         try {
-          // Send batch with retry logic
-          const response = await this.sendWithRetry(connection, request);
+          // Send batch with retry logic (uses shared transport per ADR-0199).
+          const response = await this.sendWithRetry(request);
 
           if (response.success) {
             const batchBytes = JSON.stringify(batch).length;
@@ -557,9 +479,6 @@ export class QUICClient {
         totalItems: options.data.length,
         bytesTransferred,
       });
-
-      // Release connection
-      this.releaseConnection(connection);
 
       const durationMs = Date.now() - startTime;
 

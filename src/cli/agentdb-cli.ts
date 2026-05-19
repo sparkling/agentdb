@@ -1000,7 +1000,6 @@ class AgentDBCLI {
         maxRetries: 3,
         retryDelayMs: 1000,
         timeoutMs: params.timeout || 30000,
-        poolSize: 5,
         tlsConfig: {
           cert: params.cert,
           rejectUnauthorized: !!params.cert,
@@ -1029,8 +1028,9 @@ class AgentDBCLI {
       const status = this.quicClient.getStatus();
       console.log(`  Status: ${colors.green}Connected${colors.reset}`);
       console.log(`  Latency: ${colors.cyan}${pingResult.latencyMs}ms${colors.reset}`);
-      console.log(`  Pool Size: ${colors.cyan}${status.poolSize}${colors.reset}`);
-      console.log(`  Active Connections: ${colors.cyan}${status.activeConnections}${colors.reset}`);
+      console.log(`  Client: ${colors.cyan}${status.clientId}${colors.reset}`);
+      console.log(`  Transport: ${colors.cyan}${status.transport ?? 'unknown'}${colors.reset}`);
+      console.log(`  Requests: ${colors.cyan}${status.totalRequests}${colors.reset}`);
       console.log('-'.repeat(80));
 
       // Initialize the SyncCoordinator for subsequent push/pull operations
@@ -1120,7 +1120,6 @@ class AgentDBCLI {
           maxRetries: 3,
           retryDelayMs: 1000,
           timeoutMs: 30000,
-          poolSize: 5,
         };
         this.quicClient = new QUICClient(clientConfig);
         await this.quicClient.connect();
@@ -1311,7 +1310,6 @@ class AgentDBCLI {
           maxRetries: 3,
           retryDelayMs: 1000,
           timeoutMs: 30000,
-          poolSize: 5,
         };
         this.quicClient = new QUICClient(clientConfig);
         await this.quicClient.connect();
@@ -1528,7 +1526,8 @@ class AgentDBCLI {
       console.log(`  QUIC Client: ${clientStatus.isConnected ? colors.green + 'Connected' : colors.yellow + 'Disconnected'}${colors.reset}`);
       if (clientStatus.isConnected) {
         console.log(`    Server: ${colors.cyan}${clientStatus.config.serverHost}:${clientStatus.config.serverPort}${colors.reset}`);
-        console.log(`    Pool Size: ${colors.cyan}${clientStatus.poolSize}${colors.reset}`);
+        console.log(`    Client: ${colors.cyan}${clientStatus.clientId}${colors.reset}`);
+        console.log(`    Transport: ${colors.cyan}${clientStatus.transport ?? 'unknown'}${colors.reset}`);
         console.log(`    Total Requests: ${colors.cyan}${clientStatus.totalRequests}${colors.reset}`);
       }
     } else {

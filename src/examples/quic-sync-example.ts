@@ -65,7 +65,6 @@ async function exampleQUICSync() {
       maxRetries: 3,
       retryDelayMs: 1000,
       timeoutMs: 30000,
-      poolSize: 5,
     });
 
     await client.connect();
@@ -156,8 +155,8 @@ async function exampleQUICSync() {
     console.log('\n📱 Client Status:');
     const clientStatus = client.getStatus();
     console.log(`  Connected: ${clientStatus.isConnected}`);
-    console.log(`  Pool size: ${clientStatus.poolSize}`);
-    console.log(`  Active connections: ${clientStatus.activeConnections}`);
+    console.log(`  Client: ${clientStatus.clientId}`);
+    console.log(`  Transport: ${clientStatus.transport ?? 'unknown'}`);
     console.log(`  Total requests: ${clientStatus.totalRequests}`);
 
     // ===== Enable Auto-Sync =====

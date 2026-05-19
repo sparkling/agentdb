@@ -215,6 +215,194 @@ export class SyncCoordinator {
   }
 
   /**
+   * Push local changes to remote — no pull, no conflict resolution, no
+   * applyChanges. ADR-0200: single-direction surface so callers that
+   * only want to emit don't pay the cost of inbound traffic + write
+   * barrier. Reuses the same `detectChanges → pushChanges → saveSyncState`
+   * pipeline `sync()` runs for the push half.
+   *
+   * Returns a SyncReport with `itemsPulled: 0` and `conflictsResolved: 0`
+   * to keep the report shape stable across all three public methods.
+   */
+  async pushOnly(
+    ctx: MutationContext,
+    onProgress?: (progress: SyncProgress) => void
+  ): Promise<SyncReport> {
+    if (this.isSyncing) {
+      throw new Error('Sync already in progress');
+    }
+    if (!this.client) {
+      throw new Error('QUICClient not configured');
+    }
+
+    this.isSyncing = true;
+    const startTime = Date.now();
+    const errors: string[] = [];
+    let itemsPushed = 0;
+    let bytesTransferred = 0;
+
+    try {
+      console.log(chalk.blue('🔼 Starting push-only synchronization (ADR-0200)...'));
+
+      onProgress?.({ phase: 'detecting', current: 0, total: 100, message: 'Detecting changes...' });
+      const changes = await this.detectChanges();
+      const totalChanges = changes.episodes.length + changes.skills.length + changes.edges.length;
+      console.log(chalk.gray(`  Changes detected: ${totalChanges} items`));
+
+      if (totalChanges > 0) {
+        onProgress?.({ phase: 'pushing', current: 0, total: totalChanges });
+        const pushResult = await this.pushChanges(changes, onProgress);
+        itemsPushed = pushResult.itemsPushed;
+        bytesTransferred += pushResult.bytesTransferred;
+        errors.push(...pushResult.errors);
+      }
+
+      this.syncState.lastSyncAt = Date.now();
+      this.syncState.totalItemsSynced += itemsPushed;
+      this.syncState.totalBytesSynced += bytesTransferred;
+      this.syncState.syncCount++;
+      this.syncState.lastError = errors.length > 0 ? errors[0] : undefined;
+      await this.saveSyncState(ctx);
+
+      const endTime = Date.now();
+      const durationMs = endTime - startTime;
+      console.log(chalk.green('✓ Push-only synchronization completed'));
+      console.log(chalk.gray(`  Items pushed: ${itemsPushed}`));
+      console.log(chalk.gray(`  Duration: ${durationMs}ms`));
+
+      onProgress?.({ phase: 'completed', current: 100, total: 100, message: 'Push-only sync completed' });
+
+      return {
+        success: errors.length === 0,
+        startTime,
+        endTime,
+        durationMs,
+        itemsPushed,
+        itemsPulled: 0,
+        conflictsResolved: 0,
+        errors,
+        bytesTransferred,
+      };
+    } catch (error) {
+      const err = error as Error;
+      const endTime = Date.now();
+      console.error(chalk.red('✗ Push-only synchronization failed:'), err.message);
+      errors.push(err.message);
+      onProgress?.({ phase: 'error', current: 0, total: 0, error: err.message });
+      return {
+        success: false,
+        startTime,
+        endTime,
+        durationMs: endTime - startTime,
+        itemsPushed,
+        itemsPulled: 0,
+        conflictsResolved: 0,
+        errors,
+        bytesTransferred,
+      };
+    } finally {
+      this.isSyncing = false;
+    }
+  }
+
+  /**
+   * Pull remote changes and apply locally — no push of local changes.
+   * ADR-0200: single-direction surface so callers that only want to
+   * consume (archive nodes, read-only peers) don't force an outbound
+   * push they didn't intend. Reuses the same `pullChanges →
+   * resolveConflicts → applyChanges → saveSyncState` pipeline `sync()`
+   * runs for the pull half.
+   *
+   * Returns a SyncReport with `itemsPushed: 0`. Conflict resolution
+   * still runs (inline, same as `sync()`) because pulled data may
+   * conflict with local state and we don't want callers to have to
+   * repeat the orchestration.
+   */
+  async pullOnly(
+    ctx: MutationContext,
+    onProgress?: (progress: SyncProgress) => void
+  ): Promise<SyncReport> {
+    if (this.isSyncing) {
+      throw new Error('Sync already in progress');
+    }
+    if (!this.client) {
+      throw new Error('QUICClient not configured');
+    }
+
+    this.isSyncing = true;
+    const startTime = Date.now();
+    const errors: string[] = [];
+    let itemsPulled = 0;
+    let conflictsResolved = 0;
+    let bytesTransferred = 0;
+
+    try {
+      console.log(chalk.blue('🔽 Starting pull-only synchronization (ADR-0200)...'));
+
+      onProgress?.({ phase: 'pulling', current: 0, total: 100, message: 'Pulling remote changes...' });
+      const pullResult = await this.pullChanges(onProgress);
+      itemsPulled = pullResult.itemsPulled;
+      bytesTransferred += pullResult.bytesTransferred;
+      errors.push(...pullResult.errors);
+
+      if (pullResult.conflicts && pullResult.conflicts.length > 0) {
+        onProgress?.({ phase: 'resolving', current: 0, total: pullResult.conflicts.length, message: 'Resolving conflicts...' });
+        conflictsResolved = await this.resolveConflicts(pullResult.conflicts);
+      }
+
+      onProgress?.({ phase: 'applying', current: 0, total: itemsPulled, message: 'Applying changes...' });
+      await this.applyChanges(ctx, pullResult.data);
+
+      this.syncState.lastSyncAt = Date.now();
+      this.syncState.totalItemsSynced += itemsPulled;
+      this.syncState.totalBytesSynced += bytesTransferred;
+      this.syncState.syncCount++;
+      this.syncState.lastError = errors.length > 0 ? errors[0] : undefined;
+      await this.saveSyncState(ctx);
+
+      const endTime = Date.now();
+      const durationMs = endTime - startTime;
+      console.log(chalk.green('✓ Pull-only synchronization completed'));
+      console.log(chalk.gray(`  Items pulled: ${itemsPulled}`));
+      console.log(chalk.gray(`  Conflicts resolved: ${conflictsResolved}`));
+      console.log(chalk.gray(`  Duration: ${durationMs}ms`));
+
+      onProgress?.({ phase: 'completed', current: 100, total: 100, message: 'Pull-only sync completed' });
+
+      return {
+        success: errors.length === 0,
+        startTime,
+        endTime,
+        durationMs,
+        itemsPushed: 0,
+        itemsPulled,
+        conflictsResolved,
+        errors,
+        bytesTransferred,
+      };
+    } catch (error) {
+      const err = error as Error;
+      const endTime = Date.now();
+      console.error(chalk.red('✗ Pull-only synchronization failed:'), err.message);
+      errors.push(err.message);
+      onProgress?.({ phase: 'error', current: 0, total: 0, error: err.message });
+      return {
+        success: false,
+        startTime,
+        endTime,
+        durationMs: endTime - startTime,
+        itemsPushed: 0,
+        itemsPulled,
+        conflictsResolved,
+        errors,
+        bytesTransferred,
+      };
+    } finally {
+      this.isSyncing = false;
+    }
+  }
+
+  /**
    * Detect changes since last sync
    */
   private async detectChanges(): Promise<{

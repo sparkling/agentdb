@@ -337,21 +337,24 @@ export class QUICClient {
    * Send request to server
    */
   private async sendRequest(connection: Connection, request: any): Promise<any> {
-    // Simulate request
-    // In real implementation, this would serialize and send via QUIC
+    // ADR-0199: route data through the real transport (WebTransport or HTTP/2
+    // fallback). Throws if connect() was not called or already disconnected —
+    // per feedback-no-fallbacks, no silent mock-response branch.
+    if (!this.transport) {
+      throw new Error('QUICClient.sendRequest: transport not initialised — call connect() first');
+    }
 
     connection.requestCount++;
     connection.lastUsedAt = Date.now();
 
-    // Simulate network delay
-    await this.sleep(100);
-
-    // Mock response (in real implementation, this comes from server)
-    return {
-      success: true,
-      data: [],
-      count: 0,
+    // Carry caller-context fields the server uses for auth + bookkeeping.
+    const envelope = {
+      ...request,
+      clientId: connection.id,
+      authToken: this.config.authToken,
     };
+
+    return this.transport.send(envelope);
   }
 
   /**

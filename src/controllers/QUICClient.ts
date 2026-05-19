@@ -87,6 +87,20 @@ export interface PushResult {
   failedItems?: any[];
 }
 
+/**
+ * Pool-side bookkeeping for a logical Connection. Post-ADR-0199, the actual
+ * wire send goes through ONE shared `this.transport.send()` regardless of
+ * which pool entry was acquired — the per-Connection state (`inUse`,
+ * `createdAt`, `lastUsedAt`, `requestCount`) is vestigial bookkeeping
+ * retained for log lines (`connection.id` in stdout traces) and metrics
+ * (`requestCount` for rate-limit visibility).
+ *
+ * Architectural follow-up: this layer can be removed in a future cleanup
+ * pass once log messages are tied to transport-level identifiers instead
+ * of synthetic `conn-N` ids. Not removed in ADR-0199 because the call
+ * graph touches `sync()`, `pushData()`, and `sendWithRetry` — too invasive
+ * relative to the value.
+ */
 interface Connection {
   id: string;
   inUse: boolean;

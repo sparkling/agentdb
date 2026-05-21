@@ -58,6 +58,7 @@
     "./controllers/MetadataFilter": "./dist/src/controllers/MetadataFilter.js",
     "./controllers/QUICServer": "./dist/src/controllers/QUICServer.js",
     "./controllers/QUICClient": "./dist/src/controllers/QUICClient.js",
+    "./controllers/QUICConnectionPool": "./dist/src/controllers/QUICConnectionPool.js",
     "./controllers/SyncCoordinator": "./dist/src/controllers/SyncCoordinator.js",
     "./controllers/HNSWIndex": "./dist/src/controllers/HNSWIndex.js",
     "./controllers/AttentionService": "./dist/src/controllers/AttentionService.js",

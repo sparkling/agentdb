@@ -32,6 +32,12 @@ export {
   type EmbeddingChainConfig,
 } from './core/config-chain.js';
 
+// ADR-0161 completion: readEwcLambdaFromConfig is consumed by agentic-flow
+// (RuVectorIntelligence, intelligence-tools, sona-agentdb-integration), which
+// previously reached into the now-deleted vendored packages/agentdb. Surface
+// it from the barrel so the bare `agentdb` specifier resolves it.
+export { readEwcLambdaFromConfig } from './config/embedding-config.js';
+
 // ADR-0061 Phase 0: resource/rate/circuit/telemetry controllers that the
 // memory controller-registry imports from agentdb at bootstrap. Exporting
 // from the barrel so consumers can resolve the symbols without digging into

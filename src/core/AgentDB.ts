@@ -168,11 +168,22 @@ export class AgentDB {
       return this.initializeSqlJsWasm(dbPath);
     }
 
+    // ADR-0069 A1: SQLite performance pragmas are config-driven with safe
+    // fallbacks (consistent with @claude-flow/memory's sqlite-backend and the
+    // agentic-flow WAL sites). Declared outside the try so the value is in
+    // scope for the catch/WASM path. `busy_timeout` in particular prevents
+    // SQLITE_BUSY under the concurrent controller access agentdb sees (the
+    // controllers share one better-sqlite3 handle).
+    const sq = this.config.sqlite;
+
     // Try better-sqlite3 first (native performance)
     try {
       const Database = (await import('better-sqlite3')).default;
       const db = new Database(dbPath);
-      db.pragma('journal_mode = WAL');
+      db.pragma(`journal_mode = ${sq?.journalMode ?? 'WAL'}`);
+      db.pragma(`synchronous = ${sq?.synchronous ?? 'NORMAL'}`);
+      db.pragma(`cache_size = ${sq?.cacheSize ?? -64000}`);
+      db.pragma(`busy_timeout = ${sq?.busyTimeoutMs ?? 5000}`);
       this.usingWasm = false;
       return db as unknown as IDatabaseConnection;
     } catch (error) {

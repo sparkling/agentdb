@@ -17,7 +17,12 @@
  * - Statistics tracking for performance monitoring
  */
 
-import type { VectorBackend, VectorConfig, SearchResult, SearchOptions, VectorStats } from '../VectorBackend.js';
+import type { VectorBackendAsync, VectorConfig, SearchResult, SearchOptions, VectorStats } from '../VectorBackend.js';
+import {
+  cosineSimilaritySIMD,
+  euclideanDistanceSIMD,
+  dotProductSIMD,
+} from '../../simd/simd-vector-ops.js';
 
 // ============================================================================
 // Performance & Security Constants
@@ -78,6 +83,29 @@ function validateDimension(dimension: number): void {
   if (!Number.isFinite(dimension) || dimension < 1 || dimension > MAX_VECTOR_DIMENSION) {
     throw new Error(`Dimension must be between 1 and ${MAX_VECTOR_DIMENSION}`);
   }
+}
+
+/**
+ * Map the VectorBackend metric vocabulary (`cosine`/`l2`/`ip`) to the
+ * `JsDistanceMetric` enum variants the native `ruvector` binding accepts
+ * (PascalCase: `Cosine`/`Euclidean`/`DotProduct`).
+ */
+function toNativeMetric(metric: VectorConfig['metric']): 'Cosine' | 'Euclidean' | 'DotProduct' {
+  switch (metric) {
+    case 'l2':
+      return 'Euclidean';
+    case 'ip':
+      return 'DotProduct';
+    case 'cosine':
+    default:
+      return 'Cosine';
+  }
+}
+
+/** In-memory mirror entry backing the synchronous VectorBackend surface. */
+interface MirrorEntry {
+  embedding: Float32Array;
+  metadata?: Record<string, unknown>;
 }
 
 /**
@@ -219,12 +247,33 @@ export interface RuVectorConfig extends VectorConfig {
   enableStats?: boolean;
 }
 
-export class RuVectorBackend implements VectorBackend {
+export class RuVectorBackend implements VectorBackendAsync {
   readonly name = 'ruvector' as const;
   private db: any; // VectorDB from @ruvector/core
   private config: RuVectorConfig;
   private metadata: Map<string, Record<string, any>> = new Map();
   private initialized = false;
+
+  /**
+   * Synchronous in-memory mirror of the index contents.
+   *
+   * The installed `ruvector` binding exposes a FULLY ASYNC API (`insert`,
+   * `search`, `len`, `delete`, `get` all return Promises) with no synchronous
+   * accessor. The `VectorBackend` contract this adapter must satisfy is
+   * synchronous (`insert(): void`, `search(): SearchResult[]`, `getStats():
+   * VectorStats`, `remove(): boolean`). We reconcile the two — exactly as the
+   * sibling `SqlJsRvfBackend` does — by maintaining a JS-side mirror that the
+   * sync methods read/write directly (brute-force SIMD search), while the async
+   * `*Async` methods drive the native HNSW index for production-scale recall.
+   */
+  private mirror: Map<string, MirrorEntry> = new Map();
+
+  /** Writes issued via the sync surface, awaiting flush() into the native index. */
+  private pendingInserts: Array<{ id: string; embedding: Float32Array; metadata?: Record<string, unknown> }> = [];
+  /** Removals issued via the sync surface, awaiting flush() into the native index. */
+  private pendingRemovals: string[] = [];
+  /** Default efSearch applied to native searches (binding has no setEfSearch). */
+  private defaultEfSearch = 100;
 
   // Concurrency control
   private semaphore: Semaphore;
@@ -332,19 +381,19 @@ export class RuVectorBackend implements VectorBackend {
       const efConstruction = this.config.efConstruction ?? adaptiveParams?.efConstruction ?? 200;
       const efSearch = this.config.efSearch ?? adaptiveParams?.efSearch ?? 100;
 
-      // RuVector VectorDB constructor signature
+      // Default efSearch applied per-query (the native binding has no
+      // setEfSearch(); efSearch is a SearchQuery field).
+      this.defaultEfSearch = efSearch;
+
+      // RuVector VectorDB constructor signature. The native binding rejects the
+      // lowercase metric vocabulary, so map to its JsDistanceMetric enum.
       this.db = new VectorDB({
         dimensions: dimensions,  // Note: config object, not positional arg
-        metric: this.config.metric,
+        distanceMetric: toNativeMetric(this.config.metric),
         maxElements: maxElements,
         efConstruction: efConstruction,
         m: m  // Note: lowercase 'm'
       });
-
-      // Set default efSearch
-      if (this.db.setEfSearch) {
-        this.db.setEfSearch(efSearch);
-      }
 
       // Initialize memory-mapped storage if enabled and available
       if (this.mmapEnabled && this.config.mmapPath) {
@@ -480,13 +529,12 @@ export class RuVectorBackend implements VectorBackend {
 
     const startTime = this.config.enableStats !== false ? performance.now() : 0;
 
-    // RuVector v0.1.30+ uses object API with 'vector' field
-    // Native VectorDB requires Float32Array, not regular array
-    this.db.insert({
-      id: id,
-      vector: embedding instanceof Float32Array ? embedding : new Float32Array(embedding),
-      metadata: metadata
-    });
+    // Copy into the synchronous mirror so insert -> search -> getStats works
+    // end-to-end without awaiting the async native binding. The same vector is
+    // queued for flush() into the native HNSW index (see insertAsync/flush).
+    const vector = embedding instanceof Float32Array ? new Float32Array(embedding) : new Float32Array(embedding);
+    this.mirror.set(id, { embedding: vector, metadata });
+    this.pendingInserts.push({ id, embedding: vector, metadata });
 
     if (metadata) {
       this.metadata.set(id, metadata);
@@ -607,70 +655,11 @@ export class RuVectorBackend implements VectorBackend {
 
     const startTime = this.config.enableStats !== false ? performance.now() : 0;
 
-    // Apply efSearch parameter if provided
-    if (options?.efSearch) {
-      this.db.setEfSearch(options.efSearch);
-    }
-
-    // RuVector v0.1.30+ supports both object API and legacy positional args
-    // Use object API for consistency with insert
-    // Native VectorDB requires Float32Array, not regular array
-    const results = this.db.search({
-      vector: query instanceof Float32Array ? query : new Float32Array(query),
-      k: k,
-      threshold: options?.threshold,
-      filter: options?.filter
-    });
-
-    // @inline Early termination threshold for perfect matches
-    const earlyTermThreshold = 0.9999;
-    let perfectMatches = 0;
-    const maxPerfectMatches = k;
-
-    // @inline Convert results and apply filtering with early termination
-    const filteredResults: SearchResult[] = [];
-    const resultsLen = results.length | 0;
-
-    for (let i = 0; i < resultsLen; i++) {
-      const r = results[i] as { id: string; distance: number };
-      const similarity = this.distanceToSimilarity(r.distance);
-
-      // Apply similarity threshold
-      if (options?.threshold && similarity < options.threshold) {
-        continue;
-      }
-
-      const metadata = this.metadata.get(r.id);
-
-      // Apply metadata filters
-      if (options?.filter && metadata) {
-        const filterEntries = Object.entries(options.filter);
-        let matchesFilter = true;
-        for (let j = 0; j < filterEntries.length; j++) {
-          const [key, value] = filterEntries[j];
-          if (metadata[key] !== value) {
-            matchesFilter = false;
-            break;
-          }
-        }
-        if (!matchesFilter) continue;
-      }
-
-      filteredResults.push({
-        id: r.id,
-        distance: r.distance,
-        similarity,
-        metadata
-      });
-
-      // @inline Early termination for perfect matches
-      if (similarity >= earlyTermThreshold) {
-        perfectMatches++;
-        if (perfectMatches >= maxPerfectMatches) {
-          break;
-        }
-      }
-    }
+    // The native binding's search() is async; the sync contract is served from
+    // the in-memory mirror via brute-force SIMD scan. For production-scale,
+    // HNSW-indexed recall, callers use searchAsync().
+    const queryVec = query instanceof Float32Array ? query : new Float32Array(query);
+    const filteredResults = this.bruteForceSearch(queryVec, k, options);
 
     // Track search latency
     if (this.config.enableStats !== false) {
@@ -685,18 +674,93 @@ export class RuVectorBackend implements VectorBackend {
   }
 
   /**
+   * Brute-force k-NN over the in-memory mirror using SIMD distance kernels.
+   * Shared by the sync search() and as the fallback semantics for searchAsync.
+   */
+  private bruteForceSearch(query: Float32Array, k: number, options?: SearchOptions): SearchResult[] {
+    if (!Number.isFinite(k) || k < 1) {
+      throw new Error('k must be a positive finite integer');
+    }
+    const safeK = Math.min(Math.floor(k), MAX_BATCH_SIZE);
+    const threshold = options?.threshold;
+
+    const results: SearchResult[] = [];
+
+    for (const [id, entry] of this.mirror) {
+      // Apply metadata filters (post-filtering)
+      if (options?.filter) {
+        const metadata = entry.metadata;
+        if (!metadata) continue;
+        const filterEntries = Object.entries(options.filter);
+        let matchesFilter = true;
+        for (let j = 0; j < filterEntries.length; j++) {
+          const [key, value] = filterEntries[j];
+          if (metadata[key] !== value) {
+            matchesFilter = false;
+            break;
+          }
+        }
+        if (!matchesFilter) continue;
+      }
+
+      const { similarity, distance } = this.computeScore(query, entry.embedding);
+
+      // Apply similarity threshold
+      if (threshold !== undefined && similarity < threshold) {
+        continue;
+      }
+
+      results.push({ id, distance, similarity, metadata: entry.metadata });
+    }
+
+    // Sort by similarity descending (most similar first) and take top-k
+    results.sort((a, b) => b.similarity - a.similarity);
+    return results.slice(0, safeK);
+  }
+
+  /**
+   * Compute (similarity, distance) for a query/candidate pair per the
+   * configured metric. similarity is normalized higher-is-better.
+   */
+  private computeScore(query: Float32Array, candidate: Float32Array): { similarity: number; distance: number } {
+    switch (this.config.metric) {
+      case 'l2': {
+        const distance = euclideanDistanceSIMD(query, candidate);
+        return { similarity: Math.exp(-distance), distance };
+      }
+      case 'ip': {
+        const dp = dotProductSIMD(query, candidate);
+        return { similarity: dp, distance: -dp };
+      }
+      case 'cosine':
+      default: {
+        const similarity = cosineSimilaritySIMD(query, candidate);
+        return { similarity, distance: 1 - similarity };
+      }
+    }
+  }
+
+  /**
    * Remove vector by ID
+   *
+   * Mutates the synchronous mirror (observable immediately) and queues the
+   * removal for flush() into the native index. Returns whether the id existed.
    */
   remove(id: string): boolean {
     this.ensureInitialized();
 
-    this.metadata.delete(id);
+    if (!id || typeof id !== 'string') return false;
 
-    try {
-      return this.db.remove(id);
-    } catch {
-      return false;
+    this.metadata.delete(id);
+    const existed = this.mirror.delete(id);
+
+    // Drop any not-yet-flushed insert for this id so it doesn't resurrect.
+    if (this.pendingInserts.length > 0) {
+      this.pendingInserts = this.pendingInserts.filter((p) => p.id !== id);
     }
+    this.pendingRemovals.push(id);
+
+    return existed;
   }
 
   /**
@@ -705,16 +769,172 @@ export class RuVectorBackend implements VectorBackend {
   getStats(): VectorStats {
     this.ensureInitialized();
 
-    const memoryUsage = this.db.memoryUsage?.() || 0;
+    // Count comes from the synchronous mirror (the native binding's len() is
+    // async and cannot be awaited here). memoryUsage is approximated from the
+    // mirrored vector bytes — the native binding exposes no memoryUsage().
+    const dimension = this.config.dimension || 384;
+    const memoryUsage = this.mirror.size * dimension * 4; // Float32 = 4 bytes
     this.stats.lastMemoryUsage = memoryUsage;
 
     return {
-      count: this.db.count(),
-      dimension: this.config.dimension || 384,
+      count: this.mirror.size,
+      dimension,
       metric: this.config.metric,
       backend: 'ruvector',
-      memoryUsage: memoryUsage
+      memoryUsage,
     };
+  }
+
+  // ===========================================================================
+  // VectorBackendAsync surface — drives the native HNSW index via the real
+  // ruvector binding API (insert/insertBatch/search/delete/len). These are the
+  // preferred entry points for production-scale, index-backed recall.
+  // ===========================================================================
+
+  /** Async single-vector insert into the native index (and the sync mirror). */
+  async insertAsync(id: string, embedding: Float32Array, metadata?: Record<string, unknown>): Promise<void> {
+    this.ensureInitialized();
+    if (!id || typeof id !== 'string') {
+      throw new Error('Vector ID must be a non-empty string');
+    }
+    const vector = embedding instanceof Float32Array ? new Float32Array(embedding) : new Float32Array(embedding);
+
+    // Keep the sync mirror coherent with the native index.
+    this.mirror.set(id, { embedding: vector, metadata });
+    if (metadata) this.metadata.set(id, metadata);
+    this.pendingInserts = this.pendingInserts.filter((p) => p.id !== id);
+
+    await this.db.insert({ id, vector, metadata });
+  }
+
+  /** Async batch insert into the native index (and the sync mirror). */
+  async insertBatchAsync(items: Array<{ id: string; embedding: Float32Array; metadata?: Record<string, unknown> }>): Promise<void> {
+    this.ensureInitialized();
+    if (items.length === 0) return;
+    if (items.length > MAX_BATCH_SIZE) {
+      throw new Error(`Batch size ${items.length} exceeds maximum of ${MAX_BATCH_SIZE}`);
+    }
+
+    const nativeEntries = items.map((item) => {
+      const vector = item.embedding instanceof Float32Array ? new Float32Array(item.embedding) : new Float32Array(item.embedding);
+      this.mirror.set(item.id, { embedding: vector, metadata: item.metadata });
+      if (item.metadata) this.metadata.set(item.id, item.metadata);
+      this.pendingInserts = this.pendingInserts.filter((p) => p.id !== item.id);
+      return { id: item.id, vector, metadata: item.metadata };
+    });
+
+    await this.db.insertBatch(nativeEntries);
+  }
+
+  /**
+   * Async k-NN search backed by the native HNSW index.
+   *
+   * Flushes any queued sync writes first so results reflect the full dataset,
+   * then maps the binding's {id, score} rows to {id, distance, similarity}.
+   */
+  async searchAsync(query: Float32Array, k: number, options?: SearchOptions): Promise<SearchResult[]> {
+    this.ensureInitialized();
+    await this.flush();
+
+    const queryVec = query instanceof Float32Array ? query : new Float32Array(query);
+    const rows: Array<{ id: string; score: number; metadata?: Record<string, unknown> }> = await this.db.search({
+      vector: queryVec,
+      k,
+      efSearch: options?.efSearch ?? this.defaultEfSearch,
+      filter: options?.filter,
+    });
+
+    const results: SearchResult[] = [];
+    for (const r of rows) {
+      // The binding's `score` is the raw metric distance.
+      const distance = r.score;
+      const similarity = this.distanceToSimilarity(distance);
+
+      if (options?.threshold !== undefined && similarity < options.threshold) {
+        continue;
+      }
+
+      const metadata = r.metadata ?? this.metadata.get(r.id);
+
+      // Post-filter on metadata (mirror those filters the binding may not apply).
+      if (options?.filter) {
+        if (!metadata) continue;
+        let matches = true;
+        for (const [key, value] of Object.entries(options.filter)) {
+          if ((metadata as Record<string, unknown>)[key] !== value) {
+            matches = false;
+            break;
+          }
+        }
+        if (!matches) continue;
+      }
+
+      results.push({ id: r.id, distance, similarity, metadata });
+    }
+
+    return results;
+  }
+
+  /** Async remove by ID from the native index (and the sync mirror). */
+  async removeAsync(id: string): Promise<boolean> {
+    this.ensureInitialized();
+    if (!id || typeof id !== 'string') return false;
+
+    this.metadata.delete(id);
+    const existed = this.mirror.delete(id);
+    this.pendingInserts = this.pendingInserts.filter((p) => p.id !== id);
+
+    const nativeDeleted = await this.db.delete(id);
+    return existed || nativeDeleted;
+  }
+
+  /** Async stats with the native index's live element count. */
+  async getStatsAsync(): Promise<VectorStats> {
+    this.ensureInitialized();
+    await this.flush();
+
+    const dimension = this.config.dimension || 384;
+    const count = await this.db.len();
+    const memoryUsage = count * dimension * 4;
+    this.stats.lastMemoryUsage = memoryUsage;
+
+    return {
+      count,
+      dimension,
+      metric: this.config.metric,
+      backend: 'ruvector',
+      memoryUsage,
+    };
+  }
+
+  /**
+   * Flush queued sync writes/removals into the native HNSW index.
+   *
+   * The sync insert()/remove() methods update only the in-memory mirror and
+   * queue the operation here; flush() reconciles the native index so that
+   * searchAsync()/getStatsAsync() observe the full dataset.
+   */
+  async flush(): Promise<void> {
+    this.ensureInitialized();
+
+    if (this.pendingRemovals.length > 0) {
+      const removals = this.pendingRemovals.splice(0, this.pendingRemovals.length);
+      for (const id of removals) {
+        try {
+          await this.db.delete(id);
+        } catch {
+          // Best-effort: a removal for an id never inserted into the native
+          // index is a no-op, not an error.
+        }
+      }
+    }
+
+    if (this.pendingInserts.length > 0) {
+      const batch = this.pendingInserts.splice(0, this.pendingInserts.length);
+      await this.db.insertBatch(
+        batch.map((p) => ({ id: p.id, vector: p.embedding, metadata: p.metadata }))
+      );
+    }
   }
 
   /**
@@ -785,21 +1005,22 @@ export class RuVectorBackend implements VectorBackend {
       return;
     }
 
-    const currentCount = this.db.count();
+    const currentCount = this.mirror.size;
     const params = this.getAdaptiveParams(currentCount);
 
-    // Check if we need to rebuild
-    // This would require checking current params vs recommended
-    // For now, just set efSearch which doesn't require rebuild
-    if (this.db.setEfSearch) {
-      this.db.setEfSearch(params.efSearch);
-    }
+    // The native binding has no setEfSearch(); efSearch is applied per query.
+    // Update the default so subsequent searchAsync() calls use the adaptive value.
+    this.defaultEfSearch = params.efSearch;
 
     this.stats.indexRebuildCount++;
   }
 
   /**
    * Save index and metadata to disk
+   *
+   * The native binding exposes no index-export API, so the recoverable state —
+   * the vectors and their metadata — is serialized from the in-memory mirror.
+   * load() rebuilds both the mirror and the native HNSW index from this file.
    */
   async save(savePath: string): Promise<void> {
     this.ensureInitialized();
@@ -807,14 +1028,21 @@ export class RuVectorBackend implements VectorBackend {
     // Validate path for security
     validatePath(savePath);
 
-    // Save vector index
-    this.db.save(savePath);
-
-    // Save metadata separately as JSON
-    const metadataPath = savePath + '.meta.json';
-    validatePath(metadataPath);
+    // Serialize the mirror: id -> { vector (as plain array), metadata }
+    const entries: Record<string, { vector: number[]; metadata?: Record<string, unknown> }> = {};
+    for (const [id, entry] of this.mirror) {
+      entries[id] = {
+        vector: Array.from(entry.embedding),
+        metadata: entry.metadata,
+      };
+    }
 
     const fs = await import('fs/promises');
+    await fs.writeFile(savePath, JSON.stringify({ dimension: this.config.dimension, metric: this.config.metric, entries }));
+
+    // Keep the legacy metadata sidecar for backward compatibility.
+    const metadataPath = savePath + '.meta.json';
+    validatePath(metadataPath);
     await fs.writeFile(
       metadataPath,
       JSON.stringify(Object.fromEntries(this.metadata), null, 2)
@@ -823,6 +1051,10 @@ export class RuVectorBackend implements VectorBackend {
 
   /**
    * Load index and metadata from disk
+   *
+   * Reads the mirror snapshot written by save(), rebuilds the synchronous
+   * mirror, and queues the vectors for flush() into the native HNSW index.
+   * Falls back to the legacy `.meta.json` sidecar when no snapshot is present.
    */
   async load(loadPath: string): Promise<void> {
     this.ensureInitialized();
@@ -830,51 +1062,88 @@ export class RuVectorBackend implements VectorBackend {
     // Validate path for security
     validatePath(loadPath);
 
-    // Load vector index
-    this.db.load(loadPath);
+    const fs = await import('fs/promises');
 
-    // Load metadata
-    const metadataPath = loadPath + '.meta.json';
-    validatePath(metadataPath);
+    // Reset in-memory state before loading.
+    this.mirror.clear();
+    this.metadata.clear();
+    this.pendingInserts = [];
+    this.pendingRemovals = [];
 
+    let snapshotLoaded = false;
     try {
-      const fs = await import('fs/promises');
-      const data = await fs.readFile(metadataPath, 'utf-8');
-
-      // Safely parse metadata with validation
+      const raw = await fs.readFile(loadPath, 'utf-8');
       let parsed: unknown;
       try {
-        parsed = JSON.parse(data);
+        parsed = JSON.parse(raw);
       } catch {
-        throw new Error('Invalid JSON in metadata file');
+        throw new Error('Invalid JSON in index file');
       }
 
-      // Validate parsed data is a plain object
-      if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-        throw new Error('Metadata must be a plain object');
-      }
+      const entries = (parsed as { entries?: Record<string, { vector: number[]; metadata?: Record<string, unknown> }> })?.entries;
+      if (entries && typeof entries === 'object') {
+        for (const [id, value] of Object.entries(entries)) {
+          if (id === '__proto__' || id === 'constructor' || id === 'prototype') continue;
+          const vector = new Float32Array(value.vector);
+          this.mirror.set(id, { embedding: vector, metadata: value.metadata });
+          this.pendingInserts.push({ id, embedding: vector, metadata: value.metadata });
+          if (value.metadata) {
+            this.metadata.set(id, value.metadata);
+          }
+        }
+        snapshotLoaded = true;
 
-      // Check for prototype pollution attempts
-      const unsafeKeys = ['__proto__', 'constructor', 'prototype'];
-      for (const key of Object.keys(parsed as Record<string, unknown>)) {
-        if (unsafeKeys.includes(key)) {
-          throw new Error(`Forbidden key in metadata: ${key}`);
+        if (this.mirror.size > MAX_METADATA_ENTRIES) {
+          this.mirror.clear();
+          this.metadata.clear();
+          this.pendingInserts = [];
+          throw new Error(`Loaded index exceeds maximum of ${MAX_METADATA_ENTRIES} entries`);
         }
       }
-
-      this.metadata = new Map(Object.entries(parsed as Record<string, Record<string, any>>));
-
-      // Enforce size limit
-      if (this.metadata.size > MAX_METADATA_ENTRIES) {
-        this.metadata.clear();
-        throw new Error(`Loaded metadata exceeds maximum of ${MAX_METADATA_ENTRIES} entries`);
-      }
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-        // No metadata file - this is okay for backward compatibility
-        console.debug(`[RuVectorBackend] No metadata file found at ${metadataPath}`);
-      } else {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
         throw error;
+      }
+      // No snapshot file — fall through to legacy metadata sidecar below.
+    }
+
+    // Legacy metadata sidecar (pre-snapshot saves only stored metadata).
+    if (!snapshotLoaded) {
+      const metadataPath = loadPath + '.meta.json';
+      validatePath(metadataPath);
+      try {
+        const data = await fs.readFile(metadataPath, 'utf-8');
+
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(data);
+        } catch {
+          throw new Error('Invalid JSON in metadata file');
+        }
+
+        if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+          throw new Error('Metadata must be a plain object');
+        }
+
+        const unsafeKeys = ['__proto__', 'constructor', 'prototype'];
+        for (const key of Object.keys(parsed as Record<string, unknown>)) {
+          if (unsafeKeys.includes(key)) {
+            throw new Error(`Forbidden key in metadata: ${key}`);
+          }
+        }
+
+        this.metadata = new Map(Object.entries(parsed as Record<string, Record<string, any>>));
+
+        if (this.metadata.size > MAX_METADATA_ENTRIES) {
+          this.metadata.clear();
+          throw new Error(`Loaded metadata exceeds maximum of ${MAX_METADATA_ENTRIES} entries`);
+        }
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+          console.debug(`[RuVectorBackend] No metadata file found at ${metadataPath}`);
+        } else {
+          throw error;
+        }
       }
     }
   }
@@ -885,6 +1154,9 @@ export class RuVectorBackend implements VectorBackend {
   close(): void {
     // RuVector cleanup if needed
     this.metadata.clear();
+    this.mirror.clear();
+    this.pendingInserts = [];
+    this.pendingRemovals = [];
 
     // Clear buffer pool
     this.bufferPool.clear();

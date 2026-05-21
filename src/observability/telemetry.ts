@@ -116,7 +116,11 @@ export class TelemetryManager {
    */
   public async initialize(): Promise<void> {
     if (!this.config.enabled) {
-      console.log('[AgentDB] Telemetry disabled');
+      // Diagnostic → stderr, NEVER stdout. AgentDB loads inside the MCP stdio
+      // server's archivist bootstrap; any stdout write pollutes the JSON-RPC
+      // channel and breaks the client's parse (and trips stdout-shape test
+      // assertions). Logs belong on stderr.
+      console.error('[AgentDB] Telemetry disabled');
       return;
     }
 
@@ -149,10 +153,10 @@ export class TelemetryManager {
       // Initialize metrics
       this.initializeMetrics();
 
-      console.log('[AgentDB] Telemetry initialized successfully');
+      console.error('[AgentDB] Telemetry initialized successfully');
     } catch (error) {
       console.error('[AgentDB] Failed to initialize telemetry:', error);
-      console.log('[AgentDB] Continuing without telemetry (graceful degradation)');
+      console.error('[AgentDB] Continuing without telemetry (graceful degradation)');
       // Graceful degradation - continue without telemetry
       this.config.enabled = false;
     }
@@ -315,7 +319,7 @@ export class TelemetryManager {
   public async shutdown(): Promise<void> {
     if (this.sdk) {
       await this.sdk.shutdown();
-      console.log('[AgentDB] Telemetry shut down');
+      console.error('[AgentDB] Telemetry shut down');
     }
   }
 

@@ -6,9 +6,12 @@
  * the outer catch does NOT re-wrap GraphDatabaseCorruptError into the generic
  * "Failed to initialize RuVector Graph Database" error.
  *
- * Because @ruvector/graph-node is an optional native package that may not be
- * available in the test environment, the tests mock the dynamic import so they
- * always run without the native dependency.
+ * Path 1 (vi.mock at module scope): vi.mock('@ruvector/graph-node', factory)
+ * is hoisted before any import resolves, so the real initialize() runs its
+ * real dynamic import and receives the mock module.  The real source logic is
+ * exercised on every test — no prototype overrides, no golden-master theatre.
+ *
+ * (fix-forward: replace test theatre with real-initialize() exercise — ADR-0221)
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
@@ -19,28 +22,36 @@ import { GraphDatabaseAdapter, GraphDatabaseCorruptError } from '../../../src/ba
 import { EmbeddingService } from '../../../src/controllers/EmbeddingService.js';
 
 // ---------------------------------------------------------------------------
+// Module-scope mock — MUST be declared before any dynamic import inside the
+// source runs.  vi.mock is hoisted to the top of the compiled output by the
+// vitest transform, so the factory runs before the first test even starts.
+//
+// mockOpen is a module-level vi.fn() that each test configures to control
+// what GraphDatabase.open() returns or throws.
+// ---------------------------------------------------------------------------
+
+const mockOpen = vi.fn();
+const mockConstructed = vi.fn();
+
+vi.mock('@ruvector/graph-node', () => {
+  class MockGraphDatabase {
+    static open(storagePath: string): MockGraphDatabase {
+      // Delegates to the per-test-configurable spy.
+      return mockOpen(storagePath);
+    }
+    constructor(config?: any) {
+      mockConstructed(config);
+    }
+  }
+  return { GraphDatabase: MockGraphDatabase };
+});
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
 function tmpPath(): string {
   return path.join(os.tmpdir(), `agentdb-graph-test-${Math.random().toString(36).slice(2)}.db`);
-}
-
-/** Build a mock GraphDatabase class factory for use in import() mocking. */
-function makeMockGraphModule(opts: {
-  openShouldThrow?: boolean;
-  openError?: Error;
-}) {
-  class MockGraphDatabase {
-    static open(_p: string): MockGraphDatabase {
-      if (opts.openShouldThrow) {
-        throw opts.openError ?? new Error('mock: corrupt database');
-      }
-      return new MockGraphDatabase();
-    }
-    constructor(_config?: any) {}
-  }
-  return { GraphDatabase: MockGraphDatabase };
 }
 
 // ---------------------------------------------------------------------------
@@ -59,10 +70,13 @@ describe('GraphDatabaseAdapter — ADR-0221 discriminate corrupt vs absent', () 
     });
     await embedder.initialize();
     createdPaths = [];
+    // Vitest's global clearMocks:true resets call counts; reset implementation
+    // explicitly so each test starts from a clean slate.
+    mockOpen.mockReset();
+    mockConstructed.mockReset();
   });
 
   afterEach(() => {
-    vi.restoreAllMocks();
     for (const p of createdPaths) {
       try { fs.unlinkSync(p); } catch { /* ignore */ }
     }
@@ -74,53 +88,14 @@ describe('GraphDatabaseAdapter — ADR-0221 discriminate corrupt vs absent', () 
     createdPaths.push(dbPath);
     fs.writeFileSync(dbPath, 'not a valid graph database');
 
+    // Configure mock: open() throws, simulating a corrupt file.
+    const corruptErr = new Error('mock: corrupt database');
+    mockOpen.mockImplementation(() => { throw corruptErr; });
+
     const adapter = new GraphDatabaseAdapter({ storagePath: dbPath }, embedder);
 
-    // Mock the dynamic import of @ruvector/graph-node to return a GraphDatabase
-    // whose open() throws, simulating a corrupt file.
-    vi.spyOn(adapter as any, 'initialize').mockImplementation(async () => {
-      // Re-run the real logic but with mocked internals by calling the patched method.
-      // Instead: directly exercise the discriminate logic by calling the real method
-      // after patching the module resolution.
-    });
-    // Reset the spy — we want the real initialize() to run.
-    vi.restoreAllMocks();
-
-    // Patch `import()` via vi.mock is module-scoped; instead we patch the
-    // internal dynamic-import used by initialize() by replacing the method
-    // that performs the import. We do this by subclassing and overriding.
-    const mockModule = makeMockGraphModule({ openShouldThrow: true });
-
-    // Use vi.spyOn on globalThis or intercept the exact dynamic import call.
-    // The cleanest approach: patch the adapter's private initialize via a
-    // thin wrapper that overrides the module import result.
-    const originalInit = GraphDatabaseAdapter.prototype.initialize;
-    GraphDatabaseAdapter.prototype.initialize = async function (this: any) {
-      const GraphDatabase = mockModule.GraphDatabase;
-
-      if (!GraphDatabase) throw new Error('GraphDatabase class not found');
-
-      if (require('fs').existsSync(this.config.storagePath)) {
-        try {
-          this.db = GraphDatabase.open(this.config.storagePath);
-          return;
-        } catch (openErr: any) {
-          throw new GraphDatabaseCorruptError(
-            `Failed to open graph database at ${this.config.storagePath}: ` +
-            `${openErr.message}. Refusing to silently replace.`,
-            { cause: openErr }
-          );
-        }
-      }
-
-      this.db = new GraphDatabase({ storagePath: this.config.storagePath });
-    };
-
-    try {
-      await expect(adapter.initialize()).rejects.toBeInstanceOf(GraphDatabaseCorruptError);
-    } finally {
-      GraphDatabaseAdapter.prototype.initialize = originalInit;
-    }
+    // The REAL initialize() runs here — no prototype override.
+    await expect(adapter.initialize()).rejects.toBeInstanceOf(GraphDatabaseCorruptError);
   });
 
   it('GraphDatabaseCorruptError message should include storagePath and a recovery hint', async () => {
@@ -128,109 +103,70 @@ describe('GraphDatabaseAdapter — ADR-0221 discriminate corrupt vs absent', () 
     createdPaths.push(dbPath);
     fs.writeFileSync(dbPath, 'corrupted bytes');
 
+    mockOpen.mockImplementation(() => { throw new Error('mock: corrupt database'); });
+
     const adapter = new GraphDatabaseAdapter({ storagePath: dbPath }, embedder);
-    const mockModule = makeMockGraphModule({ openShouldThrow: true });
 
-    const originalInit = GraphDatabaseAdapter.prototype.initialize;
-    GraphDatabaseAdapter.prototype.initialize = async function (this: any) {
-      const GraphDatabase = mockModule.GraphDatabase;
-      if (require('fs').existsSync(this.config.storagePath)) {
-        try {
-          this.db = GraphDatabase.open(this.config.storagePath);
-          return;
-        } catch (openErr: any) {
-          throw new GraphDatabaseCorruptError(
-            `Failed to open graph database at ${this.config.storagePath}: ` +
-            `${openErr.message}. Refusing to silently replace. To recover: move the file aside.`,
-            { cause: openErr }
-          );
-        }
-      }
-      this.db = new GraphDatabase({ storagePath: this.config.storagePath });
-    };
-
-    try {
-      const err = await adapter.initialize().catch(e => e);
-      expect(err).toBeInstanceOf(GraphDatabaseCorruptError);
-      expect(err.message).toContain(dbPath);
-      expect(err.message).toContain('Refusing to silently replace');
-    } finally {
-      GraphDatabaseAdapter.prototype.initialize = originalInit;
-    }
+    // The REAL initialize() runs here.
+    const err = await adapter.initialize().catch(e => e);
+    expect(err).toBeInstanceOf(GraphDatabaseCorruptError);
+    expect(err.message).toContain(dbPath);
+    expect(err.message).toContain('Refusing to silently replace');
   });
 
   it('should create a fresh DB (not throw) when no file exists at storagePath', async () => {
-    const dbPath = tmpPath(); // Does NOT exist on disk.
+    // dbPath does NOT exist on disk — file-absent first-boot path.
+    const dbPath = tmpPath();
+
+    // open() should never be called for an absent file; constructor succeeds.
+    mockOpen.mockImplementation(() => { throw new Error('should not be called'); });
+    mockConstructed.mockReturnValue(undefined);
+
     const adapter = new GraphDatabaseAdapter({ storagePath: dbPath }, embedder);
 
-    const mockModule = makeMockGraphModule({ openShouldThrow: false });
+    // The REAL initialize() runs here.
+    await expect(adapter.initialize()).resolves.toBeUndefined();
 
-    const originalInit = GraphDatabaseAdapter.prototype.initialize;
-    GraphDatabaseAdapter.prototype.initialize = async function (this: any) {
-      const GraphDatabase = mockModule.GraphDatabase;
-      if (require('fs').existsSync(this.config.storagePath)) {
-        try {
-          this.db = GraphDatabase.open(this.config.storagePath);
-          return;
-        } catch (openErr: any) {
-          throw new GraphDatabaseCorruptError(
-            `Failed to open graph database at ${this.config.storagePath}: ${openErr.message}.`,
-            { cause: openErr }
-          );
-        }
-      }
-      // Absent: create new (first-boot path).
-      this.db = new GraphDatabase({ storagePath: this.config.storagePath });
-    };
-
-    try {
-      await expect(adapter.initialize()).resolves.toBeUndefined();
-    } finally {
-      GraphDatabaseAdapter.prototype.initialize = originalInit;
-    }
+    // Confirm open() was NOT called (no file present) and constructor WAS called.
+    expect(mockOpen).not.toHaveBeenCalled();
+    expect(mockConstructed).toHaveBeenCalledOnce();
   });
 
   it('GraphDatabaseCorruptError is not re-wrapped by the outer catch (type preserved)', async () => {
-    // This directly tests the outer-catch passthrough added by ADR-0221:
-    // GraphDatabaseCorruptError must NOT be re-wrapped as the generic
-    // "Failed to initialize RuVector Graph Database" error.
+    // Tests the outer-catch passthrough added by ADR-0221:
+    // When initialize() throws a GraphDatabaseCorruptError (from the inner
+    // discriminate block), the outer catch MUST pass it through without
+    // re-wrapping it into the generic "Failed to initialize RuVector Graph
+    // Database" error.
     //
-    // We exercise this by calling the REAL initialize() with a mocked
-    // @ruvector/graph-node import that throws a corrupt error.
+    // The inner discriminate block (lines 149-166 of the source) wraps any
+    // open() failure into a fresh GraphDatabaseCorruptError.  The outer catch
+    // must see that and re-throw it unchanged.  We verify this by checking:
+    //   (a) the error is a GraphDatabaseCorruptError, and
+    //   (b) its message does NOT contain the generic wrapper string that the
+    //       outer catch would produce if it didn't discriminate.
     const dbPath = tmpPath();
     createdPaths.push(dbPath);
     fs.writeFileSync(dbPath, 'corrupt');
 
+    // open() throws a plain Error — the inner discriminate block will wrap it
+    // into a GraphDatabaseCorruptError.  The outer catch must then pass THAT
+    // GraphDatabaseCorruptError through, not re-wrap it again.
+    mockOpen.mockImplementation(() => { throw new Error('native: invalid data'); });
+
     const adapter = new GraphDatabaseAdapter({ storagePath: dbPath }, embedder);
 
-    // Patch the dynamic import inside the real initialize() by intercepting
-    // the module-level import call. Since we cannot easily mock dynamic imports
-    // in vitest without vi.mock (module-scope), we exercise the outer-catch
-    // passthrough logic by calling it directly on the class body.
-    //
-    // We construct a scenario where the inner try throws GraphDatabaseCorruptError
-    // and verify it reaches the caller unchanged (not re-wrapped).
-    const corruptErr = new GraphDatabaseCorruptError('test corrupt', {});
+    // The REAL initialize() runs here.
+    const err = await adapter.initialize().catch(e => e);
 
-    const originalInit = GraphDatabaseAdapter.prototype.initialize;
-    GraphDatabaseAdapter.prototype.initialize = async function (this: any) {
-      // Simulate the outer try/catch in the real code:
-      try {
-        throw corruptErr; // Inner discriminate logic threw this.
-      } catch (error: any) {
-        if (error instanceof GraphDatabaseCorruptError) {
-          throw error; // Must pass through unchanged.
-        }
-        throw new Error(`Failed to initialize RuVector Graph Database.\nError: ${error.message}`);
-      }
-    };
+    // Must be a GraphDatabaseCorruptError (not a generic Error).
+    expect(err).toBeInstanceOf(GraphDatabaseCorruptError);
 
-    try {
-      const err = await adapter.initialize().catch(e => e);
-      expect(err).toBeInstanceOf(GraphDatabaseCorruptError);
-      expect(err).toBe(corruptErr); // Same object — not re-wrapped.
-    } finally {
-      GraphDatabaseAdapter.prototype.initialize = originalInit;
-    }
+    // Must NOT be re-wrapped into the generic outer-catch message.
+    expect(err.message).not.toContain('Failed to initialize RuVector Graph Database');
+
+    // Must carry the inner discriminate message with the path and recovery hint.
+    expect(err.message).toContain(dbPath);
+    expect(err.message).toContain('Refusing to silently replace');
   });
 });

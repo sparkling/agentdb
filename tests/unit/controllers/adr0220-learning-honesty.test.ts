@@ -215,6 +215,7 @@ import {
   LearningSystem,
   NoExperiencesError,
 } from '../../../src/controllers/LearningSystem.js';
+import { RuVectorLearning } from '../../../src/backends/ruvector/RuVectorLearning.js';
 
 describe('ADR-0220 F-05-002: predict throws NoExperiencesError when session has no experiences', () => {
   let db: InstanceType<typeof Database>;
@@ -299,6 +300,53 @@ describe('ADR-0220 F-05-003: initializeRuVectorEnhancements discriminates GNN in
     db2.close();
     LearningSystem._resetSingleton();
   });
+
+  // Gap 1 fix-forward: pin the PROPAGATION direction of the discriminator.
+  //
+  // The existing test above only covers the demote path (MODULE_NOT_FOUND → disabled).
+  // Mut-3 (broaden catch to `catch (e) {}`) stays GREEN under that test alone because
+  // swallowing MODULE_NOT_FOUND and swallowing everything look identical from the outside.
+  //
+  // This test injects a non-MODULE_NOT_FOUND error into RuVectorLearning.initialize so
+  // the discriminator must re-throw it. The re-thrown error propagates through
+  // initializeRuVectorEnhancements() to the ctor's outer .catch, which calls
+  // console.warn('[LearningSystem] RuVector enhancements unavailable:', err.message).
+  // We assert console.warn was called with the exact injected message — proof the error
+  // was NOT swallowed silently. Under Mut-3 (swallow-all) no warn fires → RED.
+  it('F-05-003 propagation direction: non-MODULE_NOT_FOUND GNN init error is NOT swallowed silently', async () => {
+    LearningSystem._resetSingleton();
+    const db3 = new Database(':memory:');
+    db3.exec(SCHEMA_SQL);
+    const embedder3 = new EmbeddingService({ model: 'mock-model', dimension: 384, provider: 'local' });
+    await embedder3.initialize();
+
+    // Inject a non-install error: no MODULE_NOT_FOUND code, no "Cannot find" in message.
+    // This simulates a real initialization failure (e.g., incompatible native binary).
+    const injectedError = new TypeError('arbitrary-gnn-failure: incompatible native binary');
+    const initSpy = vi.spyOn(RuVectorLearning.prototype, 'initialize')
+      .mockRejectedValueOnce(injectedError);
+
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    // Construction still does not throw (fire-and-forget async inside ctor).
+    expect(() => new LearningSystem(db3, embedder3)).not.toThrow();
+
+    // Wait for the async init chain to complete and reach the outer .catch.
+    await new Promise(r => setTimeout(r, 80));
+
+    // The outer .catch must have fired with the real error message — NOT silently swallowed.
+    // Under the correct discriminator: non-MODULE_NOT_FOUND re-throws →
+    //   ctor .catch → console.warn('...unavailable:', 'arbitrary-gnn-failure: ...')
+    // Under Mut-3 (swallow-all catch): error is swallowed → warn never called → RED.
+    const warnCalls = warnSpy.mock.calls.map(c => c.join(' '));
+    const surfaced = warnCalls.some(msg => msg.includes('arbitrary-gnn-failure'));
+    expect(surfaced).toBe(true);
+
+    warnSpy.mockRestore();
+    initSpy.mockRestore();
+    db3.close();
+    LearningSystem._resetSingleton();
+  });
 });
 
 describe('ADR-0220 F-05-009: endSession TOCTOU — delete before DB write', () => {
@@ -351,6 +399,62 @@ describe('ADR-0220 F-05-009: endSession TOCTOU — delete before DB write', () =
 
     await learning.endSession(sessionId);
     await expect(learning.endSession(sessionId)).rejects.toThrow();
+  });
+
+  // Gap 2 fix-forward: pin the ORDER of activeSessions.delete vs the DB UPDATE.
+  //
+  // The two tests above are purely sequential: await endSession completes entirely
+  // before predict is called. Mut-8 (move delete to after DB UPDATE) stays GREEN
+  // because both orderings look identical once endSession is fully awaited.
+  //
+  // This test uses call-order tracking to assert that activeSessions.delete fires
+  // BEFORE the `UPDATE learning_sessions SET status='completed'` statement runs.
+  // Under Mut-8 the order flips to [update, delete] → assertion fails → RED.
+  it('F-05-009 order: activeSessions.delete fires BEFORE the DB UPDATE in endSession', async () => {
+    const sessionId = await learning.startSession('user-1', 'q-learning', {
+      learningRate: 0.1,
+      discountFactor: 0.9,
+    });
+
+    // Track the order of operations by appending labels to this array.
+    const callOrder: string[] = [];
+
+    // Spy on activeSessions.delete (private field, accessed for test).
+    const activeSessionsMap = (learning as any).activeSessions as Map<string, unknown>;
+    const originalDelete = activeSessionsMap.delete.bind(activeSessionsMap);
+    const deleteSpy = vi.spyOn(activeSessionsMap, 'delete').mockImplementation((key: string) => {
+      if (key === sessionId) callOrder.push('delete');
+      return originalDelete(key);
+    });
+
+    // Spy on db.prepare to intercept the UPDATE learning_sessions statement.
+    const originalPrepare = db.prepare.bind(db);
+    const prepareSpy = vi.spyOn(db, 'prepare').mockImplementation((sql: string) => {
+      const stmt = originalPrepare(sql);
+      if (sql.includes('UPDATE learning_sessions') && sql.includes('completed')) {
+        // Wrap run() to record position in call order.
+        const originalRun = stmt.run.bind(stmt);
+        vi.spyOn(stmt, 'run').mockImplementation((...args: unknown[]) => {
+          callOrder.push('update');
+          return originalRun(...args);
+        });
+      }
+      return stmt;
+    });
+
+    await learning.endSession(sessionId);
+
+    // Assert delete came before update — the TOCTOU fix.
+    // Under the correct source (delete first): callOrder === ['delete', 'update'].
+    // Under Mut-8 (update first): callOrder === ['update', 'delete'] → fails.
+    expect(callOrder).toContain('delete');
+    expect(callOrder).toContain('update');
+    const deleteIdx = callOrder.indexOf('delete');
+    const updateIdx = callOrder.indexOf('update');
+    expect(deleteIdx).toBeLessThan(updateIdx);
+
+    deleteSpy.mockRestore();
+    prepareSpy.mockRestore();
   });
 });
 

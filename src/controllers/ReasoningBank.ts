@@ -23,6 +23,17 @@ import { normalizeRowId } from '../types/database.types.js';
 import { EmbeddingService } from './EmbeddingService.js';
 import type { VectorBackend, SearchResult } from '../backends/VectorBackend.js';
 
+/**
+ * Thrown by recordOutcome when the target pattern no longer exists in the DB.
+ * (ADR-0219 F-04-001 — fail-loud on deleted-pattern UPDATE)
+ */
+export class PatternNotFoundError extends Error {
+  constructor(patternId: number) {
+    super(`Pattern ${patternId} not found; recordOutcome cannot update a deleted pattern`);
+    this.name = 'PatternNotFoundError';
+  }
+}
+
 export interface ReasoningPattern {
   id?: number;
   taskType: string;
@@ -524,13 +535,16 @@ export class ReasoningBank {
   }
 
   /**
-   * Update pattern statistics after use
+   * Update pattern statistics after use.
+   *
+   * Returns the SQLite RunResult so callers can check `.changes`.
+   * (ADR-0219 F-04-001 — expose rows-affected so recordOutcome can throw on 0)
    */
   updatePatternStats(
     patternId: number,
     success: boolean,
     reward: number
-  ): void {
+  ): { changes: number } {
     const stmt = this.db.prepare(`
       UPDATE reasoning_patterns
       SET
@@ -540,10 +554,12 @@ export class ReasoningBank {
       WHERE id = ?
     `);
 
-    stmt.run(success ? 1 : 0, reward, patternId);
+    const result = stmt.run(success ? 1 : 0, reward, patternId);
 
     // Invalidate cache
     this.cache.clear();
+
+    return { changes: result.changes };
   }
 
   /**
@@ -561,9 +577,13 @@ export class ReasoningBank {
     success: boolean,
     reward?: number
   ): Promise<void> {
-    // Update pattern statistics
+    // Update pattern statistics — throws if the pattern row no longer exists.
+    // (ADR-0219 F-04-001 — fail-loud on deleted-pattern UPDATE)
     const actualReward = reward !== undefined ? reward : (success ? 1.0 : 0.0);
-    this.updatePatternStats(patternId, success, actualReward);
+    const { changes } = this.updatePatternStats(patternId, success, actualReward);
+    if (changes === 0) {
+      throw new PatternNotFoundError(patternId);
+    }
 
     // Add to GNN training buffer if available
     if (this.learningBackend) {

@@ -201,13 +201,24 @@ export class MemoryConsolidation {
       // Step 3: Extract semantic patterns and create semantic memories —
       // each cluster gets its own `cluster` child (store + markConsolidated
       // descents nest inside `createSemanticMemory`).
+      // Per-cluster failures are caught locally and noted; orchestration-level
+      // fatals (DB lock, embedder crash) propagate to the outer try/catch and
+      // re-throw. (ADR-0219 F-04-003)
       console.log('🧠 Extracting semantic patterns...');
       for (const cluster of clusters) {
         if (cluster.members.length >= this.config.minClusterSize) {
           const clusterCtx = ctx?.child('cluster');
-          const semanticMemory = await this.createSemanticMemory(cluster, clusterCtx);
-          if (semanticMemory) {
-            report.semanticCreated++;
+          try {
+            const semanticMemory = await this.createSemanticMemory(cluster, clusterCtx);
+            if (semanticMemory) {
+              report.semanticCreated++;
+            }
+          } catch (clusterError) {
+            // Per-cluster error: log and continue with remaining clusters.
+            console.error(`❌ Failed to create semantic memory for cluster ${cluster.id}:`, clusterError);
+            report.recommendations.push(
+              `Cluster ${cluster.id} failed: ${(clusterError as Error).message}`
+            );
           }
         }
       }
@@ -236,8 +247,10 @@ export class MemoryConsolidation {
         ? (candidates.length - forgotten) / candidates.length
         : 0;
 
-      // Step 7: Generate recommendations
-      report.recommendations = this.generateRecommendations(report);
+      // Step 7: Generate recommendations; merge with any per-cluster error
+      // messages that were accumulated earlier in the loop.
+      const clusterErrors = report.recommendations; // saved from the loop
+      report.recommendations = [...this.generateRecommendations(report), ...clusterErrors];
 
       report.executionTimeMs = Date.now() - startTime;
 
@@ -250,9 +263,11 @@ export class MemoryConsolidation {
 
       return report;
     } catch (error) {
+      // Fatal at the orchestration level (DB lock, embedder crash, etc.) —
+      // re-throw so the caller sees Promise.reject, not a partial report.
+      // (ADR-0219 F-04-003 — fail-loud on orchestration fatals)
       console.error('❌ Memory consolidation failed:', error);
-      report.executionTimeMs = Date.now() - startTime;
-      return report;
+      throw error;
     }
   }
 
@@ -376,12 +391,16 @@ export class MemoryConsolidation {
     const pattern = this.extractSemanticPattern(cluster);
     if (!pattern) return null;
 
-    // Calculate consolidated importance (weighted by access count)
+    // Calculate consolidated importance (weighted by access count).
+    // Guard against totalAccess === 0 to avoid NaN propagation (ADR-0219 F-04-002):
+    // fall back to the simple mean already computed during clustering.
     const totalAccess = cluster.members.reduce((sum, m) => sum + m.accessCount, 0);
-    const weightedImportance = cluster.members.reduce(
-      (sum, m) => sum + (m.importance * m.accessCount),
-      0
-    ) / totalAccess;
+    const weightedImportance = totalAccess === 0
+      ? cluster.avgImportance
+      : cluster.members.reduce(
+          (sum, m) => sum + (m.importance * m.accessCount),
+          0
+        ) / totalAccess;
 
     // Store as semantic memory — `store` child wraps the hierarchical-memory write.
     const storeCtx = ctx?.child('store');

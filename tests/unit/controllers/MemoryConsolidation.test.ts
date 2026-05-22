@@ -280,6 +280,35 @@ describe('MemoryConsolidation', () => {
     });
   });
 
+  describe('ADR-0219 F-04-002 — divide-by-zero guard in createSemanticMemory', () => {
+    it('should use avgImportance fallback when all cluster members have accessCount 0', async () => {
+      // Lower minAccessCount to 0 so zero-access members reach candidacy.
+      // Lower minClusterSize to 2 so a 2-member cluster creates a semantic memory.
+      const custom = new MemoryConsolidation(db, hmem, embedder, undefined, {
+        minAccessCount: 0,
+        minClusterSize: 2,
+      });
+
+      const dup = 'zero-access identical content for divide-by-zero guard';
+      // Seed two episodic memories with accessCount 0.
+      const id1 = await hmem.store(dup, 0.8, 'episodic');
+      const id2 = await hmem.store(dup, 0.6, 'episodic');
+      db.prepare('UPDATE hierarchical_memory SET access_count = 0 WHERE id IN (?, ?)').run(id1, id2);
+
+      // Should not throw and should not store NaN importance.
+      const report = await custom.consolidate();
+      expect(report.semanticCreated).toBe(1);
+
+      const semantic = db
+        .prepare(`SELECT importance FROM hierarchical_memory WHERE tier = 'semantic'`)
+        .get() as any;
+      expect(semantic).toBeDefined();
+      // Importance must be a finite number, not NaN.
+      expect(Number.isFinite(semantic.importance)).toBe(true);
+      expect(isNaN(semantic.importance)).toBe(false);
+    });
+  });
+
   describe('consolidate — forgetting curve', () => {
     it('should forget aged low-retention candidates', async () => {
       // importance 0.6 → strength ≈ 11 days; at ~25 days unrehearsed,
@@ -431,24 +460,7 @@ describe('MemoryConsolidation', () => {
     });
   });
 
-  describe('resilience', () => {
-    it('should not throw and should return a report even on internal errors', async () => {
-      // Force an internal failure by closing the embedder path: replace embed
-      // with a throwing stub. consolidate() wraps work in try/catch and still
-      // returns a (partial) report rather than rejecting.
-      const original = embedder.embed.bind(embedder);
-      (embedder as any).embed = async () => {
-        throw new Error('synthetic embed failure');
-      };
-      await seedEpisodicRaw('will fail to embed', 0.9, 5);
-
-      const report = await consolidation.consolidate();
-      expect(report).toHaveProperty('executionTimeMs');
-      expect(report.executionTimeMs).toBeGreaterThanOrEqual(0);
-
-      (embedder as any).embed = original;
-    });
-
+  describe('resilience — ADR-0219 F-04-003 fail-loud on orchestration fatals', () => {
     // Raw seed that does not depend on hmem.store embedding (so we can break
     // the embedder afterwards without affecting seeding).
     async function seedEpisodicRaw(content: string, importance: number, accessCount: number): Promise<void> {
@@ -460,5 +472,48 @@ describe('MemoryConsolidation', () => {
          VALUES (?, 'episodic', ?, ?, ?, ?, ?)`,
       ).run(id, content, importance, accessCount, now, now);
     }
+
+    it('should reject (throw) when an orchestration-level fatal occurs', async () => {
+      // Orchestration-level fatal: getConsolidationCandidates calls embedder.embed
+      // for every candidate. Replacing embed with a throwing stub after seeding
+      // triggers a throw inside the outer try, which must propagate (not be swallowed).
+      (embedder as any).embed = async () => {
+        throw new Error('synthetic orchestration-level embed failure');
+      };
+      await seedEpisodicRaw('will fail to embed', 0.9, 5);
+
+      await expect(consolidation.consolidate()).rejects.toThrow('synthetic orchestration-level embed failure');
+    });
+
+    it('should continue after a per-cluster createSemanticMemory failure and complete report', async () => {
+      // Three identical candidates → one cluster with 3 members (≥ minClusterSize).
+      // Patch hierarchicalMemory.store to fail on the first call so createSemanticMemory
+      // throws for that cluster; consolidate should carry on (per-cluster catch) and
+      // still complete with the remaining steps.
+      const dup = 'per-cluster-fail scenario';
+      await seedEpisodic(dup, 0.9, 5);
+      await seedEpisodic(dup, 0.9, 5);
+      await seedEpisodic(dup, 0.9, 5);
+
+      let callCount = 0;
+      const origStore = (consolidation as any).hierarchicalMemory.store.bind(
+        (consolidation as any).hierarchicalMemory
+      );
+      (consolidation as any).hierarchicalMemory.store = async (...args: any[]) => {
+        callCount++;
+        if (callCount === 1) throw new Error('synthetic per-cluster store failure');
+        return origStore(...args);
+      };
+
+      const report = await consolidation.consolidate();
+
+      // The per-cluster error was caught locally; the run still completed.
+      expect(report).toHaveProperty('executionTimeMs');
+      expect(report.executionTimeMs).toBeGreaterThanOrEqual(0);
+      // semanticCreated stays 0 because the only cluster failed.
+      expect(report.semanticCreated).toBe(0);
+      // The per-cluster failure was recorded in recommendations.
+      expect(report.recommendations.some(r => r.includes('synthetic per-cluster store failure'))).toBe(true);
+    });
   });
 });

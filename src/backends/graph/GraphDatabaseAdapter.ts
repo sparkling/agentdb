@@ -96,6 +96,23 @@ export interface CausalEdge {
 }
 
 /**
+ * Thrown when a graph database file is present on disk but cannot be opened
+ * (corrupt, wrong format, version mismatch, permission denied).
+ *
+ * The system refuses to silently replace a corrupt DB — the operator must
+ * decide whether to quarantine or restore from backup. The error message
+ * includes an explicit recovery command.
+ *
+ * (ADR-0221 — discriminate file-absent from file-corrupt)
+ */
+export class GraphDatabaseCorruptError extends Error {
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
+    this.name = 'GraphDatabaseCorruptError';
+  }
+}
+
+/**
  * Graph Database Adapter for AgentDB
  *
  * This replaces SQL.js as the primary database, using RuVector's graph DB
@@ -125,18 +142,30 @@ export class GraphDatabaseAdapter {
         throw new Error('GraphDatabase class not found in @ruvector/graph-node');
       }
 
-      // Try to open existing database first
-      try {
-        if (require('fs').existsSync(this.config.storagePath)) {
+      // Try to open existing database first.
+      // Discriminate: file absent (first boot → create new) vs file present
+      // but open-fails (corrupt/permission/version → refuse to start).
+      // (ADR-0221 — fail-loud on corrupt DB, not silent replacement)
+      if (require('fs').existsSync(this.config.storagePath)) {
+        try {
           this.db = GraphDatabase.open(this.config.storagePath);
           console.log('✅ Opened existing RuVector graph database');
           return;
+        } catch (openErr) {
+          // File is present but could not be opened: corruption, permission
+          // error, version mismatch, etc. Refuse to silently replace.
+          throw new GraphDatabaseCorruptError(
+            `Failed to open graph database at ${this.config.storagePath}: ` +
+            `${(openErr as Error).message}. ` +
+            `Refusing to silently replace. To recover: move the file aside ` +
+            `(e.g. mv ${this.config.storagePath} ${this.config.storagePath}.corrupt.$(date +%s)) ` +
+            `and restart.`,
+            { cause: openErr }
+          );
         }
-      } catch (e) {
-        // Database doesn't exist or is corrupt, create new one
       }
 
-      // Create new database
+      // File absent: legitimate first-boot path — create new database.
       this.db = new GraphDatabase({
         distanceMetric: this.config.distanceMetric || 'Cosine',
         dimensions: this.config.dimensions || 384, // Default to 384 (all-MiniLM-L6-v2 standard)
@@ -146,6 +175,11 @@ export class GraphDatabaseAdapter {
       console.log('✅ Created new RuVector graph database');
 
     } catch (error) {
+      // Pass GraphDatabaseCorruptError through without re-wrapping — the
+      // caller needs its type and recovery message intact. (ADR-0221)
+      if (error instanceof GraphDatabaseCorruptError) {
+        throw error;
+      }
       throw new Error(
         `Failed to initialize RuVector Graph Database.\n` +
         `Please install: npm install @ruvector/graph-node\n` +

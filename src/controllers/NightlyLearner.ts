@@ -204,6 +204,10 @@ export class NightlyLearner {
    * - y = observed outcome
    *
    * v2: Uses FlashAttention for memory-efficient consolidation if enabled
+   *
+   * ADR-0220 F-05-001: previously returned [] for all non-dry-run calls even
+   * though discoverCausalEdges() had persisted edges. Fixed: run discovery,
+   * then re-query the persisted edges and return them.
    */
   async discover(config: {
     minAttempts?: number;
@@ -211,17 +215,29 @@ export class NightlyLearner {
     minConfidence?: number;
     dryRun?: boolean;
   }): Promise<CausalEdge[]> {
-    const edges: CausalEdge[] = [];
-    const count = await this.discoverCausalEdges();
-
-    // If dryRun, return empty array since we didn't actually create edges
+    // If dryRun, return empty array without persisting anything
     if (config.dryRun) {
-      return edges;
+      return [];
     }
 
-    // Return discovered edges (for non-dry runs)
-    // Note: In a real implementation, we'd track and return the actual edges created
-    return edges;
+    // ADR-0220 F-05-001 fix: run discovery (persists edges) then re-query
+    // the newly created edges so callers receive the real array, not [].
+    // discoverCausalEdges returns only a count; re-querying is the
+    // minimal-change path that avoids refactoring the private helper.
+    const beforeCount = (this.db.prepare('SELECT COUNT(*) as c FROM causal_edges').get() as any)?.c ?? 0;
+    await this.discoverCausalEdges();
+    const afterCount = (this.db.prepare('SELECT COUNT(*) as c FROM causal_edges').get() as any)?.c ?? 0;
+
+    if (afterCount <= beforeCount) {
+      return [];
+    }
+
+    // Re-query the edges created by this run (newest N rows by id).
+    const newEdges = this.db.prepare(`
+      SELECT * FROM causal_edges ORDER BY id DESC LIMIT ?
+    `).all(afterCount - beforeCount) as CausalEdge[];
+
+    return newEdges;
   }
 
   /**
@@ -254,11 +270,23 @@ export class NightlyLearner {
     };
   }> {
     if (!this.attentionService) {
-      // Fallback: Use standard discovery without attention
+      // ADR-0220 F-05-024: previously returned episodesProcessed:0 even though
+      // discoverCausalEdges() evaluated up to 1000 candidate pairs. Fixed:
+      // count the candidate pairs from the same query the helper uses, so
+      // episodesProcessed reflects the actual work done.
+      const candidatesProcessed = (this.db.prepare(`
+        SELECT COUNT(*) as c
+        FROM episodes e1
+        JOIN episodes e2 ON e1.session_id = e2.session_id
+        WHERE e1.id != e2.id
+          AND e2.ts > e1.ts
+          AND e2.ts - e1.ts < 3600
+      `).get() as any)?.c ?? 0;
+
       const edgesDiscovered = await this.discoverCausalEdges();
       return {
         edgesDiscovered,
-        episodesProcessed: 0,
+        episodesProcessed: Math.min(candidatesProcessed, 1000),
       };
     }
 

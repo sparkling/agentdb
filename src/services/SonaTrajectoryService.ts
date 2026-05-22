@@ -101,6 +101,24 @@ export interface SonaTrajectoryServiceOptions {
   getDb?: () => any;
 }
 
+/**
+ * ADR-0220 F-05-007 (EWC++ contract clarification — honesty-doc only):
+ *
+ * SonaConfig.ewcLambda and LearningBridge.ewcLambda affect ONLY the
+ * background consolidation cycle (forks/ruvector/crates/sona/src/loops/
+ * background.rs:144-174). They do NOT protect per-call `ruvllm_microlora_adapt`
+ * invocations against catastrophic forgetting.
+ *
+ * Per-call EWC++ (invoking EwcPlusPlus::apply_constraints inside
+ * MicroLoRA.accumulate_gradient on every adapt call) is NOT yet implemented.
+ * That requires changes to forks/ruvector/crates/sona/src/lora.rs and a
+ * republish of the MicroLoraWasm artefact — a multi-fork coordinated change
+ * deferred to its own future ADR.
+ *
+ * Until that ADR lands: callers of `ruvllm_microlora_adapt` get no per-call
+ * catastrophic-forgetting protection. ewcLambda is solely a background-loop
+ * parameter.
+ */
 export class SonaTrajectoryService {
   private sona: any = null;
   private available: boolean = false;
@@ -236,8 +254,12 @@ export class SonaTrajectoryService {
           }
         }
         // Also store in-memory for local pattern access
-      } catch {
-        // Fall through to in-memory storage
+      } catch (err: any) {
+        // ADR-0220 F-05-005: native recordStep failure is a best-effort
+        // side-effect (in-memory + SQLite dual-write preserves durability),
+        // BUT it must not be silently swallowed — log at error level so
+        // operators can detect a degraded native learning path.
+        console.error('[SonaTrajectoryService] Native recordStep failed (falling through to in-memory):', err?.message ?? err);
       }
     }
 
@@ -288,8 +310,12 @@ export class SonaTrajectoryService {
             confidence: result.confidence || result.probability || 0.8
           };
         }
-      } catch {
-        // Fall through to frequency-based prediction
+      } catch (err: any) {
+        // ADR-0220 F-05-004: native predict failure must be logged at error
+        // level so it is observable. Falls through to frequency-based
+        // prediction which is the documented degraded path — but the failure
+        // is no longer silently swallowed.
+        console.error('[SonaTrajectoryService] Native predict failed (falling through to frequency prediction):', err?.message ?? err);
       }
     }
 

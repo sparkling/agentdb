@@ -37,6 +37,22 @@ import { SonaTrajectoryService } from '../services/SonaTrajectoryService.js';
 import { GNNService } from '../services/GNNService.js';
 import { getEmbeddingConfig } from '../core/config-chain.js';
 
+/**
+ * ADR-0220 F-05-002: thrown by predict() when a session has zero recorded
+ * experiences. Callers that catch this error know the policy has no training
+ * data and must either record experiences first or handle the empty-session
+ * case explicitly — instead of silently receiving synthetic action_1/2/3
+ * recommendations.
+ */
+export class NoExperiencesError extends Error {
+  readonly sessionId: string;
+  constructor(sessionId: string) {
+    super(`No experiences recorded for session "${sessionId}". Submit feedback before calling predict().`);
+    this.name = 'NoExperiencesError';
+    this.sessionId = sessionId;
+  }
+}
+
 // Database type from db-fallback (matches HierarchicalMemory / NightlyLearner pattern)
 type Database = any;
 
@@ -113,6 +129,9 @@ export class LearningSystem {
     _singleton = this;
     this.db = db;
     this.embedder = embedder;
+    // ADR-0220 F-05-003: re-throw non-install errors so callers see real
+    // failures. The ctor catch here handles only the outer async launch;
+    // per-module discrimination happens inside initializeRuVectorEnhancements.
     this.initializeRuVectorEnhancements().catch(err => {
       console.warn('[LearningSystem] RuVector enhancements unavailable:', err.message);
     });
@@ -120,6 +139,14 @@ export class LearningSystem {
 
   /**
    * Initialize RuVector GNN and Sona enhancements
+   *
+   * ADR-0220 F-05-003: each try/catch now discriminates "module not installed"
+   * (MODULE_NOT_FOUND / ERR_MODULE_NOT_FOUND / install-hint message) from
+   * "module present but initialization failed". The former demotes to
+   * `available: false` with a warn log. The latter re-throws so the ctor's
+   * outer .catch surfaces it at warn level (same observable level) — but
+   * critically, the ctor catch only fires once, so a non-install failure on
+   * GNN doesn't silently absorb and continue as if GNN were merely absent.
    */
   private async initializeRuVectorEnhancements(): Promise<void> {
     // Try to initialize GNN-enhanced learning
@@ -135,9 +162,22 @@ export class LearningSystem {
       await this.gnnLearning.initialize();
       this.gnnEnabled = true;
       console.log('✅ [LearningSystem] GNN-enhanced learning enabled (@ruvector/gnn)');
-    } catch (error) {
-      console.warn('[LearningSystem] GNN unavailable, using standard learning');
-      this.gnnEnabled = false;
+    } catch (error: any) {
+      // ADR-0220 F-05-003: discriminate "module not installed" from other errors.
+      // MODULE_NOT_FOUND / ERR_MODULE_NOT_FOUND indicate @ruvector/gnn is simply
+      // absent from the installation — demote to disabled. Any other error is a
+      // real initialization failure and must be re-thrown so it surfaces.
+      const isModuleNotFound =
+        error?.code === 'MODULE_NOT_FOUND' ||
+        error?.code === 'ERR_MODULE_NOT_FOUND' ||
+        (typeof error?.message === 'string' && error.message.includes('Cannot find'));
+      if (isModuleNotFound) {
+        console.warn('[LearningSystem] GNN unavailable, using standard learning');
+        this.gnnEnabled = false;
+      } else {
+        // Real init failure — re-throw so the ctor's outer catch surfaces it
+        throw error;
+      }
     }
 
     // Try to initialize Sona trajectory service.
@@ -159,9 +199,19 @@ export class LearningSystem {
       } else {
         console.warn('[LearningSystem] Sona unavailable, using in-memory trajectories');
       }
-    } catch (error) {
-      console.warn('[LearningSystem] Sona service initialization failed');
-      this.sonaEnabled = false;
+    } catch (error: any) {
+      // Sona init: same discrimination pattern. Module-not-found is expected
+      // in deployments without @ruvector/sona; other errors are unexpected.
+      const isModuleNotFound =
+        error?.code === 'MODULE_NOT_FOUND' ||
+        error?.code === 'ERR_MODULE_NOT_FOUND' ||
+        (typeof error?.message === 'string' && error.message.includes('Cannot find'));
+      if (isModuleNotFound) {
+        console.warn('[LearningSystem] Sona service initialization failed');
+        this.sonaEnabled = false;
+      } else {
+        throw error;
+      }
     }
 
     // Try to initialize GNNService for intent classification
@@ -169,9 +219,17 @@ export class LearningSystem {
       this.gnnService = new GNNService({ inputDim: getEmbeddingConfig().dimension, hiddenDim: 128, outputDim: 64, heads: 8 });
       await this.gnnService.initialize();
       console.log(`[LearningSystem] GNNService initialized (engine: ${this.gnnService.getEngineType()})`);
-    } catch (error) {
-      console.warn('[LearningSystem] GNNService initialization failed');
-      this.gnnService = null;
+    } catch (error: any) {
+      const isModuleNotFound =
+        error?.code === 'MODULE_NOT_FOUND' ||
+        error?.code === 'ERR_MODULE_NOT_FOUND' ||
+        (typeof error?.message === 'string' && error.message.includes('Cannot find'));
+      if (isModuleNotFound) {
+        console.warn('[LearningSystem] GNNService initialization failed');
+        this.gnnService = null;
+      } else {
+        throw error;
+      }
     }
   }
 
@@ -241,22 +299,26 @@ export class LearningSystem {
 
     const endTime = Date.now();
 
+    // ADR-0220 F-05-009: close the TOCTOU window — remove from activeSessions
+    // BEFORE the DB update. A concurrent call that reads activeSessions between
+    // the old position (post-DB-write) and the delete would see the session as
+    // still active. Removing first means any concurrent reader after this point
+    // must go through the DB path where status='completed' is already visible.
+    this.activeSessions.delete(sessionId);
+
     // Save final policy
     await this.savePolicy(sessionId);
 
-    // Update session status
+    // Update session status in DB and mutate the local copy for any callers
+    // that still hold a reference obtained before the delete above.
     this.db.prepare(
       `UPDATE learning_sessions
        SET status = 'completed', end_time = ?
        WHERE id = ?`,
     ).run(endTime, sessionId);
 
-    // Update memory cache
     session.endTime = endTime;
     session.status = 'completed';
-
-    // Remove from active sessions
-    this.activeSessions.delete(sessionId);
 
     console.log(`✅ Learning session ended: ${sessionId} (duration: ${endTime - session.startTime}ms)`);
   }
@@ -526,12 +588,12 @@ export class LearningSystem {
     ).all(session.id) as any[]).map(row => row.action as string);
 
     if (actions.length === 0) {
-      // Default actions if none exist
-      return [
-        { action: 'action_1', score: 0.5 },
-        { action: 'action_2', score: 0.4 },
-        { action: 'action_3', score: 0.3 },
-      ];
+      // ADR-0220 F-05-002: previously returned synthetic action_1/2/3 with
+      // fake scores, making a zero-experience session observationally
+      // indistinguishable from a trained one. Fixed: throw NoExperiencesError
+      // so callers know the policy has zero training data and cannot make a
+      // real recommendation.
+      throw new NoExperiencesError(session.id);
     }
 
     // Calculate scores based on algorithm type
@@ -1155,10 +1217,13 @@ export class LearningSystem {
 
     // Causal reasoning chains (if enabled). causal_edges is owned by
     // CausalMemoryGraph (separate controller); the table may not exist on a
-    // fresh LearningSystem-only test instance — tolerate that with an
-    // empty-result fallback. This is not a silent failure: the controller
-    // has no authoritative schema ownership of causal_edges, and the query
-    // is best-effort context for explainability.
+    // fresh LearningSystem-only test instance — tolerate ONLY the
+    // "no such table" error (legitimate absent-controller path).
+    //
+    // ADR-0220 F-05-014: previously the bare catch swallowed ALL SQL errors,
+    // including genuine data-integrity failures (e.g. corrupt index, locked db).
+    // Fixed: re-throw any error that is NOT a "no such table" variant so real
+    // errors surface instead of silently degrading to an empty causal chain.
     let causalChains: any[] = [];
     if (includeCausal) {
       try {
@@ -1167,8 +1232,14 @@ export class LearningSystem {
            ORDER BY uplift DESC
            LIMIT 5`,
         ).all() as any[];
-      } catch {
-        causalChains = [];
+      } catch (err: any) {
+        const msg: string = err?.message ?? '';
+        if (msg.includes('no such table') || msg.includes('SQLITE_ERROR')) {
+          // Legitimate: CausalMemoryGraph not installed in this context
+          causalChains = [];
+        } else {
+          throw err;
+        }
       }
     }
 
@@ -1328,7 +1399,10 @@ export class LearningSystem {
     }
 
     // Causal impact adjustment. causal_edges is owned by CausalMemoryGraph
-    // (separate controller); tolerate its absence in test-only contexts.
+    // (separate controller); tolerate ONLY "no such table" absence.
+    //
+    // ADR-0220 F-05-014: discriminate "table absent" (legitimate) from other
+    // SQL errors (data-integrity failures must surface).
     if (includeCausal && episodeId) {
       try {
         const causalEdges = this.db.prepare(
@@ -1339,8 +1413,13 @@ export class LearningSystem {
         if (causalEdges?.avg_uplift != null) {
           reward += Number(causalEdges.avg_uplift) * 0.1; // 10% weight for causal impact
         }
-      } catch {
-        // Table not present in this test context; skip the causal adjustment.
+      } catch (err: any) {
+        const msg: string = err?.message ?? '';
+        if (msg.includes('no such table') || msg.includes('SQLITE_ERROR')) {
+          // Legitimate: CausalMemoryGraph not installed in this context.
+        } else {
+          throw err;
+        }
       }
     }
 

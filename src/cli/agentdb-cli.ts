@@ -844,7 +844,7 @@ class AgentDBCLI {
   // QUIC Synchronization Commands
   // ============================================================================
 
-  async quicStartServer(params: {
+  async quicStartServer(_params: {
     port?: number;
     cert?: string;
     key?: string;
@@ -852,212 +852,28 @@ class AgentDBCLI {
     maxConnections?: number;
   }): Promise<void> {
     if (!this.db) throw new Error('Not initialized');
-
-    log.header('\n[QUIC] Starting QUIC Sync Server');
-
-    const spinner = new Spinner();
-    const port = params.port || 4433;
-    const authToken = params.authToken || this.generateAuthToken();
-
-    console.log('\n' + '='.repeat(80));
-    console.log(`${colors.bright}Server Configuration${colors.reset}`);
-    console.log('='.repeat(80));
-    console.log(`  Host: ${colors.cyan}0.0.0.0${colors.reset}`);
-    console.log(`  Port: ${colors.cyan}${port}${colors.reset}`);
-    console.log(`  Auth Token: ${colors.cyan}${authToken.substring(0, 8)}...${colors.reset}`);
-    console.log(`  Max Connections: ${colors.cyan}${params.maxConnections || 100}${colors.reset}`);
-
-    if (params.cert && params.key) {
-      console.log(`  TLS Certificate: ${colors.green}${params.cert}${colors.reset}`);
-      console.log(`  TLS Key: ${colors.green}${params.key}${colors.reset}`);
-    } else {
-      console.log(`  TLS: ${colors.yellow}Self-signed (development mode)${colors.reset}`);
-    }
-    console.log('='.repeat(80));
-
-    try {
-      spinner.start('Initializing QUIC server...');
-
-      // Create QUIC server configuration
-      const serverConfig: QUICServerConfig = {
-        host: '0.0.0.0',
-        port,
-        maxConnections: params.maxConnections || 100,
-        authToken,
-        tlsConfig: {
-          cert: params.cert,
-          key: params.key,
-        },
-        rateLimit: {
-          maxRequestsPerMinute: 60,
-          maxBytesPerMinute: 10 * 1024 * 1024, // 10MB
-        },
-      };
-
-      // Initialize the QUIC server with database
-      this.quicServer = new QUICServer(this.db, serverConfig);
-
-      spinner.update('Starting server...');
-      await this.quicServer.start();
-
-      spinner.succeed('QUIC server started successfully');
-
-      console.log('\n' + '-'.repeat(80));
-      console.log(`${colors.bright}Server Status${colors.reset}`);
-      console.log('-'.repeat(80));
-
-      const status = this.quicServer.getStatus();
-      console.log(`  Status: ${colors.green}Running${colors.reset}`);
-      console.log(`  Active Connections: ${colors.cyan}${status.activeConnections}${colors.reset}`);
-      console.log(`  Rate Limit: ${colors.cyan}${status.config.rateLimit?.maxRequestsPerMinute} req/min${colors.reset}`);
-      console.log('-'.repeat(80));
-
-      log.info('\nServer is ready to accept connections.');
-      log.info(`Clients can connect using: agentdb sync connect <host> ${port} --auth-token ${authToken}`);
-      log.info('\nPress Ctrl+C to stop the server');
-
-      // Handle graceful shutdown
-      const shutdown = async () => {
-        console.log('\n');
-        log.info('Shutting down server...');
-        const shutdownSpinner = new Spinner();
-        shutdownSpinner.start('Closing connections...');
-
-        try {
-          if (this.quicServer) {
-            await this.quicServer.stop();
-          }
-          shutdownSpinner.succeed('Server stopped gracefully');
-        } catch (error) {
-          shutdownSpinner.fail(`Error during shutdown: ${(error as Error).message}`);
-        }
-        process.exit(0);
-      };
-
-      process.on('SIGINT', shutdown);
-      process.on('SIGTERM', shutdown);
-
-      // Monitor server status periodically
-      const monitorInterval = setInterval(() => {
-        if (this.quicServer) {
-          const currentStatus = this.quicServer.getStatus();
-          if (currentStatus.activeConnections > 0) {
-            process.stdout.write(`\r${colors.cyan}[${new Date().toLocaleTimeString()}]${colors.reset} Active connections: ${currentStatus.activeConnections} | Total requests: ${currentStatus.totalRequests}  `);
-          }
-        }
-      }, 5000);
-
-      // Keep process alive
-      await new Promise<void>((resolve) => {
-        process.on('SIGINT', () => {
-          clearInterval(monitorInterval);
-          resolve();
-        });
-        process.on('SIGTERM', () => {
-          clearInterval(monitorInterval);
-          resolve();
-        });
-      });
-    } catch (error) {
-      spinner.fail(`Failed to start server: ${(error as Error).message}`);
-      throw error;
-    }
+    // ADR-0217: QUIC multi-writer stack is deferred — server quarantined
+    // (phantom schema, no configured driver). Re-enabling requires the
+    // full multi-writer build per ADR-0217 deferred status.
+    throw new Error(
+      'agentdb sync server is deferred: the QUIC multi-writer stack has been ' +
+      'quarantined (ADR-0217). See ADR-0217 status before re-enabling.'
+    );
   }
 
-  async quicConnect(params: {
+  async quicConnect(_params: {
     host: string;
     port: number;
     authToken?: string;
     cert?: string;
     timeout?: number;
   }): Promise<void> {
-    log.header('\n[QUIC] Connecting to QUIC Sync Server');
-
-    const spinner = new Spinner();
-
-    console.log('\n' + '='.repeat(80));
-    console.log(`${colors.bright}Connection Details${colors.reset}`);
-    console.log('='.repeat(80));
-    console.log(`  Server: ${colors.cyan}${params.host}:${params.port}${colors.reset}`);
-    console.log(`  Authentication: ${params.authToken ? colors.green + 'Enabled' : colors.yellow + 'Disabled'}${colors.reset}`);
-    console.log(`  Timeout: ${colors.cyan}${params.timeout || 30000}ms${colors.reset}`);
-
-    if (params.cert) {
-      console.log(`  TLS Certificate: ${colors.green}${params.cert}${colors.reset}`);
-    } else {
-      console.log(`  TLS: ${colors.yellow}Insecure (no certificate provided)${colors.reset}`);
-    }
-    console.log('='.repeat(80));
-
-    try {
-      spinner.start('Initializing QUIC client...');
-
-      // Create QUIC client configuration
-      const clientConfig: QUICClientConfig = {
-        serverHost: params.host,
-        serverPort: params.port,
-        authToken: params.authToken,
-        maxRetries: 3,
-        retryDelayMs: 1000,
-        timeoutMs: params.timeout || 30000,
-        tlsConfig: {
-          cert: params.cert,
-          rejectUnauthorized: !!params.cert,
-        },
-      };
-
-      // Initialize the QUIC client
-      this.quicClient = new QUICClient(clientConfig);
-
-      spinner.update('Establishing connection...');
-      await this.quicClient.connect();
-
-      spinner.update('Testing connection (ping)...');
-      const pingResult = await this.quicClient.ping();
-
-      if (!pingResult.success) {
-        throw new Error(pingResult.error || 'Ping failed');
-      }
-
-      spinner.succeed('Connected to remote server successfully');
-
-      console.log('\n' + '-'.repeat(80));
-      console.log(`${colors.bright}Connection Status${colors.reset}`);
-      console.log('-'.repeat(80));
-
-      const status = this.quicClient.getStatus();
-      console.log(`  Status: ${colors.green}Connected${colors.reset}`);
-      console.log(`  Latency: ${colors.cyan}${pingResult.latencyMs}ms${colors.reset}`);
-      console.log(`  Client: ${colors.cyan}${status.clientId}${colors.reset}`);
-      console.log(`  Transport: ${colors.cyan}${status.transport ?? 'unknown'}${colors.reset}`);
-      console.log(`  Requests: ${colors.cyan}${status.totalRequests}${colors.reset}`);
-      console.log('-'.repeat(80));
-
-      // Initialize the SyncCoordinator for subsequent push/pull operations
-      if (this.db) {
-        this.syncCoordinator = new SyncCoordinator({
-          db: this.db,
-          client: this.quicClient,
-        });
-        log.info('\nSync coordinator initialized. Ready for push/pull operations.');
-      }
-
-      log.success('\nConnection established.');
-      log.info('Use "agentdb sync push" or "agentdb sync pull" to sync data.');
-    } catch (error) {
-      spinner.fail(`Connection failed: ${(error as Error).message}`);
-
-      console.log('\n' + '-'.repeat(80));
-      console.log(`${colors.bright}Troubleshooting${colors.reset}`);
-      console.log('-'.repeat(80));
-      console.log('  1. Verify the server is running and accessible');
-      console.log('  2. Check firewall settings allow traffic on the specified port');
-      console.log('  3. Ensure the auth token matches the server configuration');
-      console.log('  4. For TLS connections, verify the certificate is valid');
-      console.log('-'.repeat(80));
-
-      throw error;
-    }
+    // ADR-0217: QUIC multi-writer stack is deferred — client quarantined.
+    // Re-enabling requires the full multi-writer build per ADR-0217 status.
+    throw new Error(
+      'agentdb sync connect is deferred: the QUIC multi-writer stack has been ' +
+      'quarantined (ADR-0217). See ADR-0217 status before re-enabling.'
+    );
   }
 
   async quicPush(params: {

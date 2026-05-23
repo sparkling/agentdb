@@ -1068,6 +1068,14 @@ class AgentDBCLI {
     batchSize?: number;
   }): Promise<void> {
     if (!this.db) throw new Error('Not initialized');
+    // ADR-0217: sync push/pull is experimental and disabled — the multi-writer
+    // QUIC stack is quarantined (phantom schema; no configured driver).
+    throw new Error(
+      'agentdb sync push/pull is experimental and disabled: the QUIC multi-writer ' +
+      'stack has been quarantined (ADR-0217). No sync_changelog schema exists and no ' +
+      'driver is configured. Enable ENABLE_QUIC_SYNC=true only if you have set up a ' +
+      'real QUIC server with a valid driver.'
+    );
 
     log.header('\n[QUIC] Pushing Changes to Remote');
 
@@ -1276,6 +1284,14 @@ class AgentDBCLI {
     conflictStrategy?: 'local-wins' | 'remote-wins' | 'latest-wins';
   }): Promise<void> {
     if (!this.db) throw new Error('Not initialized');
+    // ADR-0217: sync push/pull is experimental and disabled — the multi-writer
+    // QUIC stack is quarantined (phantom schema; no configured driver).
+    throw new Error(
+      'agentdb sync push/pull is experimental and disabled: the QUIC multi-writer ' +
+      'stack has been quarantined (ADR-0217). No sync_changelog schema exists and no ' +
+      'driver is configured. Enable ENABLE_QUIC_SYNC=true only if you have set up a ' +
+      'real QUIC server with a valid driver.'
+    );
 
     log.header('\n[QUIC] Pulling Changes from Remote');
 

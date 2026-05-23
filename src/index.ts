@@ -174,23 +174,25 @@ export {
 // Re-export all controllers for convenience
 export * from './controllers/index.js';
 
-// QUIC sync types + CRDT primitives — ADR-0196 Phase 5 federation interface
-// needs `VectorClock` + `incrementVectorClock` at the top-level so agentic-flow's
-// `FederatedSyncProvider` can populate episode identity without reaching into
-// agentdb's subpath imports.
+// ADR-0217 (2026-05-22): QUIC multi-writer stack QUARANTINED.
+// `VectorClock`, `incrementVectorClock`, `createVectorClock` remain exported
+// because agentic-flow's autopilot-learning.ts consumes them at runtime.
+// All other QUIC/CRDT/JWT types are @internal — do NOT depend on them.
+// The remaining type re-exports below are kept to avoid breaking downstream
+// type-level imports; their @internal annotation lives in src/types/quic.ts.
 export type {
-  VectorClock,
-  VectorClockComparison,
-  SyncMessage,
-  SyncPayload,
-  EpisodeSync,
-  SyncableEpisode,
+  VectorClock,           // @public — agentic-flow runtime consumer
+  VectorClockComparison, // @internal — no live consumer; retained for type compat
+  SyncMessage,           // @internal
+  SyncPayload,           // @internal
+  EpisodeSync,           // @internal
+  SyncableEpisode,       // @internal
 } from './types/quic.js';
 export {
-  incrementVectorClock,
-  createVectorClock,
-  compareVectorClocks,
-  mergeVectorClocks,
+  incrementVectorClock,  // @public — agentic-flow runtime consumer
+  createVectorClock,     // @public — agentic-flow runtime consumer
+  compareVectorClocks,   // @internal — no live consumer; retained for type compat
+  mergeVectorClocks,     // @internal — no live consumer; retained for type compat
 } from './types/quic.js';
 
 // LLM Router - Multi-provider LLM integration with RuvLLM support

@@ -2,16 +2,23 @@
 /**
  * SyncCoordinator - Orchestrate AgentDB Synchronization
  *
- * Coordinates bidirectional synchronization between local and remote AgentDB instances.
- * Handles change detection, conflict resolution, batching, and progress tracking.
+ * ADR-0217 (2026-05-22): This controller is SINGLE-WRITER / EXPERIMENTAL.
+ * The multi-writer QUIC architecture was quarantined — upstream never built
+ * it, the `sync_changelog` schema is phantom, and `ENABLE_QUIC_SYNC` is
+ * off by default with no product trigger. Do NOT use this class as evidence
+ * that agentdb supports eventually-consistent multi-node sync.
  *
- * Features:
- * - Detect changes since last sync
- * - Bidirectional sync (push and pull)
- * - Conflict resolution strategies
- * - Batch operations for efficiency
- * - Progress tracking and reporting
- * - Comprehensive error handling
+ * The `conflictStrategy` field and `resolveConflicts` method are dead paths:
+ * the conflict object shape is never populated end-to-end, the switch
+ * branches are stubs (byte-identical to upstream), and no call site drives
+ * them to completion. They are retained as @deprecated dead paths to avoid
+ * breaking the type surface; they will be removed when a real multi-writer
+ * driver lands.
+ *
+ * Preserved features (single-writer, guarded behind ENABLE_QUIC_SYNC=true):
+ * - Bidirectional sync scaffolding (push/pull phases)
+ * - Batch operations
+ * - Progress tracking
  * - Sync state persistence
  */
 
@@ -29,6 +36,11 @@ export interface SyncCoordinatorConfig {
   db: Database;
   client?: QUICClient;
   server?: QUICServer;
+  /**
+   * @deprecated — dead path (ADR-0217). Conflict resolution is never reached
+   * end-to-end: the `sync_changelog` schema is phantom and the conflict object
+   * shape is never populated. Field retained to avoid breaking the type surface.
+   */
   conflictStrategy?: 'local-wins' | 'remote-wins' | 'latest-wins' | 'merge';
   batchSize?: number;
   autoSync?: boolean;
@@ -307,16 +319,19 @@ export class SyncCoordinator {
 
   /**
    * Pull remote changes and apply locally — no push of local changes.
-   * ADR-0200: single-direction surface so callers that only want to
-   * consume (archive nodes, read-only peers) don't force an outbound
-   * push they didn't intend. Reuses the same `pullChanges →
-   * resolveConflicts → applyChanges → saveSyncState` pipeline `sync()`
-   * runs for the pull half.
+   * ADR-0200 / ADR-0217 (single-writer, experimental): single-direction
+   * surface so callers that only want to consume (archive nodes, read-only
+   * peers) don't force an outbound push they didn't intend. Reuses the
+   * same `pullChanges → resolveConflicts → applyChanges → saveSyncState`
+   * pipeline `sync()` runs for the pull half.
    *
-   * Returns a SyncReport with `itemsPushed: 0`. Conflict resolution
-   * still runs (inline, same as `sync()`) because pulled data may
-   * conflict with local state and we don't want callers to have to
-   * repeat the orchestration.
+   * Returns a SyncReport with `itemsPushed: 0`. The `resolveConflicts`
+   * call is retained for symmetry with `sync()` but is a dead path —
+   * the conflict shape is never populated end-to-end.
+   *
+   * This path is guarded behind `ENABLE_QUIC_SYNC=true` in the product;
+   * it is NOT eventually-consistent multi-writer — that requires a real
+   * ≥2-install driver (deferred, per ADR-0217).
    */
   async pullOnly(
     ctx: MutationContext,
@@ -674,7 +689,14 @@ export class SyncCoordinator {
   }
 
   /**
-   * Resolve conflicts between local and remote data
+   * Resolve conflicts between local and remote data.
+   *
+   * @deprecated — dead path (ADR-0217). The conflict object passed in is never
+   * populated end-to-end because `sync_changelog` is a phantom schema (table
+   * does not exist). The switch branches are byte-identical stubs with upstream
+   * and are unreachable in any current product path. Method retained to avoid
+   * breaking call sites in `sync()` and `pullOnly()`; will be removed when a
+   * real multi-writer driver lands.
    */
   private async resolveConflicts(conflicts: any[]): Promise<number> {
     let resolved = 0;

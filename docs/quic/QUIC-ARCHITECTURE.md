@@ -1,5 +1,13 @@
 # QUIC Synchronization Architecture for AgentDB
 
+> **⚠ STATUS — DEFERRED (ADR-0217, 2026-05-22).** This document is an
+> architecture-design artefact; the implementation is **quarantined**.
+> See `docs/quic/QUIC-INDEX.md` § Status banner for the full
+> disposition. The CLI sync handlers throw an ADR-0217 deferred-status
+> error; the `QUICConnectionPool` / `QUICStreamManager` classes have
+> been deleted. The `VectorClock` family remains `@public` as the only
+> carve-out (agentic-flow runtime consumer).
+
 ## Executive Summary
 
 This document defines the architecture for QUIC-based multi-node synchronization in AgentDB, enabling distributed AI agents to share episodic memories, learned skills, and causal reasoning graphs across network boundaries with low latency and high reliability.

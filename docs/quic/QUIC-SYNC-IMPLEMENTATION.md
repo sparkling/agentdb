@@ -1,5 +1,12 @@
 # QUIC Synchronization Implementation
 
+> **⚠ STATUS — DEFERRED (ADR-0217, 2026-05-22).** This document
+> describes a quarantined implementation. CLI sync handlers throw an
+> ADR-0217 deferred-status error; `QUICConnectionPool` and
+> `QUICStreamManager` classes have been deleted; `resolveConflicts` /
+> `conflictStrategy` are `@deprecated` in `SyncCoordinator.ts`. See
+> `docs/quic/QUIC-INDEX.md` § Status banner for the full disposition.
+
 ## Overview
 
 This document describes the QUIC-based synchronization system for AgentDB, enabling bidirectional synchronization of episodes, skills, and edges between distributed AgentDB instances.

@@ -1,10 +1,33 @@
 # QUIC Synchronization Architecture - Complete Documentation Index
 
+> **⚠ STATUS — DEFERRED (ADR-0217, 2026-05-22).**
+> The QUIC multi-writer synchronization stack is **quarantined** in the
+> fork. The implementation has phantom-schema gaps (no `sync_changelog`
+> table) and no configured driver. CLI entry points (`agentdb sync
+> server`, `agentdb sync connect`, `agentdb sync push`, `agentdb sync
+> pull`) throw immediately with an ADR-0217 deferred-status error.
+> The `QUICConnectionPool` and `QUICStreamManager` classes have been
+> deleted. `resolveConflicts` / `conflictStrategy` are retained but
+> `@deprecated` in `SyncCoordinator.ts`.
+>
+> **The `VectorClock`, `incrementVectorClock`, `createVectorClock`
+> exports remain `@public`** because agentic-flow's
+> `autopilot-learning.ts` consumes them at runtime — this is the only
+> carve-out from the quarantine.
+>
+> Re-enabling QUIC sync requires the full multi-writer build (driver
+> configuration + `sync_changelog` schema + working conflict
+> resolution). See ADR-0217 in `ruflo-patch/docs/adr/` for the
+> deferral rationale.
+>
+> The documents below are **architecture-design artefacts**, not
+> implementation status. They predate the ADR-0217 quarantine.
+
 ## Overview
 
 This index provides a comprehensive guide to the QUIC-based multi-node synchronization architecture for AgentDB. All documentation was created on **2025-10-25** as part of the architecture design phase.
 
-**Architecture Status**: ✅ Design Complete - Ready for Implementation
+**Architecture Status**: ❌ Deferred per ADR-0217 (was: design complete - ready for implementation)
 
 ---
 

@@ -73,8 +73,13 @@ describe('ADR-0217 QUIC quarantine', () => {
     const pushIdx = src.indexOf('async quicPush(');
     expect(pushIdx).toBeGreaterThan(-1);
     const pushBody = src.slice(pushIdx, pushIdx + 1200);
-    expect(pushBody).toContain('throw new Error(');
-    expect(pushBody).toContain('ADR-0217');
+    // Filter to non-comment lines so that commenting out the live throw stays RED
+    const liveLines = pushBody.split('\n').filter(
+      l => !l.trimStart().startsWith('//') && !l.trimStart().startsWith('*')
+    );
+    const liveText = liveLines.join('\n');
+    expect(liveText).toContain('throw new Error(');
+    expect(liveText).toContain('ADR-0217');
   });
 
   it('quicPull must throw immediately (fail-loud guard present)', async () => {
@@ -83,8 +88,13 @@ describe('ADR-0217 QUIC quarantine', () => {
     const pullIdx = src.indexOf('async quicPull(');
     expect(pullIdx).toBeGreaterThan(-1);
     const pullBody = src.slice(pullIdx, pullIdx + 1200);
-    expect(pullBody).toContain('throw new Error(');
-    expect(pullBody).toContain('ADR-0217');
+    // Filter to non-comment lines so that commenting out the live throw stays RED
+    const liveLines = pullBody.split('\n').filter(
+      l => !l.trimStart().startsWith('//') && !l.trimStart().startsWith('*')
+    );
+    const liveText = liveLines.join('\n');
+    expect(liveText).toContain('throw new Error(');
+    expect(liveText).toContain('ADR-0217');
   });
 
   // -------------------------------------------------------------------------
@@ -94,7 +104,13 @@ describe('ADR-0217 QUIC quarantine', () => {
   it('VectorClock type must still be exported from src/index.ts', async () => {
     const { readFileSync } = await import('node:fs');
     const indexSrc = readFileSync(resolve(SRC, 'index.ts'), 'utf-8');
-    expect(indexSrc).toContain('VectorClock');
+    // Must appear as a live export (not only in a comment), matched as a
+    // whole word so VectorClockComparison does not satisfy the check.
+    const lines = indexSrc.split('\n');
+    const liveLines = lines.filter(
+      l => !l.trimStart().startsWith('//') && !l.trimStart().startsWith('*') && /\bVectorClock\b/.test(l)
+    );
+    expect(liveLines.length, 'VectorClock must appear in live export lines').toBeGreaterThan(0);
   });
 
   it('incrementVectorClock must still be exported from src/index.ts', async () => {

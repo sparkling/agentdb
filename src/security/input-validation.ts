@@ -61,6 +61,15 @@ const ALLOWED_PRAGMAS = new Set([
   'temp_store',
   'mmap_size',
   'wal_autocheckpoint',
+  // ADR-0213 step 3: agentdb mcp-server's `db.pragma('busy_timeout = 5000')`
+  // call at agentdb-mcp-server.ts:246 was added by fork commit 668ce1a
+  // (ADR-0069 A1, WAL-mode compatibility) against the inherited validator
+  // allowlist that never listed busy_timeout — causing the standalone MCP
+  // server to crash on boot before answering `initialize`. Under the
+  // hard-pinned sql.js fallback the pragma is a no-op anyway (WASM
+  // in-memory, no concurrent file-locking), so allowing it silences the
+  // crash without changing behaviour.
+  'busy_timeout',
 ]);
 
 /**

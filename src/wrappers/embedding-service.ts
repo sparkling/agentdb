@@ -1,4 +1,18 @@
 /**
+ * QUARANTINED — ADR-0239 cluster 4 step (c) pending.
+ *
+ * This file is the DEAD parallel implementation of
+ * `controllers/EmbeddingService.ts` (the live one). New contributors
+ * adding a `CohereEmbeddingService` / `VoyageEmbeddingService` here
+ * will discover their work never reaches the live path — extend
+ * `controllers/EmbeddingService.ts` instead. This wrapper directory
+ * is deleted together with `@claude-flow/embeddings/`,
+ * `agentdb/src/compatibility/`, `agentdb/src/observability/`, and
+ * `agentdb/src/search/` in ADR-0239 cluster 4 step (c).
+ *
+ * If you reached this file from a search for "EmbeddingService",
+ * the live one is at `forks/agentdb/src/controllers/EmbeddingService.ts`.
+ *
  * Production Embedding Service
  *
  * Replaces mock embeddings with real implementations:

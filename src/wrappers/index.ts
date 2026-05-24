@@ -1,4 +1,13 @@
 /**
+ * QUARANTINED — ADR-0239 cluster 4 step (c) pending.
+ *
+ * This barrel re-exports a DEAD parallel implementation. New
+ * contributors importing from `agentdb/wrappers` will pull in code
+ * that never reaches the live path. The whole `wrappers/` directory
+ * is deleted together with `@claude-flow/embeddings/`,
+ * `agentdb/src/compatibility/`, `agentdb/src/observability/`, and
+ * `agentdb/src/search/` in ADR-0239 cluster 4 step (c).
+ *
  * Production-Ready Wrappers for Alpha Packages
  *
  * These wrappers provide stable, performant alternatives to broken @ruvector/* alpha APIs.

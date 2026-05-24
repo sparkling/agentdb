@@ -94,9 +94,21 @@ export interface RuvllmMicroLoraPersistedConfig {
 
 export interface RuvllmMicroLoraJournalEntry {
   readonly op: 'adapt';
+  /**
+   * ADR-0231 Wave 2: per-call input vector recorded on every adapt entry.
+   * Optional on the journal type for backwards-compat with legacy entries
+   * written before Wave 2 (those entries predate the per-call input
+   * requirement and were mathematically no-ops — the pre-fork zero-input
+   * bug). Replay code paths in cli MUST skip-and-log entries without `input`
+   * (ADR-0231 gap #1). New writes go through the dispatch handler, which
+   * requires `input` via the payload type + invariants.
+   */
+  readonly input?: ReadonlyArray<number>;
   readonly quality: number;
   readonly learningRate?: number;
   readonly success?: boolean;
+  /** ADR-0231 Wave 2: opt-in EWC++ consolidation pass after the adapt step. */
+  readonly consolidate?: boolean;
 }
 
 export interface RuvllmMicroLoraPersistedInstance {

@@ -24,9 +24,21 @@ import { RUVLLM_MICROLORA_STORE_ID, type RuvllmMicroLoraStore } from './shared.j
 
 export interface RuvllmMicroLoraAdaptPayload {
   readonly loraId: string;
+  /**
+   * ADR-0231 Wave 2 (Q-3 fix): per-call input vector. Length MUST equal the
+   * loraId's stored `config.inputDim` (validated against the store at handler
+   * time; payload-only invariants additionally reject all-zero per
+   * feedback-no-fallbacks — the pre-fork zero-input no-op bug).
+   */
+  readonly input: ReadonlyArray<number>;
   readonly quality: number;
   readonly learningRate?: number;
   readonly success?: boolean;
+  /**
+   * ADR-0231 Wave 2: opt-in EWC++ consolidation pass after the adapt step.
+   * Optional; defaults to caller intent (undefined ⇒ no consolidation).
+   */
+  readonly consolidate?: boolean;
 }
 
 const STORE_ID = RUVLLM_MICROLORA_STORE_ID;
@@ -47,11 +59,24 @@ export const microLoraAdaptRuvllmHandler: GuardedWrite<RuvllmMicroLoraAdaptPaylo
           );
         }
 
+        // ADR-0231 Wave 2: input.length must equal the configured inputDim.
+        // The payload-only `inputIsNotAllZero` invariant cannot see the store,
+        // so this dimension check fails loud here (per feedback-no-fallbacks).
+        const expectedDim = instance.config.inputDim;
+        if (payload.input.length !== expectedDim) {
+          throw new Error(
+            `archivist: ruvllm_microlora_adapt — input.length=${payload.input.length} must equal ` +
+            `loraId='${payload.loraId}' config.inputDim=${expectedDim} (ADR-0231 Wave 2)`,
+          );
+        }
+
         instance.journal.push({
           op: 'adapt',
+          input: payload.input,
           quality: payload.quality,
           learningRate: payload.learningRate,
           success: payload.success,
+          consolidate: payload.consolidate,
         });
 
         await handle.write({ storeId: STORE_ID, key: 'root', payload: store });

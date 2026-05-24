@@ -1000,6 +1000,24 @@ export class Archivist {
     try {
       await (handler as MutationHandlerFn<unknown>)(ctx, payload);
     } catch (err) {
+      // ADR-0246 F-03-002 path (b): handler throw also rolls back the
+      // staging substrate. Without this, an in-flight SQLite SAVEPOINT
+      // would leak (left on the transaction stack) and an in-flight RVF
+      // journal would be silently discarded but accounting-only — the
+      // explicit `rollback()` is the honest signal that nothing
+      // committed.
+      if (stagingSubstrate) {
+        try {
+          await stagingSubstrate.rollback();
+        } catch (rbErr) {
+          // Rollback itself failed — log and re-throw the original handler
+          // error to preserve the user-visible failure cause. The rollback
+          // failure is logged because a leaked SAVEPOINT is a serious state
+          // problem (subsequent dispatches would target the wrong scope).
+          // eslint-disable-next-line no-console
+          console.error('[archivist] staging rollback failed after handler throw:', rbErr);
+        }
+      }
       await writeAudit({ ...baseEntry, state: 'failed' });
       throw err;
     }
@@ -1007,9 +1025,9 @@ export class Archivist {
     // ADR-0246 F-03-002: invariants run on staged state — `before` is the
     // pre-handler substrate value (loaded lazily on first read/write inside
     // the handler), `after` is the staged result the handler would commit.
-    // For FS-JSON: `commit()` runs only on `applied`. For RVF/SQLite: the
-    // substrate already committed inside the handler; the args remain
-    // `undefined` (honest-gap per MODULE.md:45 footnote).
+    // For FS-JSON: `commit()` runs only on `applied`. For RVF + SQLite
+    // (path (b)): inserts/removes are journaled / SAVEPOINTed during the
+    // handler, then committed or rolled back here based on invariant outcome.
     const stagedEntries = stagingSubstrate?.getAllStaged() ?? [];
     const substrateStateBefore =
       stagedEntries.length > 0 ? stagedEntries[0].before : undefined;
@@ -1030,14 +1048,23 @@ export class Archivist {
       (v) => typeof v.verdict === 'object' && (v.verdict as { violated: true }).violated === true,
     );
     if (violation) {
+      // ADR-0246 F-03-002 path (b): roll back any staged writes (FS-JSON
+      // journal discarded, RVF journal discarded, SQLite SAVEPOINTs
+      // ROLLBACK TO + RELEASE) BEFORE the audit entry is written or the
+      // throw propagates. Per MODULE.md:45 charter — invariants "ABORT
+      // the WRITE" and record `state: 'rejected', reason: 'invariant_violation'`.
+      if (stagingSubstrate) {
+        await stagingSubstrate.rollback();
+      }
       await writeAudit({ ...baseEntry, state: 'rejected', invariantVerdicts });
       const detail = (violation.verdict as { detail: string }).detail;
       throw new Error(`archivist: invariant '${violation.name}' violated: ${detail}`);
     }
 
-    // ADR-0246 F-03-002: commit staged FS-JSON writes ONLY after invariants
-    // pass. RVF/SQLite already committed inside the handler — the named
-    // follow-up will move them into the staging path too.
+    // ADR-0246 F-03-002: commit staged writes ONLY after invariants pass.
+    // FS-JSON: replay staged document writes; RVF: replay journaled
+    // insertAsync/removeAsync ops; SQLite: RELEASE the dispatch-scope
+    // SAVEPOINTs (path (b) post-Batch 1 — RVF + SQLite enforcement landed).
     if (stagingSubstrate) {
       await stagingSubstrate.commit();
     }

@@ -43,7 +43,11 @@ export { readEwcLambdaFromConfig } from './config/embedding-config.js';
 // from the barrel so consumers can resolve the symbols without digging into
 // security/observability sub-paths.
 export { ResourceTracker, RateLimiter, CircuitBreaker } from './security/limits.js';
-export { TelemetryManager } from './observability/telemetry.js';
+// ADR-0239 cluster 4 step (c): TelemetryManager re-export removed; the
+// `src/observability/` directory is deleted (dead-tree per F-11-010,
+// 773 LOC, 0 inbound). If telemetry surfaces become useful again,
+// re-introduce a live implementation rather than restoring the dead
+// dir.
 
 // Core controllers
 export { CausalMemoryGraph } from './controllers/CausalMemoryGraph.js';
@@ -137,17 +141,11 @@ export {
   createProductQuantizedStore,
 } from './quantization/index.js';
 
-// Hybrid Search (Vector + Keyword)
-export {
-  KeywordIndex,
-  HybridSearch,
-  createKeywordIndex,
-  createHybridSearch,
-  type HybridSearchOptions,
-  type HybridSearchResult,
-  type HybridQuery,
-  type BM25Config,
-} from './search/index.js';
+// ADR-0239 cluster 4 step (c): Hybrid Search (Vector + Keyword) re-export
+// removed; `src/search/` is deleted (dead-tree per F-11-009, 1,092 LOC,
+// 0 external consumers — only barrel-re-exports tied here and in
+// wasm-loader.ts). Vector + keyword hybrid lives in the live archivist
+// search handlers under `src/archivist/handlers/memory/`.
 
 // Benchmarking Suite
 export {

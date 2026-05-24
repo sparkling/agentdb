@@ -90,17 +90,9 @@ export {
   createProductQuantizedStore,
 } from './quantization/index.js';
 
-// Hybrid Search (Vector + Keyword)
-export {
-  KeywordIndex,
-  HybridSearch,
-  createKeywordIndex,
-  createHybridSearch,
-  type HybridSearchOptions,
-  type HybridSearchResult,
-  type HybridQuery,
-  type BM25Config,
-} from './search/index.js';
+// ADR-0239 cluster 4 step (c): Hybrid Search re-export removed;
+// `src/search/` is deleted (dead-tree per F-11-009). See `src/index.ts`
+// for the same removal context.
 
 // Benchmarking Suite
 export {

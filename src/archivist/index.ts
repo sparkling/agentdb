@@ -112,6 +112,8 @@ export type {
 // re-exported — the type-enforcement boundary lets a handler see only the narrow
 // capability, never the backend object (see `capabilities.ts`).
 export type {
+  AutopilotLearner,
+  AutopilotLearnResult,
   CausalGraphWriter,
   CausalGraphWriteResult,
   EmbeddingScorer,

@@ -1,0 +1,14 @@
+{
+  "comment": "ADR-0240 site #2 lint rider. Scoped no-console rule for the stdio MCP server. console.log/info/debug bypass the JSON-RPC channel discipline; only console.error and console.warn (stderr by Node alias) are safe on a StdioServerTransport. Per ADR-0240 §Decision item 3.",
+  "overrides": [
+    {
+      "files": ["src/mcp/**/*.ts"],
+      "rules": {
+        "no-console": [
+          "error",
+          { "allow": ["error", "warn"] }
+        ]
+      }
+    }
+  ]
+}

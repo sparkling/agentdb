@@ -2013,7 +2013,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const batchSize = (args?.batch_size as number) || 32;
         const learningRate = (args?.learning_rate as number) || 0.01;
 
-        console.log(`🎓 Training session ${sessionId}...`);
+        // ADR-0240 site #2: stderr-only logging on StdioServerTransport.
+        // stdout is the JSON-RPC channel; this diagnostic must not corrupt frames.
+        console.error(`🎓 Training session ${sessionId}...`);
         const result = await learningSystem.train(sessionId, epochs, batchSize, learningRate);
 
         return {

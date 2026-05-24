@@ -15,6 +15,7 @@
 import type { VectorBackend, VectorConfig } from './VectorBackend.js';
 import type { SelfLearningConfig } from './rvf/SelfLearningRvfBackend.js';
 import { RuVectorBackend } from './ruvector/RuVectorBackend.js';
+import { deriveHNSWParams } from '../core/config-chain.js';
 
 // Note: HNSWLibBackend and RvfBackend are lazy-loaded to avoid import failures
 // on systems without build tools. The imports happen in helper functions.
@@ -152,11 +153,36 @@ export async function detectBackends(): Promise<BackendDetection> {
 }
 
 /**
+ * ADR-0246 F-03-003: merge `deriveHNSWParams(config.dimension)` into the
+ * caller's config when M/efConstruction/efSearch are omitted. Per
+ * `[[reference-embedding-model]]`: mpnet-768 → M:23, efC:100, efS:50.
+ * Without this merge, the HNSWLibBackend constructor's static literals
+ * (`{M: 16, efConstruction: 200, efSearch: 100}`) silently win for every
+ * factory caller that didn't pre-derive — divergent from the canonical
+ * `@claude-flow/memory` `resolve-config.ts:328` callers that did.
+ *
+ * Explicit caller-supplied values win (the spread is `{...derived, ...config}`
+ * shape via per-field guards); the merge fires only on `undefined`.
+ */
+function applyDerivedHNSWParams<C extends VectorConfig>(config: C): C {
+  const dim = config.dimension ?? config.dimensions;
+  if (!dim) return config; // dimension required — let the backend throw on its own.
+  const derived = deriveHNSWParams(dim);
+  // Lift M/efConstruction/efSearch only when omitted; preserve every other key.
+  return {
+    ...config,
+    M: config.M ?? derived.M,
+    efConstruction: config.efConstruction ?? derived.efConstruction,
+    efSearch: config.efSearch ?? derived.efSearch,
+  } as C;
+}
+
+/**
  * Lazy-load HNSWLibBackend to avoid import failures on systems without build tools
  */
 async function createHNSWLibBackend(config: VectorConfig): Promise<VectorBackend> {
   const { HNSWLibBackend } = await import('./hnswlib/HNSWLibBackend.js');
-  return new HNSWLibBackend(config);
+  return new HNSWLibBackend(applyDerivedHNSWParams(config));
 }
 
 /**
@@ -166,7 +192,7 @@ async function createHNSWLibBackend(config: VectorConfig): Promise<VectorBackend
  */
 async function createRvfBackend(config: VectorConfig): Promise<VectorBackend> {
   const { SelfLearningRvfBackend } = await import('./rvf/SelfLearningRvfBackend.js');
-  return SelfLearningRvfBackend.create(config as SelfLearningConfig);
+  return SelfLearningRvfBackend.create(applyDerivedHNSWParams(config) as SelfLearningConfig);
 }
 
 /**

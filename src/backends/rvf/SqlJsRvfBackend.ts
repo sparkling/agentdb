@@ -25,6 +25,7 @@ import type {
   SearchOptions,
   VectorStats,
 } from '../VectorBackend.js';
+import { probeAndSeatMetric } from './metric-probe.js';
 import {
   validatePath,
   validateId,
@@ -58,6 +59,11 @@ export class SqlJsRvfBackend implements VectorBackendAsync {
   private db: any = null;
   private dim: number;
   private metricType: 'cosine' | 'l2' | 'ip';
+  // ADR-0246 F-03-001: track whether the caller explicitly passed `config.metric`
+  // (non-undefined) so probe-and-reseat distinguishes default callers (silently
+  // reseat from persisted store) from explicit-metric callers (fail loud on
+  // store/caller disagreement).
+  private readonly callerExplicitMetric: 'cosine' | 'l2' | 'ip' | undefined;
   private initialized = false;
   private storagePath: string;
 
@@ -77,6 +83,8 @@ export class SqlJsRvfBackend implements VectorBackendAsync {
 
     this.dim = dimension;
     this.metricType = config.metric ?? 'cosine';
+    // ADR-0246 F-03-001: capture caller's explicit metric (vs defaulted).
+    this.callerExplicitMetric = config.metric;
     this.storagePath = (config as unknown as Record<string, unknown>).storagePath as string ?? ':memory:';
     this.batchThreshold = Math.min(
       Math.max(1, (config as unknown as Record<string, unknown>).batchThreshold as number ?? DEFAULT_BATCH_THRESHOLD),
@@ -111,7 +119,16 @@ export class SqlJsRvfBackend implements VectorBackendAsync {
     }
 
     this.db = fileBuffer ? new SQL.Database(fileBuffer) : new SQL.Database();
-    this.createSchema();
+    // ADR-0246 F-03-001: when loading an existing file, probe the persisted
+    // metric BEFORE `createSchema()` runs (which `INSERT OR REPLACE`s the
+    // metric row and destroys the verification surface). The
+    // `ensureSchemaAndSeed` helper keeps the schema-creation idempotent
+    // without touching an existing `rvf_meta` metric row.
+    if (fileBuffer) {
+      const persisted = this.readPersistedMetric();
+      this.metricType = probeAndSeatMetric(persisted, this.callerExplicitMetric, this.storagePath);
+    }
+    this.ensureSchemaAndSeed(fileBuffer !== null);
     this.rebuildCache();
     this.initialized = true;
   }
@@ -197,7 +214,14 @@ export class SqlJsRvfBackend implements VectorBackendAsync {
       this.db.close();
     }
     this.db = new SQL.Database(buffer);
-    this.createSchema(); // ensure schema exists
+    // ADR-0246 F-03-001: probe-and-reseat persisted metric BEFORE schema
+    // (re)creation. The prior `createSchema()` call here `INSERT OR REPLACE`s
+    // the `rvf_meta` `metric` row, clobbering the verification surface — the
+    // new `ensureSchemaAndSeed` path skips the seed when the row already
+    // exists.
+    const persisted = this.readPersistedMetric();
+    this.metricType = probeAndSeatMetric(persisted, this.callerExplicitMetric, loadPath);
+    this.ensureSchemaAndSeed(true); // file existed → skip seed
     this.rebuildCache();
     this.storagePath = loadPath;
     this.initialized = true;
@@ -320,7 +344,38 @@ export class SqlJsRvfBackend implements VectorBackendAsync {
 
   // ─── Private implementation ───
 
-  private createSchema(): void {
+  /**
+   * ADR-0246 F-03-001: read back the persisted metric from `rvf_meta` IF the
+   * table exists and the row is present. Returns `undefined` when the file is
+   * fresh / table absent / row missing — the metric-probe helper then leaves
+   * the caller-supplied (or defaulted) value in force.
+   */
+  private readPersistedMetric(): string | undefined {
+    if (!this.db) return undefined;
+    try {
+      // Use prepared-statement form so a missing table throws SQLITE_ERROR.
+      const rows = this.db.exec(`SELECT value FROM rvf_meta WHERE key='metric'`);
+      if (!rows || rows.length === 0) return undefined;
+      const result = rows[0];
+      if (!result.values || result.values.length === 0) return undefined;
+      const v = result.values[0]?.[0];
+      return typeof v === 'string' ? v : undefined;
+    } catch {
+      // Table or row missing — fresh file or pre-meta schema.
+      return undefined;
+    }
+  }
+
+  /**
+   * ADR-0246 F-03-001: create tables idempotently and seed `rvf_meta` ONLY
+   * when the metric row is absent. The prior `createSchema()` always
+   * `INSERT OR REPLACE`d the metric row on every load, destroying the
+   * read-back verification surface that the probe needs.
+   *
+   * @param fileExisted Whether the database came from an existing file (so a
+   *                    metric row presumably exists and must be preserved).
+   */
+  private ensureSchemaAndSeed(fileExisted: boolean): void {
     this.db.run(`
       CREATE TABLE IF NOT EXISTS rvf_meta (
         key TEXT PRIMARY KEY,
@@ -335,11 +390,15 @@ export class SqlJsRvfBackend implements VectorBackendAsync {
         created_at INTEGER DEFAULT (strftime('%s','now'))
       )
     `);
-    // Store dimension and metric for validation on load
-    this.db.run(
-      `INSERT OR REPLACE INTO rvf_meta (key, value) VALUES ('dimension', ?), ('metric', ?)`,
-      [String(this.dim), this.metricType],
-    );
+    // Seed dimension + metric ONLY when missing. `INSERT OR IGNORE` preserves
+    // the persisted metric on subsequent opens — the F-03-001 fix shape.
+    const persistedMetric = this.readPersistedMetric();
+    if (!fileExisted || persistedMetric === undefined) {
+      this.db.run(
+        `INSERT OR IGNORE INTO rvf_meta (key, value) VALUES ('dimension', ?), ('metric', ?)`,
+        [String(this.dim), this.metricType],
+      );
+    }
   }
 
   private rebuildCache(): void {

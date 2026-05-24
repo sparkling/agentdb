@@ -15,6 +15,15 @@
  * Note: hnswlib-node is lazy-loaded to avoid import failures on systems
  * without C++ build tools. Use forceWasm: true in AgentDB config to skip
  * hnswlib entirely and use pure WASM backends.
+ *
+ * @internal
+ * ADR-0246 F-03-009: marked internal — `HNSWIndex` has zero in-tree
+ * consumers today (last confirmed orphan in 2026-05 audit slice 03).
+ * Retained as a deep-import seam for the lone test that consumes it
+ * directly, but removed from the `src/controllers/index.ts` and
+ * `src/index.ts` public-export barrels. Plugin authors and library
+ * consumers should route through `createBackend('hnswlib', ...)` for HNSW
+ * indexing; the direct controller is fork-only and unstable.
  */
 
 import * as fs from 'fs';

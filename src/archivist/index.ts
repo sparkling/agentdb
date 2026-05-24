@@ -61,6 +61,7 @@ import type { AuditEntry, AuditState, InvariantVerdict } from './audit-types.js'
 import { writeThroughEntry } from './audit-writer.js';
 import { getSharedHotPathQueue } from './hot-path-writer.js';
 import { makeReadOnlySubstrateAccess, makeSubstrateAccess } from './substrate-internal.js';
+import { makeStagingSubstrate } from './staging-substrate.js';
 import { makeFsJsonSubstrate } from './substrates/fs-json-store.js';
 import { makeRvfSubstrate } from './substrates/rvf-store.js';
 import { makeSqliteSubstrate } from './substrates/sqlite-store.js';
@@ -952,12 +953,25 @@ export class Archivist {
       );
     }
 
+    // ADR-0246 F-03-002: build a staging substrate that DEFERS FS-JSON
+    // commits until after invariants pass. RVF + SQLite carve-out substrates
+    // pass through (commits run inside the handler closure as today; RVF
+    // enforcement is a named follow-up — see MODULE.md:45 footnote). For
+    // hot-path handlers, staging is skipped entirely: hot-path writers route
+    // through `writeThroughEntry` and have no MutationContext.substrate
+    // semantics that staging would interpose on.
+    const stagingSubstrate = hotPath
+      ? undefined
+      : makeStagingSubstrate((storeId) => this.getSubstrate(storeId));
+
     const ctx = createMutationContext({
       auditId,
       originatingTool: toolName,
       guardVerdicts: composed.verdicts,
       timestamp,
-      substrate: makeSubstrateAccess(this.routingSubstrate()),
+      substrate: stagingSubstrate
+        ? stagingSubstrate.access
+        : makeSubstrateAccess(this.routingSubstrate()),
       // ADR-0180 F4-2 Phase C: thread the resolved project root + the narrow
       // capability bundle onto the context. `projectRoot` is the same value the
       // substrate layer uses for FS-JSON paths. `makeMutationCapabilities` wraps
@@ -990,12 +1004,24 @@ export class Archivist {
       throw err;
     }
 
+    // ADR-0246 F-03-002: invariants run on staged state — `before` is the
+    // pre-handler substrate value (loaded lazily on first read/write inside
+    // the handler), `after` is the staged result the handler would commit.
+    // For FS-JSON: `commit()` runs only on `applied`. For RVF/SQLite: the
+    // substrate already committed inside the handler; the args remain
+    // `undefined` (honest-gap per MODULE.md:45 footnote).
+    const stagedEntries = stagingSubstrate?.getAllStaged() ?? [];
+    const substrateStateBefore =
+      stagedEntries.length > 0 ? stagedEntries[0].before : undefined;
+    const substrateStateAfter =
+      stagedEntries.length > 0 ? stagedEntries[0].after : undefined;
+
     const invariantVerdicts: InvariantVerdict[] = invariants.map((inv) => {
       const verdict = inv({
         callerIntent: payload,
         recordedPayload: payload,
-        substrateStateBefore: undefined,
-        substrateStateAfter: undefined,
+        substrateStateBefore,
+        substrateStateAfter,
       });
       return { name: inv.name || 'anonymous', verdict };
     });
@@ -1007,6 +1033,13 @@ export class Archivist {
       await writeAudit({ ...baseEntry, state: 'rejected', invariantVerdicts });
       const detail = (violation.verdict as { detail: string }).detail;
       throw new Error(`archivist: invariant '${violation.name}' violated: ${detail}`);
+    }
+
+    // ADR-0246 F-03-002: commit staged FS-JSON writes ONLY after invariants
+    // pass. RVF/SQLite already committed inside the handler — the named
+    // follow-up will move them into the staging path too.
+    if (stagingSubstrate) {
+      await stagingSubstrate.commit();
     }
 
     await writeAudit({ ...baseEntry, state: 'applied', invariantVerdicts });

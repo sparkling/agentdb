@@ -70,7 +70,11 @@ export { ModelCacheLoader } from './model/ModelCacheLoader.js';
 
 // WASM acceleration and HNSW indexing
 export { WASMVectorSearch } from './controllers/WASMVectorSearch.js';
-export { HNSWIndex, isHnswlibAvailable } from './controllers/HNSWIndex.js';
+// ADR-0246 F-03-009: HNSWIndex removed from public exports; `isHnswlibAvailable`
+// retained for runtime probes. Use createBackend('hnswlib', ...) for HNSW
+// indexing — the controller has zero in-tree consumers and remains accessible
+// via deep import for the lone test that uses it.
+export { isHnswlibAvailable } from './controllers/HNSWIndex.js';
 
 // Attention mechanisms
 export { AttentionService } from './controllers/AttentionService.js';

@@ -2,7 +2,16 @@
 // 256-entry single-producer queue between the hot-path caller and the
 // write-through audit journal (ADR-0180 #17). Power-of-two capacity so
 // `idx & (CAP-1)` replaces modulo. Drain trigger is an immediate microtask;
-// at-capacity producer blocks for bounded µs-scale time (never drops).
+// at-capacity producer awaits one drain step for bounded µs-scale time
+// (never drops).
+//
+// ADR-0246 F-03-004: `enqueue` is async + `await drainOne()` at capacity.
+// The prior shape (`void this.drainOne()` in a busy-spin) advanced the
+// loop counter without giving the drain a chance to actually fire — under
+// sustained at-capacity load, the loop would spin forever (the unawaited
+// promises queued microtasks that never resolved because the next tick was
+// the same producer). Per `feedback-no-fallbacks`, the producer MUST yield
+// to the drain microtask so the queue can actually drain.
 
 import type { AuditEntry } from './audit-types.js';
 import { writeThroughEntry } from './audit-writer.js';
@@ -18,9 +27,9 @@ export class HotPathQueue {
   private draining = false;
   private pendingDrain: Promise<void> | null = null;
 
-  enqueue(entry: AuditEntry): void {
+  async enqueue(entry: AuditEntry): Promise<void> {
     while (this.count >= CAP) {
-      void this.drainOne();
+      await this.drainOne();
     }
     this.buf[this.head] = entry;
     this.head = (this.head + 1) & MASK;

@@ -30,6 +30,7 @@ import type {
 } from '../VectorBackend.js';
 import { FilterBuilder, type RvfFilterExpr } from './FilterBuilder.js';
 import { getConfig } from '../../core/config-chain.js';
+import { probeAndSeatMetric } from './metric-probe.js';
 import {
   validatePath,
   validateId,
@@ -97,6 +98,11 @@ export class RvfBackend implements VectorBackendAsync {
   private db: any = null;
   private dim: number;
   private metricType: 'cosine' | 'l2' | 'ip';
+  // ADR-0246 F-03-001: track whether the caller explicitly passed `config.metric`
+  // (non-undefined) so probe-and-reseat can distinguish default-cosine callers
+  // (silently reseat from store) from explicit-metric callers (fail loud on
+  // store/caller disagreement).
+  private readonly callerExplicitMetric: 'cosine' | 'l2' | 'ip' | undefined;
   private config: RvfConfig;
   private initialized = false;
   private storagePath: string;
@@ -127,6 +133,9 @@ export class RvfBackend implements VectorBackendAsync {
 
     this.dim = dimension;
     this.metricType = config.metric ?? 'cosine';
+    // ADR-0246 F-03-001: capture caller's explicit metric (vs defaulted) so
+    // probe-and-reseat can distinguish caller-cares vs caller-default cases.
+    this.callerExplicitMetric = config.metric;
     this.config = { ...config, dimension, dimensions: dimension } as RvfConfig;
     this.storagePath = (config as RvfConfig).storagePath ?? 'agentdb.rvf';
     this.batchThreshold = Math.min(
@@ -159,6 +168,16 @@ export class RvfBackend implements VectorBackendAsync {
 
       if (fileExists) {
         this.db = await RvfDatabase.open(storagePath, rvfBackendType);
+        // ADR-0246 F-03-001: probe-and-reseat persisted metric after open.
+        // The SDK currently exposes no `metric()` method (`@ruvector/rvf` 0.2.x);
+        // the probe returns `undefined` for that runtime, so the constructor-
+        // supplied value stays in force. SqlJsRvfBackend's `load()` does its
+        // own SQLite-table read in the sibling implementation.
+        this.metricType = probeAndSeatMetric(
+          await this.probeStoreMetric(),
+          this.callerExplicitMetric,
+          storagePath,
+        );
       } else {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const createOpts: any = {
@@ -239,15 +258,15 @@ export class RvfBackend implements VectorBackendAsync {
     );
   }
 
-  remove(id: string): boolean {
-    // Queue a delete -- sync interface cannot await
-    this.ensureInitialized();
-    validateId(id);
-    // Fire-and-forget with error logging
-    this.db.delete([id]).catch((err: Error) => {
-      console.error('[RvfBackend] Delete failed:', err.message);
-    });
-    return true;
+  remove(_id: string): boolean {
+    // ADR-0246 F-03-006: sync remove is async-only — match the search() pattern at
+    // :234-240. The prior fire-and-forget returned `true` unconditionally, lying
+    // about success to any caller checking the return. Fail loud per
+    // `feedback-no-fallbacks` so sync-remove callers see the same shape they
+    // already see for sync-search.
+    throw new Error(
+      'RVF backend remove is async-only. Use removeAsync() or the VectorBackendAsync interface.',
+    );
   }
 
   getStats(): VectorStats {
@@ -274,6 +293,12 @@ export class RvfBackend implements VectorBackendAsync {
       await this.db.close();
     }
     this.db = await RvfDatabase.open(path, rvfBackendType);
+    // ADR-0246 F-03-001: probe-and-reseat persisted metric after open.
+    this.metricType = probeAndSeatMetric(
+      await this.probeStoreMetric(),
+      this.callerExplicitMetric,
+      path,
+    );
     const status = await this.db.status();
     this.cachedCount = status.totalVectors ?? 0;
     this.storagePath = path;
@@ -551,24 +576,17 @@ export class RvfBackend implements VectorBackendAsync {
   /** Get HNSW index statistics */
   indexStats(): IndexStats {
     this.ensureInitialized();
-    try {
-      const raw = this.db.indexStats();
-      return {
-        indexedVectors: raw.indexedVectors ?? 0,
-        layers: raw.layers ?? 0,
-        m: raw.m ?? 16,
-        efConstruction: raw.efConstruction ?? 200,
-        needsRebuild: raw.needsRebuild ?? false,
-      };
-    } catch {
-      return {
-        indexedVectors: this.cachedCount,
-        layers: 0,
-        m: 16,
-        efConstruction: 200,
-        needsRebuild: false,
-      };
-    }
+    // ADR-0246 F-03-005: re-throw underlying error per `feedback-no-fallbacks`.
+    // The prior fabricated default `{m:16, efConstruction:200, ...}` was the
+    // wrong-static-defaults shape — the same class as F-03-003.
+    const raw = this.db.indexStats();
+    return {
+      indexedVectors: raw.indexedVectors ?? 0,
+      layers: raw.layers ?? 0,
+      m: raw.m ?? 16,
+      efConstruction: raw.efConstruction ?? 200,
+      needsRebuild: raw.needsRebuild ?? false,
+    };
   }
 
   /** Verify SHAKE-256 witness chain integrity */
@@ -627,6 +645,12 @@ export class RvfBackend implements VectorBackendAsync {
     });
     backend.db = db;
     backend.initialized = true;
+    // ADR-0246 F-03-001: probe-and-reseat persisted metric after open.
+    backend.metricType = probeAndSeatMetric(
+      await backend.probeStoreMetric(),
+      backend.callerExplicitMetric,
+      path,
+    );
     try {
       const status = await db.status();
       backend.cachedCount = status.totalVectors ?? 0;
@@ -735,6 +759,23 @@ export class RvfBackend implements VectorBackendAsync {
   }
 
   // ─── Private helpers ───
+
+  /**
+   * ADR-0246 F-03-001: read the persisted metric from the underlying RVF
+   * store, returning `undefined` if the SDK has no `metric()` surface (the
+   * current `@ruvector/rvf` 0.2.x does not expose one — the open() path
+   * cannot read the persisted metric back). When the SDK eventually exposes
+   * it, this helper picks it up without touching the call-site logic.
+   */
+  private async probeStoreMetric(): Promise<string | undefined> {
+    if (!this.db || typeof this.db.metric !== 'function') return undefined;
+    try {
+      const m = await this.db.metric();
+      return typeof m === 'string' ? m : undefined;
+    } catch {
+      return undefined;
+    }
+  }
 
   private distanceToSimilarity(distance: number): number {
     switch (this.metricType) {

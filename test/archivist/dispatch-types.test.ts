@@ -31,6 +31,30 @@ import {
 import type { MemoryStorePayload } from '../../src/archivist/handlers/memory/store.js';
 import type { MemorySearchQuery } from '../../src/archivist/handlers/memory/search.js';
 
+// This test is a COMPILE-TIME-ONLY type conformance gate (the `// @ts-expect-error`
+// directives are the load-bearing assertions). The dispatch calls below run
+// at runtime as a side effect of the type-check, but the test never awaits
+// them — by design, since the test only proves the call EXPRESSIONS type-check.
+//
+// At runtime those un-awaited promises reject with the ADR-0181 Phase 5 DA-L1
+// init-guard message ("never initialized with a real config"). The guard is
+// correctly fail-loud and MUST stay so for production paths; the noise is a
+// test-only artifact of the type-only assertion shape. Each dispatch call site
+// below uses `swallow()` to silence the expected rejection at the call-site,
+// without weakening the guard itself.
+
+/**
+ * Swallow an expected runtime rejection from a type-only dispatch call.
+ * The promise's TYPE is what this test asserts; the runtime rejection is
+ * an inert side effect (the archivist has no real config). Per-site
+ * .catch() avoids vitest reporting these as unhandled rejections without
+ * silencing actual unexpected throws — the dispatch guard remains fail-loud
+ * for production paths.
+ */
+function swallow<T>(p: Promise<T>): Promise<T | undefined> {
+  return p.catch(() => undefined);
+}
+
 // Strict wrapper types that expose ONLY the typed overload — used to verify
 // unknown-tool-name rejection, which the deprecated string fallback overload
 // would otherwise mask. cli call sites that want maximum compile-time
@@ -54,7 +78,7 @@ describe('Archivist typed dispatch overloads (ADR-0181 Phase 5)', () => {
       content: 'hello',
     };
     const p: Promise<unknown> = archivist.dispatch('memory_store', validPayload);
-    void p;
+    void swallow(p);
 
     // Valid read call — type-checks.
     const validQuery: MemorySearchQuery = {
@@ -62,7 +86,7 @@ describe('Archivist typed dispatch overloads (ADR-0181 Phase 5)', () => {
       limit: 5,
     };
     const r: Promise<unknown> = archivist.dispatchRead('memory_search', validQuery);
-    void r;
+    void swallow(r);
 
     expect(typeof archivist.dispatch).toBe('function');
     expect(typeof archivist.dispatchRead).toBe('function');
@@ -86,11 +110,11 @@ describe('Archivist typed dispatch overloads (ADR-0181 Phase 5)', () => {
 
     // @ts-expect-error — 'unknown_tool_xyz' is not a registered tool name
     const p: Promise<unknown> = typedDispatch('unknown_tool_xyz', payload);
-    void p;
+    void swallow(p);
 
     // @ts-expect-error — 'unknown_tool_xyz' is not a registered tool name
     const r: Promise<unknown> = typedDispatchRead('unknown_tool_xyz', payload);
-    void r;
+    void swallow(r);
 
     expect(typeof archivist.dispatch).toBe('function');
   });
@@ -113,7 +137,7 @@ describe('Archivist typed dispatch overloads (ADR-0181 Phase 5)', () => {
     // required fields — typed overload rejects.
     // @ts-expect-error — '{}' is missing required fields of MemoryStorePayload
     const p1: Promise<unknown> = typedDispatch('memory_store', {});
-    void p1;
+    void swallow(p1);
 
     // 'memory_search' is a read with payload `MemorySearchQuery` (requires
     // `text`). Passing a `MemoryStorePayload` shape is a mismatch.
@@ -123,12 +147,12 @@ describe('Archivist typed dispatch overloads (ADR-0181 Phase 5)', () => {
       key: 'k',
       content: 'c',
     });
-    void p2;
+    void swallow(p2);
 
     // Passing a string where an object payload is required.
     // @ts-expect-error — 'not-a-payload' is not assignable to MemoryStorePayload
     const p3: Promise<unknown> = typedDispatch('memory_store', 'not-a-payload');
-    void p3;
+    void swallow(p3);
 
     expect(typeof archivist.dispatch).toBe('function');
   });

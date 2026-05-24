@@ -10,6 +10,10 @@ node_modules/
 *.db
 *.db-*
 
+# Runtime archivist state (audit logs, audit-meta, etc.)
+# These are touched on every agentdb operation; should never be tracked.
+.claude-flow/
+
 # Logs
 *.log
 

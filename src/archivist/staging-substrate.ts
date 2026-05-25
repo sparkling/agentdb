@@ -62,9 +62,11 @@
 //     value (FS-JSON only — RVF/SQLite stage the transactional side-effects,
 //     not whole-state snapshots).
 //   - `commit()` replays the staged writes through the real substrates:
-//     FS-JSON saves the document, RVF replays the insert/remove journal,
-//     SQLite RELEASEs the savepoint. On pre-commit invariant violation,
-//     `rollback()` is called: FS-JSON discards staged entries, RVF discards
+//     FS-JSON is a NO-OP for entries already committed in-lock during
+//     `withWrite` (concurrent-write fix); RVF replays the insert/remove
+//     journal, SQLite RELEASEs the savepoint. On pre-commit invariant
+//     violation, `rollback()` is called: FS-JSON entries are NOT rolled
+//     back (already on disk — see Path (a) trade-off above), RVF discards
 //     the journal, SQLite ROLLBACKs TO + RELEASEs the savepoint.
 
 import type BetterSqlite3 from 'better-sqlite3';

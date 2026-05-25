@@ -14,13 +14,26 @@
 // BEFORE the audit entry transitions to `applied`; violation ABORTS the WRITE
 // and records `state: 'rejected', reason: 'invariant_violation'`."
 //
-// ── Path (a) — FS-JSON (Batch 1) ─────────────────────────────────────────────
+// ── Path (a) — FS-JSON (Batch 1, post concurrent-write fix) ──────────────────
 //
-// FS-JSON: writes accumulate in an in-memory journal; the handler's `read()`
-// calls see prior staged writes layered on top of disk state; nothing reaches
-// disk until `commit()` is called. The FS-JSON substrate is whole-document
-// atomic, so staging a write means deferring `saveJsonAtomic`, not unwinding
-// a partial commit.
+// FS-JSON: handler's `read()` and `write()` calls go through the in-memory
+// staged map for ordering / cross-key consistency within the handler. BUT:
+// `withWrite` takes the real substrate's file lock for the duration of
+// `fn(handle)` AND commits any FS-JSON entries the handler wrote BEFORE the
+// lock releases. This closes a concurrent-write data-loss window where two
+// CLI processes would both read pre-state outside any lock, both stage their
+// mutations, and the second `commit()` would overwrite the first's bytes.
+//
+// Trade-off: invariants-on-staged-state is LOST for FS-JSON only. Invariants
+// still run (and a violation will still trigger `rollback()`), but for
+// FS-JSON the bytes are already on disk by the time invariants are evaluated —
+// rollback cannot unwind them. RVF + SQLite preserve the staged-state
+// guarantee (see Path (b) below). The 100% durability bar of ADR-0123 takes
+// precedence over the deferred-invariants property of ADR-0246 for FS-JSON,
+// which is whole-document atomic anyway — the only invariant that could
+// reasonably reject the write would be one that inspects the staged document
+// itself, and a violation there is rare versus the routine concurrent-write
+// pattern (multi-process `hive-mind_memory set`).
 //
 // ── Path (b) — RVF + SQLite (this commit, ADR-0246 named follow-up) ──────────
 //
@@ -78,6 +91,14 @@ interface StagedEntry {
   // Whether `after` was written (the handler called `write` for this scope) —
   // distinct from `before` to support read-only handler paths.
   written: boolean;
+  // FS-JSON carve-out (concurrent-write data-loss regression fix —
+  // ADR-0246 / ADR-0123): FS-JSON entries are committed in-lock during
+  // `withWrite` (the only way to prevent lost updates from concurrent
+  // CLI processes reading pre-state outside any lock). Once committed
+  // here, the later `commit()` step is a no-op for the entry. RVF + SQLite
+  // entries always have `committed=false` and go through the deferred
+  // `commit()` path that preserves the invariants-on-staged-state contract.
+  committed: boolean;
 }
 
 /**
@@ -187,6 +208,7 @@ export function makeStagingSubstrate(
         after: before,
         beforeLoaded: true,
         written: false,
+        committed: false,
       };
       staged.set(k, entry);
     }
@@ -340,11 +362,51 @@ export function makeStagingSubstrate(
     ): Promise<T> {
       const fam = family(scope.storeId);
       if (fam === 'fs-json') {
-        // The staged-write substrate doesn't actually hold the FS-JSON lock
-        // for the handler's duration — that would defeat the staging purpose.
-        // The real substrate's `withWrite` is invoked at `commit()` time only;
-        // during staging, the handler operates against the in-memory journal.
-        return fn(handle);
+        // FS-JSON carve-out (concurrent-write data-loss regression fix —
+        // ADR-0246 / ADR-0123 100% durability bar). Earlier this branch
+        // simply returned `fn(handle)` with no lock held — that caused
+        // lost updates under concurrent CLI processes: handler reads
+        // pre-state outside any lock, mutates an in-memory snapshot, and
+        // the deferred `commit()` writes the whole document over a
+        // concurrent commit. (Repro: `adr0123-conc-write`, `adr0104-mem-distinct`.)
+        //
+        // The carve-out: take the REAL substrate's `withWrite` lock for
+        // the duration of `fn(handle)` so the handler's read + mutate
+        // both happen inside the file lock. After `fn` returns (still
+        // inside the lock), replay any FS-JSON entries this scope wrote
+        // through the inner real handle's `write()` — landing the
+        // committed bytes atomically before the lock releases — and mark
+        // those entries `committed=true` so the dispatch path's later
+        // `commit()` skips them.
+        //
+        // Trade-off (documented in MODULE.md:45 and dispatch comments):
+        // FS-JSON loses "invariants on staged state". Invariants still run
+        // for FS-JSON entries but they are evaluated against ALREADY-
+        // COMMITTED bytes. RVF + SQLite paths are unaffected — they still
+        // get the deferred-commit + invariants-on-staged-state guarantee
+        // via their journal / SAVEPOINT machinery below.
+        const realSubstrate = resolveSubstrate(scope.storeId) as unknown as SubstrateHandle;
+        return realSubstrate.withWrite(scope, async (realHandle) => {
+          const result = await fn(handle);
+          // Replay this scope's FS-JSON writes inside the same lock. Only
+          // entries for THIS storeId are committed here — `realHandle` is
+          // bound to one FS-JSON path (substrate ignores `scope.storeId`
+          // and writes to its factory-bound path), so committing a
+          // different storeId's entry through it would write the wrong
+          // file. Cross-store FS-JSON writes within one `withWrite` are
+          // not a pattern in the corpus (every handler uses one storeId
+          // per `withWrite`); any other-storeId entries fall through to
+          // the deferred `commit()` path. Entries already committed by a
+          // prior nested `withWrite` are skipped.
+          for (const entry of staged.values()) {
+            if (entry.committed || !entry.written) continue;
+            if (family(entry.storeId) !== 'fs-json') continue;
+            if (entry.storeId !== scope.storeId) continue;
+            await realHandle.write({ storeId: entry.storeId, key: entry.key, payload: entry.after });
+            entry.committed = true;
+          }
+          return result;
+        });
       }
       if (fam === 'rvf') {
         // Open the real substrate's `withWrite` to get the real RvfSubstrateHandle,
@@ -373,7 +435,21 @@ export function makeStagingSubstrate(
       const storeId = intent.tableName as StoreId;
       const fam = family(storeId);
       if (fam === 'fs-json') {
-        await fn(handle);
+        // FS-JSON carve-out (see `withWrite` above for full rationale):
+        // hold the real substrate's file lock for the handler's duration
+        // and commit any FS-JSON writes inside that lock to prevent
+        // lost-update races between concurrent CLI processes.
+        const realSubstrate = resolveSubstrate(storeId) as unknown as SubstrateHandle;
+        await realSubstrate.withBulkWrite(intent, async (realHandle) => {
+          await fn(handle);
+          for (const entry of staged.values()) {
+            if (entry.committed || !entry.written) continue;
+            if (family(entry.storeId) !== 'fs-json') continue;
+            if (entry.storeId !== storeId) continue;
+            await realHandle.write({ storeId: entry.storeId, key: entry.key, payload: entry.after });
+            entry.committed = true;
+          }
+        });
         return;
       }
       if (fam === 'rvf') {
@@ -413,9 +489,11 @@ export function makeStagingSubstrate(
     commit: async () => {
       // FS-JSON: replay every staged write through the real substrate. Each
       // replay grabs the real `withWrite` lock so the substrate's atomic-write
-      // semantics still apply.
+      // semantics still apply. Entries already committed in-lock during a
+      // prior `withWrite` (FS-JSON carve-out path, see above) are skipped —
+      // their bytes already landed atomically before the lock released.
       for (const entry of staged.values()) {
-        if (!entry.written) continue;
+        if (!entry.written || entry.committed) continue;
         const substrate = resolveSubstrate(entry.storeId);
         await (substrate as unknown as SubstrateHandle).withWrite(
           { storeId: entry.storeId },
@@ -465,9 +543,16 @@ export function makeStagingSubstrate(
       }
     },
     rollback: async () => {
-      // FS-JSON: drop the staged entries — they were never written to disk.
-      // No action needed beyond not calling commit(). The Map will be GC'd
-      // with the StagingSubstrate instance.
+      // FS-JSON: NO ROLLBACK. The carve-out path commits FS-JSON writes
+      // in-lock during `withWrite` (so concurrent CLI processes don't lose
+      // updates). By the time invariant violation or a handler throw runs
+      // `rollback()`, the bytes are already on disk and cannot be unwound.
+      // This is the explicit trade-off documented at the `withWrite`
+      // FS-JSON branch above and at MODULE.md:45: FS-JSON loses
+      // invariants-on-staged-state in exchange for durability under
+      // concurrent writes. Uncommitted FS-JSON entries (handler threw
+      // before `withWrite` returned) were never written to disk — the
+      // Map is GC'd with the StagingSubstrate instance.
       // RVF: drop the in-memory journal — no insertAsync/removeAsync ever
       // reached the real backend, so the .rvf file is untouched.
       // SQLite: ROLLBACK TO + RELEASE every SAVEPOINT (REVERSE order — LIFO).

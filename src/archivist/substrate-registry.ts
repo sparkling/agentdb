@@ -179,6 +179,13 @@ const SQLITE_CARVE_OUT_STORE_IDS: ReadonlySet<string> = new Set([
   // scope shares the same SQLite handle the cli uses for INSERTs.
   // Same shape as Phase 7's reflexion/skill/hierarchical move.
   'agentdb_experience_record',
+  // ADR-0261 (2026-05-27): fork-native ADR-130 re-implementation. The
+  // `graph_edges` table (src/schemas/graph-edges.sql) FK-references
+  // `memory_entries(id)` — the FK requires the shared better-sqlite3 handle
+  // per ADR-0166, which is the SQLite-carve-out family. Writes route through
+  // the `agentdb_graph_edge` handler under a SAVEPOINT (per-op acquisition,
+  // ADR-0202 / ADR-0246) — no module-scope cache, no separate DB connection.
+  'agentdb_graph_edge',
 ]);
 
 // ── Classification ───────────────────────────────────────────────────────────

@@ -218,6 +218,16 @@ export class AgentDB {
       const frontierSchema = fs.readFileSync(frontierSchemaPath, 'utf-8');
       this.db.exec(frontierSchema);
     }
+
+    // ADR-0261 (2026-05-27): fork-native ADR-130 re-implementation. The
+    // `graph_edges` table holds reinforcement-decay edges between memory rows.
+    // FK to memory_entries deferred — see implementation note in
+    // graph-edges.sql for the schema-impedance rationale.
+    const graphEdgesSchemaPath = path.join(__dirname, '../../schemas/graph-edges.sql');
+    if (fs.existsSync(graphEdgesSchemaPath)) {
+      const graphEdgesSchema = fs.readFileSync(graphEdgesSchemaPath, 'utf-8');
+      this.db.exec(graphEdgesSchema);
+    }
   }
 
   /** Exposes the underlying database connection for controller wiring in memory package. */

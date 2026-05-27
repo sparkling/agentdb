@@ -26,6 +26,9 @@ export { routeInvariants } from './route.js';
 export type { AgentdbCausalEdgePayload } from './causal-edge.js';
 export { causalEdgeInvariants } from './causal-edge.js';
 
+export type { AgentdbGraphEdgePayload } from './graph-edge.js';
+export { graphEdgeInvariants } from './graph-edge.js';
+
 export type { AgentdbHierarchicalStorePayload } from './hierarchical-store.js';
 export { hierarchicalStoreInvariants } from './hierarchical-store.js';
 

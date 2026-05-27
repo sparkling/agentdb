@@ -107,7 +107,10 @@ export async function initCommand(options: InitOptions = {}): Promise<void> {
     // __dirname is dist/src/cli/commands, so go up 3 levels to dist/
     const distDir = path.join(__dirname, '../../..');
     const basePath = path.join(distDir, 'schemas');
-    const schemaFiles = ['schema.sql', 'frontier-schema.sql'];
+    // ADR-0261 (2026-05-27): include graph-edges.sql so the graph_edges
+    // table is created at init. FK to memory_entries deferred (see schema
+    // file's implementation note for the cross-package impedance rationale).
+    const schemaFiles = ['schema.sql', 'frontier-schema.sql', 'graph-edges.sql'];
 
     for (const schemaFile of schemaFiles) {
       const schemaPath = path.join(basePath, schemaFile);

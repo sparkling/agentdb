@@ -70,6 +70,11 @@
       "types": "./dist/src/archivist/handlers/index.d.ts",
       "import": "./dist/src/archivist/handlers/index.js",
       "default": "./dist/src/archivist/handlers/index.js"
+    },
+    "./encoders/*": {
+      "types": "./dist/src/encoders/*.d.ts",
+      "import": "./dist/src/encoders/*.js",
+      "default": "./dist/src/encoders/*.js"
     }
   },
   "scripts": {

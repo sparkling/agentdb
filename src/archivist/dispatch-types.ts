@@ -26,6 +26,10 @@
 
 import type { AgentdbCausalRecallQuery } from './handlers/agentdb/causal-recall.js';
 import type { AgentdbEmbedQuery } from './handlers/agentdb/embed.js';
+import type {
+  AgentdbGraphEdgePayload,
+  AgentdbGraphEdgeQueryReadPayload,
+} from './handlers/agentdb/graph-edge.js';
 import type { AgentdbExperienceRecordPayload } from './handlers/agentdb/experience-record.js';
 import type { AgentdbFeedbackPayload } from './handlers/agentdb/feedback.js';
 import type { AgentdbFilteredSearchQuery } from './handlers/agentdb/filtered-search.js';
@@ -170,6 +174,14 @@ export interface ToolPayloadMap {
   readonly agentdb_hierarchical_recall: AgentdbHierarchicalRecallQuery;
   readonly agentdb_hierarchical_store: AgentdbHierarchicalStorePayload;
   readonly agentdb_gnn_stats: AgentdbGnnStatsQuery;
+  // ADR-0261 (2026-05-27): fork-native ADR-130 re-implementation. The
+  // `agentdb_graph_edge` mutation handler exposes six actions (save / load /
+  // query / reinforce / decay / sweep-internal) discriminated on
+  // `payload.action`. The sibling read-side `agentdb_graph_edge_query` is
+  // proxied to the same handler's row-fetch shape and consumed by the cli's
+  // graph-query tool. See `handlers/agentdb/graph-edge.ts` for both shapes.
+  readonly agentdb_graph_edge: AgentdbGraphEdgePayload;
+  readonly agentdb_graph_edge_query: AgentdbGraphEdgeQueryReadPayload;
   readonly agentdb_neural_patterns: AgentdbNeuralPatternsQuery;
   readonly agentdb_pattern_search: AgentdbPatternSearchQuery;
   readonly agentdb_pattern_store: AgentdbPatternStorePayload;

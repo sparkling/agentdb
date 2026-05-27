@@ -36,6 +36,13 @@ export * from './gnn-stats.js';
 // a future R7 collapse can land without re-routing. See the handler header
 // for the full audit-vs-storage rationale.
 export * from './causal-edge.js';
+// ADR-0261 (2026-05-27): fork-native ADR-130 re-implementation. Adds the
+// `agentdb_graph_edge` mutation handler — six actions (save / load / query /
+// reinforce / decay / sweep-internal) under a single dispatch surface. Edges
+// are memory-entry-row-space (FK to memory_entries.id) with confidence ×
+// exp(-decay_rate × Δdays) × weight scoring. Coexists with causal_edges per
+// ADR-0261 §1.8.
+export * from './graph-edge.js';
 
 // ADR-0181 Phase 6 wire-up — bodies port to call narrow writer capabilities
 // (ReasoningBankWriter / SkillLibraryWriter / etc.) with substrate.withWrite

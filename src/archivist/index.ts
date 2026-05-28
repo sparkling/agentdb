@@ -200,6 +200,16 @@ export type { MultiFileTarget, MultiFileWriteResult } from './substrates/fs-json
 // be called before the first dispatch (it throws once the audit fd is open).
 export { setAuditLogPath, __resetAuditWriterForTests } from './audit-writer.js';
 
+// ADR-0263 — Archivist replay-verification harness.
+// Read-only tool that re-reads the audit log and asserts the structural
+// invariants per MODULE.md §replay-verification (audit-tree depth ≤3, no
+// fanout amplification, valid state progression). Pairs with the
+// mutation-invariants surface to surface "handler recorded foo but wrote
+// bar" regressions. NOT a recovery tool — emits a ReplayReport that CI /
+// acceptance / operator scripts decide what to do with.
+export { verifyAuditLog } from './replay-verification.js';
+export type { ReplayReport, RuleVerdict, VerifyOptions } from './replay-verification.js';
+
 // ADR-0184 Wave 6: hive-mind_consensus typed-error classes exported so cli
 // (and other external callers) can `instanceof`-discriminate the typed
 // throws emitted by per-strategy handler bodies. The cli's Wave 6 flip

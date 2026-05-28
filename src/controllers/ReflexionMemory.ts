@@ -33,8 +33,10 @@ export interface Episode {
   ts?: number;
   sessionId: string;
   task: string;
+  taskType?: string; // ADR-0268: stable grouping key (deriveTaskType); falls back to `task`
   input?: string;
   output?: string;
+  code?: string; // ADR-0268: solution code, promoted into skill.code on consolidation
   critique?: string;
   reward: number;
   success: boolean;
@@ -185,9 +187,9 @@ export class ReflexionMemory {
     // Fallback to SQLite (v1 compatibility)
     const stmt = this.db.prepare(`
       INSERT INTO episodes (
-        session_id, task, input, output, critique, reward, success,
+        session_id, task, task_type, input, output, code, critique, reward, success,
         latency_ms, tokens_used, tags, metadata
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     const tags = episode.tags ? JSON.stringify(episode.tags) : null;
@@ -196,8 +198,10 @@ export class ReflexionMemory {
     const result = stmt.run(
       episode.sessionId,
       episode.task,
+      episode.taskType || null,
       episode.input || null,
       episode.output || null,
+      episode.code || null,
       episode.critique || null,
       episode.reward,
       episode.success ? 1 : 0,
@@ -1258,17 +1262,19 @@ export class ReflexionMemory {
     try {
       const stmt = this.db.prepare(`
         INSERT INTO episodes (
-          session_id, task, input, output, critique, reward, success,
+          session_id, task, task_type, input, output, code, critique, reward, success,
           latency_ms, tokens_used, tags, metadata
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
       const tags = episode.tags ? JSON.stringify(episode.tags) : null;
       const metadata = episode.metadata ? JSON.stringify(episode.metadata) : null;
       const result = stmt.run(
         episode.sessionId,
         episode.task,
+        episode.taskType ?? null,
         episode.input ?? null,
         episode.output ?? null,
+        episode.code ?? null,
         episode.critique ?? null,
         episode.reward,
         episode.success ? 1 : 0,

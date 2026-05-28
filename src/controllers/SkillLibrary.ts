@@ -205,6 +205,34 @@ export class SkillLibrary {
     return this.retrieveSkills(query);
   }
 
+  /**
+   * ADR-0268: exact-match skill lookup by stable task_type (the `skills.name`
+   * key consolidateEpisodesIntoSkills writes). O(1) indexed lookup — the
+   * deterministic loop-closer for pre-task retrieval. `deriveTaskType` MUST be
+   * identical on the write and read sides or this silently misses. Returns null
+   * when no skill has been promoted for this type yet; callers then fall back to
+   * the semantic retrieveSkills({ task: description }) path.
+   */
+  retrieveSkillByType(taskType: string): Skill | null {
+    if (!taskType) return null;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const row = this.db.prepare('SELECT * FROM skills WHERE name = ?').get(taskType) as any;
+    if (!row) return null;
+    return {
+      id: row.id,
+      name: row.name,
+      description: row.description ?? undefined,
+      signature: row.signature ? JSON.parse(row.signature) : undefined,
+      code: row.code ?? undefined,
+      successRate: row.success_rate ?? 0,
+      uses: row.uses ?? 0,
+      avgReward: row.avg_reward ?? 0,
+      avgLatencyMs: row.avg_latency_ms ?? 0,
+      createdFromEpisode: row.created_from_episode ?? undefined,
+      metadata: row.metadata ? JSON.parse(row.metadata) : undefined,
+    };
+  }
+
   async retrieveSkills(query: SkillQuery): Promise<Skill[]> {
     // v1 API compatibility: accept both 'query' and 'task'
     const task = query.task || query.query;
@@ -527,9 +555,13 @@ export class SkillLibrary {
       episode_ids: string;
     }
 
+    // ADR-0268: group on the stable task_type when present, falling back to the
+    // free-text `task` (description) for episodes written before task_type existed.
+    // Aliased AS task so the downstream candidate.task references (skill name,
+    // dedup lookup, pattern extraction) transparently use the resolved key.
     const stmt = this.db.prepare<ConsolidationCandidate>(`
       SELECT
-        task,
+        COALESCE(task_type, task) as task,
         COUNT(*) as attempt_count,
         AVG(reward) as avg_reward,
         AVG(success) as success_rate,
@@ -539,7 +571,7 @@ export class SkillLibrary {
       FROM episodes
       WHERE ts > strftime('%s', 'now') - ?
         AND reward >= ?
-      GROUP BY task
+      GROUP BY COALESCE(task_type, task)
       HAVING attempt_count >= ?
     `);
 

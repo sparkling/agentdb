@@ -228,6 +228,28 @@ export class AgentDB {
       const graphEdgesSchema = fs.readFileSync(graphEdgesSchemaPath, 'utf-8');
       this.db.exec(graphEdgesSchema);
     }
+
+    // ADR-0268: additive `episodes` columns for autonomous skill promotion.
+    // `CREATE TABLE IF NOT EXISTS` above won't add columns to an episodes table
+    // created by an earlier release, so add them idempotently here.
+    this.ensureEpisodeColumns();
+  }
+
+  /**
+   * ADR-0268: idempotently add the `task_type` / `code` columns to a
+   * pre-existing `episodes` table (fresh dbs already get them from schema.sql).
+   * Only the benign "duplicate column" (fresh db) / "no such table" (partial
+   * schema) cases are swallowed; anything else surfaces per ADR-0082 fail-loud.
+   */
+  private ensureEpisodeColumns(): void {
+    for (const col of ['task_type', 'code']) {
+      try {
+        this.db.exec(`ALTER TABLE episodes ADD COLUMN ${col} TEXT`);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (!/duplicate column name|no such table/i.test(msg)) throw err;
+      }
+    }
   }
 
   /** Exposes the underlying database connection for controller wiring in memory package. */

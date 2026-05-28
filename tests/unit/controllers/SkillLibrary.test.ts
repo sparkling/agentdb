@@ -274,6 +274,30 @@ describe('SkillLibrary', () => {
       expect(typeof result.updated).toBe('number');
     });
 
+    it('should group by task_type, not description (ADR-0268)', async () => {
+      // Three DISTINCT descriptions but one stable task_type must consolidate
+      // into a SINGLE skill named after the type — the grouping fix that makes
+      // promotion actually fire (description-keyed grouping never reaches minAttempts).
+      for (let i = 0; i < 3; i++) {
+        await reflexion.storeEpisode({
+          sessionId: `auth-${i}`,
+          task: `fix auth bug variant ${i}`,
+          taskType: 'auth',
+          output: `patched auth path ${i}`,
+          reward: 0.9,
+          success: true,
+        });
+      }
+      await skills.consolidateEpisodesIntoSkills({ minAttempts: 3, minReward: 0.7 });
+      const skill = skills.retrieveSkillByType('auth');
+      expect(skill).not.toBeNull();
+      expect(skill?.name).toBe('auth');
+    });
+
+    it('retrieveSkillByType returns null for an unpromoted type (ADR-0268)', () => {
+      expect(skills.retrieveSkillByType('never-seen-type')).toBeNull();
+    });
+
     it('should extract patterns when enabled', async () => {
       const result = await skills.consolidateEpisodesIntoSkills({
         minAttempts: 3,

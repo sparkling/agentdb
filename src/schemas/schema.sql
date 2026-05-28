@@ -23,8 +23,10 @@ CREATE TABLE IF NOT EXISTS episodes (
   ts INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
   session_id TEXT NOT NULL,
   task TEXT NOT NULL,
+  task_type TEXT, -- ADR-0268: stable grouping key (deriveTaskType); NULL falls back to `task`
   input TEXT,
   output TEXT,
+  code TEXT, -- ADR-0268: solution code, promoted into skill.code on consolidation
   critique TEXT,
   reward REAL DEFAULT 0.0,
   success BOOLEAN DEFAULT 0,

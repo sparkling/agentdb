@@ -50,6 +50,8 @@ replay-verification
 
 **replay-verification** — Replay the audit log against a freshly-initialized substrate and assert addressable-key set-equality + audit-tree depth ≤3 + no fanout amplification (per ADR-0180 §Confirmation). Tooling, not recovery: replay surfaces correctness regressions, it does not roll the live substrate back. Pairs with mutation-invariants to close the "handler recorded `foo` but wrote `bar`" gap.
 
+> **Implementation status (ADR-0263, 2026-05-28):** `verifyAuditLog` (`replay-verification.ts`) currently implements the audit-log-internal subset only — depth ≤3, no-fanout, valid state-progression, terminal-state coverage. The **addressable-key set-equality** half (open a fresh substrate, diff its key set against the audit log) is **NOT yet wired** — `verifyAuditLog` takes no substrate handle. That half is the natural companion to the RVF arm of ADR-0246 F-03-002 (pre-commit invariant + `RvfBackend.freeze()`/rollback, also pending). Until then this responsibility is partially realised: the structural checks ship; the substrate-replay does not.
+
 ## Explicitly out of scope
 
 The archivist module deliberately does NOT own:

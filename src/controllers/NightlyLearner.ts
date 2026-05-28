@@ -63,6 +63,8 @@ export interface LearnerReport {
   edgesPruned: number;
   experimentsCompleted: number;
   experimentsCreated: number;
+  skillsCreated: number;
+  skillsUpdated: number;
   avgUplift: number;
   avgConfidence: number;
   recommendations: string[];
@@ -131,6 +133,8 @@ export class NightlyLearner {
       edgesPruned: 0,
       experimentsCompleted: 0,
       experimentsCreated: 0,
+      skillsCreated: 0,
+      skillsUpdated: 0,
       avgUplift: 0,
       avgConfidence: 0,
       recommendations: []
@@ -165,18 +169,29 @@ export class NightlyLearner {
         console.log(`   ✓ Pruned ${report.edgesPruned} edges\n`);
       }
 
-      // Reflexion + skill consolidation children are reserved for future wire-up
-      // (NightlyLearner.run currently does not call reflexion.recordEpisode or
-      // skillLibrary.consolidateEpisodesIntoSkills). When those orchestration
-      // points land, mint them as `ctx.child('reflexion')` / `ctx.child('skill')`
-      // alongside the four above. Tracked under F4-2 substrate-seam wire-up.
+      // Step 5: Consolidate high-reward episodes into skills — `skill` child for
+      // the audit tree (ADR-0180 §Re-entrancy / Phase 9). Restores the episode→
+      // skill promotion lost in the ADR-0085 bridge deletion (ADR-0179 row 6):
+      // the per-feedback skills.promote() is gone; the ADR-0177 re-convergence's
+      // batch model is consolidateEpisodesIntoSkills over the episodes table.
+      // The optional `skill` ctx wraps the writes in the substrate-seam audit
+      // envelope when a caller mints a MutationContext; today callers pass none
+      // (no-op) and the writes flow through SkillLibrary's legacy SQLite path.
+      // Episode RECORDING stays a separate concern (the agentdb_reflexion-store
+      // tool path) — run() consumes episodes, it does not produce them.
+      console.log('🎓 Consolidating high-reward episodes into skills...');
+      const skillCtx = ctx?.child('skill');
+      const consolidation = await this.skillLibrary.consolidateEpisodesIntoSkills({}, skillCtx);
+      report.skillsCreated = consolidation.created;
+      report.skillsUpdated = consolidation.updated;
+      console.log(`   ✓ Created ${report.skillsCreated} skills, updated ${report.skillsUpdated}\n`);
 
-      // Step 5: Calculate statistics
+      // Step 6: Calculate statistics
       const stats = this.calculateStats();
       report.avgUplift = stats.avgUplift;
       report.avgConfidence = stats.avgConfidence;
 
-      // Step 6: Generate recommendations
+      // Step 7: Generate recommendations
       report.recommendations = this.generateRecommendations(report);
 
       report.executionTimeMs = Date.now() - startTime;
@@ -798,7 +813,9 @@ export class NightlyLearner {
     console.log(`    • Edges Discovered: ${report.edgesDiscovered}`);
     console.log(`    • Edges Pruned: ${report.edgesPruned}`);
     console.log(`    • Experiments Completed: ${report.experimentsCompleted}`);
-    console.log(`    • Experiments Created: ${report.experimentsCreated}\n`);
+    console.log(`    • Experiments Created: ${report.experimentsCreated}`);
+    console.log(`    • Skills Created: ${report.skillsCreated}`);
+    console.log(`    • Skills Updated: ${report.skillsUpdated}\n`);
     console.log('  Statistics:');
     console.log(`    • Avg Uplift: ${report.avgUplift.toFixed(3)}`);
     console.log(`    • Avg Confidence: ${report.avgConfidence.toFixed(3)}\n`);

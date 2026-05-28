@@ -9,6 +9,7 @@ import Database from 'better-sqlite3';
 import { NightlyLearner, LearnerConfig, LearnerReport } from '../../../src/controllers/NightlyLearner.js';
 import { EmbeddingService } from '../../../src/controllers/EmbeddingService.js';
 import * as fs from 'fs';
+import * as path from 'path';
 
 const TEST_DB_PATH = './tests/fixtures/test-nightly-learner.db';
 
@@ -27,56 +28,21 @@ describe('NightlyLearner', () => {
     db = new Database(TEST_DB_PATH);
     db.pragma('journal_mode = WAL');
 
-    // Create required tables
-    db.exec(`
-      CREATE TABLE IF NOT EXISTS episodes (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        session_id TEXT NOT NULL,
-        task TEXT NOT NULL,
-        output TEXT,
-        reward REAL DEFAULT 0,
-        ts INTEGER DEFAULT (strftime('%s', 'now')),
-        latency_ms INTEGER DEFAULT 0
-      );
-
-      CREATE TABLE IF NOT EXISTS causal_edges (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        from_memory_id INTEGER NOT NULL,
-        from_memory_type TEXT NOT NULL,
-        to_memory_id INTEGER NOT NULL,
-        to_memory_type TEXT NOT NULL,
-        similarity REAL NOT NULL,
-        uplift REAL,
-        confidence REAL NOT NULL,
-        sample_size INTEGER DEFAULT 1,
-        mechanism TEXT,
-        evidence_ids TEXT,
-        metadata TEXT,
-        created_at INTEGER DEFAULT (strftime('%s', 'now'))
-      );
-
-      CREATE TABLE IF NOT EXISTS causal_experiments (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        name TEXT NOT NULL,
-        hypothesis TEXT,
-        treatment_id INTEGER,
-        treatment_type TEXT,
-        control_id INTEGER,
-        control_type TEXT,
-        start_time INTEGER,
-        end_time INTEGER,
-        sample_size INTEGER DEFAULT 0,
-        status TEXT DEFAULT 'pending',
-        uplift REAL,
-        confidence REAL,
-        metadata TEXT
-      );
-
-      CREATE TABLE IF NOT EXISTS episode_embeddings (
-        episode_id INTEGER PRIMARY KEY,
-        embedding BLOB NOT NULL
-      );
-    `);
+    // Load the real production schemas (schema.sql + frontier-schema.sql) rather
+    // than a hand-rolled minimal subset. NightlyLearner.run() now drives
+    // SkillLibrary.consolidateEpisodesIntoSkills (ADR-0179 row 6 wire-up), which
+    // reads episodes.success and writes skills/skill_embeddings — tables/columns
+    // a minimal schema omits (episodes here previously had no `success` column,
+    // and no skills tables existed). Mirrors SkillLibrary.test.ts so the test
+    // exercises the same schema production runs against.
+    const schemaPath = path.join(__dirname, '../../../src/schemas/schema.sql');
+    if (fs.existsSync(schemaPath)) {
+      db.exec(fs.readFileSync(schemaPath, 'utf-8'));
+    }
+    const frontierSchemaPath = path.join(__dirname, '../../../src/schemas/frontier-schema.sql');
+    if (fs.existsSync(frontierSchemaPath)) {
+      db.exec(fs.readFileSync(frontierSchemaPath, 'utf-8'));
+    }
 
     // Initialize embedding service
     embedder = new EmbeddingService({
@@ -150,6 +116,8 @@ describe('NightlyLearner', () => {
       expect(report.edgesPruned).toBeGreaterThanOrEqual(0);
       expect(report.experimentsCompleted).toBeGreaterThanOrEqual(0);
       expect(report.experimentsCreated).toBeGreaterThanOrEqual(0);
+      expect(report.skillsCreated).toBeGreaterThanOrEqual(0);
+      expect(report.skillsUpdated).toBeGreaterThanOrEqual(0);
       expect(typeof report.avgUplift).toBe('number');
       expect(typeof report.avgConfidence).toBe('number');
       expect(Array.isArray(report.recommendations)).toBe(true);
@@ -237,6 +205,27 @@ describe('NightlyLearner', () => {
       expect(Array.isArray(report.recommendations)).toBe(true);
       // Should have at least one recommendation when no edges discovered
       expect(report.recommendations.length).toBeGreaterThan(0);
+    });
+
+    it('should consolidate high-reward episodes into skills (ADR-0179 row 6)', async () => {
+      // Seed >= minAttempts (3) recent episodes for one task, all reward >= minReward
+      // (0.7). consolidateEpisodesIntoSkills groups episodes by task with
+      // HAVING COUNT(*) >= 3 AND reward >= 0.7, then promotes each qualifying task
+      // to a skill row named after the task. This is the episode->skill promotion
+      // path lost in the ADR-0085 bridge deletion, now wired into run().
+      const now = Date.now() / 1000;
+      for (let i = 0; i < 4; i++) {
+        db.prepare(`
+          INSERT INTO episodes (session_id, task, output, reward, success, ts)
+          VALUES (?, ?, ?, ?, ?, ?)
+        `).run('sess-skill', 'deploy-release', `out_${i}`, 0.9, 1, now - i * 60);
+      }
+
+      const report = await learner.run();
+
+      expect(report.skillsCreated).toBeGreaterThanOrEqual(1);
+      const skill = db.prepare('SELECT * FROM skills WHERE name = ?').get('deploy-release');
+      expect(skill).toBeDefined();
     });
   });
 

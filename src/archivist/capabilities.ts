@@ -284,6 +284,9 @@ export interface ReflexionStoreWriter {
   storeEpisode(input: {
     readonly sessionId: string;
     readonly task: string;
+    readonly taskType?: string; // ADR-0268: stable grouping key for skill promotion
+    readonly output?: string; // ADR-0268: episode output (pattern extraction + skill desc)
+    readonly code?: string; // ADR-0268: solution code, promoted into skill.code
     readonly reward: number;
     readonly success: boolean;
   }): Promise<ReflexionWriteResult | null>;

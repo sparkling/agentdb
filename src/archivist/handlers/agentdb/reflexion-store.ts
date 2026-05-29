@@ -38,6 +38,9 @@ import { reflexionStoreInvariants } from '../../invariants/agentdb/reflexion-sto
 export interface AgentdbReflexionStorePayload {
   readonly session_id: string;
   readonly task: string;
+  readonly task_type?: string; // ADR-0268: stable grouping key for skill promotion
+  readonly output?: string; // ADR-0268: episode output for pattern extraction
+  readonly code?: string; // ADR-0268: solution code, promoted into skill.code
   readonly reward: number;
   readonly success: boolean;
 }
@@ -71,6 +74,9 @@ export const storeReflexionHandler: GuardedWrite<AgentdbReflexionStorePayload> =
         const result = await writer.storeEpisode({
           sessionId: payload.session_id,
           task: payload.task,
+          taskType: payload.task_type,
+          output: payload.output,
+          code: payload.code,
           reward: payload.reward,
           success: payload.success,
         });

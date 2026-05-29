@@ -1,3 +1,11 @@
+> **🍴 `@sparkleideas/agentdb` — the Sparkling fork**
+>
+> This is **[`@sparkleideas/agentdb`](https://github.com/sparkling/agentdb)**, the Sparkling-maintained fork of **[`ruvnet/agentdb`](https://github.com/ruvnet/agentdb)** — rebuilt from source with bug fixes and current upstream commits.
+>
+> **Install:** `npm install @sparkleideas/agentdb`
+> **Coming from `agentdb`?** It's a drop-in replacement — swap the package name.
+> **Issues & support:** <https://github.com/sparkling/agentdb/issues>
+
 <div align="center">
 
 [![npm version](https://img.shields.io/npm/v/agentdb.svg?style=for-the-badge&logo=npm&color=cb3837)](https://www.npmjs.com/package/agentdb)

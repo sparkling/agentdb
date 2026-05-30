@@ -479,7 +479,16 @@ export class HierarchicalMemory {
   }
 
   /**
-   * Query records by content path/glob pattern.
+   * Query records by their stored key/path glob pattern.
+   *
+   * The logical key/path supplied at write time (e.g. `adr/ADR-0271`) is
+   * persisted in `metadata.key` by the store path (cli `hierarchicalStore`
+   * sets `metadata: { key }` + `tags: [key]`). The glob therefore matches the
+   * extracted key (`json_extract(metadata,'$.key')`), NOT the `content` column
+   * (the value blob) and NOT the synthetic row `id` (`mem-…`). Globbing
+   * `content` was the original defect (ADR-0176 §Confirmation): it broke the
+   * Phase-3 acceptance "`adr/*` returns all ADR records" because the path was
+   * never written into `content`.
    *
    * Glob → SQL LIKE translation: `*` → `%`, `?` → `_`. SQL metacharacters
    * `%` and `_` in the input are escaped first so they are matched literally.
@@ -501,7 +510,8 @@ export class HierarchicalMemory {
       .replace(/\?/g, '_');
 
     const params: unknown[] = [likePattern];
-    let sql = `SELECT * FROM hierarchical_memory WHERE content LIKE ? ESCAPE '\\'`;
+    // Glob the logical key/path (stored in metadata.key), not the content blob.
+    let sql = `SELECT * FROM hierarchical_memory WHERE json_extract(metadata, '$.key') LIKE ? ESCAPE '\\'`;
 
     if (options?.tier) {
       sql += ` AND tier = ?`;

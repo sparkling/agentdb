@@ -2246,7 +2246,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const includeCausal = (args?.include_causal as boolean) !== false;
         const rewardFunction = (args?.reward_function as any) || 'standard';
 
-        const reward = learningSystem.calculateReward({
+        const reward = await learningSystem.calculateReward({
           episodeId,
           success,
           targetAchieved,

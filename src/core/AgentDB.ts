@@ -315,11 +315,6 @@ export class AgentDB {
     }
   }
 
-  // Expose database for advanced usage
-  get database(): IDatabaseConnection {
-    return this.db;
-  }
-
   // Check if using WASM backend
   get isWasm(): boolean {
     return this.usingWasm;

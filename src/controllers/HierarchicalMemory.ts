@@ -336,7 +336,7 @@ export class HierarchicalMemory {
     const queryEmbedding = query.queryEmbedding || await this.embedder.embed(query.query);
 
     // Determine which tiers to search
-    const tiers = Array.isArray(query.tier)
+    const tiers: MemoryTier[] = Array.isArray(query.tier)
       ? query.tier
       : query.tier
         ? [query.tier]

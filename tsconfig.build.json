@@ -1,0 +1,27 @@
+{
+  // ADR-0272: type-check gate scoped to SHIPPED code only.
+  // `npm run build` (tsconfig.json) keeps emitting dist/ despite dev-dir errors
+  // (noEmitOnError stays false); THIS config is what CI gates on:
+  //   tsc --noEmit -p tsconfig.build.json   (must exit 0)
+  // Scope = src/ minus src/examples/** (Deno/CF Worker demos needing bespoke
+  // ambient libs). benchmarks/, examples/, tests/ stay advisory (not gated).
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true
+  },
+  "include": [
+    "src/**/*"
+  ],
+  "exclude": [
+    "node_modules",
+    "dist",
+    "**/*.test.ts",
+    "**/*.spec.ts",
+    "src/examples/**",
+    "src/middleware/**",
+    "src/db/migrations/**",
+    "src/utils/crypto.utils.ts",
+    "src/services/token.service.ts",
+    "src/services/auth.service.ts"
+  ]
+}

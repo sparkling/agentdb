@@ -118,7 +118,11 @@ export class SyncCoordinator {
    * §Bulk-write mode + Phase 9 Scenario B).
    */
   async sync(
-    ctx: MutationContext,
+    // Optional: the QUIC root path receives an archivist-delivered root context
+    // (ADR-0180); the internal auto-sync timer (startAutoSync) has none and runs
+    // context-less — applyChanges/saveSyncState already accept `ctx | undefined`
+    // and guard with `ctx?.bulk`. Stores cannot mint their own MutationContext.
+    ctx?: MutationContext,
     onProgress?: (progress: SyncProgress) => void
   ): Promise<SyncReport> {
     if (this.isSyncing) {

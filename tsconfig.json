@@ -28,19 +28,24 @@
     "noFallthroughCasesInSwitch": true,
     "types": ["node"]
   },
+  // ADR-0279: the package build compiles the SHIPPED code only (src/ → dist/src/,
+  // the sole `files` entry). benchmarks/, examples/, simulation/ and tests/
+  // compile to dist/ paths that are never published, so including them only
+  // produced 99 advisory errors (Deno/CF-Worker demos, `../dist` imports, stale
+  // helpers) while `tsc` still emitted (noEmitOnError=false) — emit-despite-
+  // errors that the `&& copy:schemas` chain then tripped over. Scoping to src/
+  // makes `tsc` exit 0 honestly (build == ADR-0272 gate == shipped scope) so no
+  // `--noCheck` squelch is needed in the release. Tests are type-checked by
+  // tsconfig.test.json; benchmarks/examples remain runnable, just not gated.
   "include": [
-    "src/**/*",
-    "simulation/**/*",
-    "simulation/scenarios/**/*",
-    "benchmarks/**/*",
-    "examples/**/*",
-    "tests/**/*"
+    "src/**/*"
   ],
   "exclude": [
     "node_modules",
     "dist",
     "**/*.test.ts",
     "**/*.spec.ts",
+    "src/examples/**",
     "src/middleware/**",
     "src/db/migrations/**",
     "src/utils/crypto.utils.ts",

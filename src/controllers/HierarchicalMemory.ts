@@ -261,6 +261,16 @@ export class HierarchicalMemory {
       metadata: options?.metadata,
     };
 
+    // ADR-0281: keyed upsert — the upstream contract is one entry PER logical
+    // key. A re-store of the same key REPLACES its entry rather than appending a
+    // dup (the mem-* row id is internal; metadata.key is the identity). Keyless
+    // stores (no metadata.key — e.g. episodic experience writes) keep append
+    // semantics. No tier filter → one entry per key regardless of tier.
+    const logicalKey = options?.metadata?.key;
+    if (typeof logicalKey === 'string' && logicalKey) {
+      await this.delete(logicalKey);
+    }
+
     // Store in database
     const stmt = this.db.prepare(`
       INSERT INTO hierarchical_memory (
@@ -688,6 +698,26 @@ export class HierarchicalMemory {
         consolidated: newTier === 'semantic',
       });
     }
+  }
+
+  /**
+   * ADR-0281: delete hierarchical entries by key — the upstream-documented
+   * `agentdb_hierarchical_delete` contract ("Remove hierarchical entry by key").
+   * Matches the raw row id OR the logical key (metadata.key, set by the MCP store
+   * path). Optional tier filter. Reuses forget() per match so SQL + caches +
+   * vectorBackend + the ADR-0166 `hmem_vec` mirror all stay in sync. Returns the
+   * count of entries deleted.
+   */
+  async delete(key: string, opts?: { tier?: MemoryTier }): Promise<number> {
+    if (!key || typeof key !== 'string') return 0;
+    const tierClause = opts?.tier ? ' AND tier = ?' : '';
+    const params = opts?.tier ? [key, key, opts.tier] : [key, key];
+    const rows = this.db.prepare(
+      `SELECT id FROM hierarchical_memory
+       WHERE (id = ? OR json_extract(metadata, '$.key') = ?)${tierClause}`
+    ).all(...params) as Array<{ id: string }>;
+    for (const r of rows) await this.forget(r.id);
+    return rows.length;
   }
 
   /**

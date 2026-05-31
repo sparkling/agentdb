@@ -383,11 +383,14 @@ describe('HierarchicalMemory', () => {
   });
 
   describe('query (path/glob pattern enumeration)', () => {
+    // query() globs the logical key/path in metadata.key (ADR-0176 Phase 3 —
+    // globbing content was the original defect), so the fixtures must write the
+    // path as the key, mirroring the real store path (metadata: { key }).
     beforeEach(async () => {
-      await memory.store('src/auth/login.ts', 0.5, 'working');
-      await memory.store('src/auth/logout.ts', 0.5, 'working');
-      await memory.store('src/db/index.ts', 0.5, 'episodic');
-      await memory.store('docs/readme.md', 0.5, 'semantic');
+      await memory.store('src/auth/login.ts', 0.5, 'working', { metadata: { key: 'src/auth/login.ts' } });
+      await memory.store('src/auth/logout.ts', 0.5, 'working', { metadata: { key: 'src/auth/logout.ts' } });
+      await memory.store('src/db/index.ts', 0.5, 'episodic', { metadata: { key: 'src/db/index.ts' } });
+      await memory.store('docs/readme.md', 0.5, 'semantic', { metadata: { key: 'docs/readme.md' } });
     });
 
     it('should translate * glob to SQL % wildcard', async () => {
@@ -427,7 +430,7 @@ describe('HierarchicalMemory', () => {
     });
 
     it('should treat literal % in the pattern as a literal, not a wildcard', async () => {
-      await memory.store('100%-coverage', 0.5, 'working');
+      await memory.store('100%-coverage', 0.5, 'working', { metadata: { key: '100%-coverage' } });
       // A bare '%' would match everything if not escaped; the escaped query
       // should match ONLY the literal-percent row.
       const results = await memory.query('100%-coverage');
@@ -437,6 +440,92 @@ describe('HierarchicalMemory', () => {
     it('should return empty array for a non-matching pattern', async () => {
       const results = await memory.query('nonexistent/path/*');
       expect(results).toEqual([]);
+    });
+  });
+
+  // ADR-0281: keyed upsert (one entry per logical key) + delete-by-key. The
+  // logical key is supplied via options.metadata.key (the MCP store path sets
+  // it). Keyless stores keep append semantics.
+  describe('keyed upsert + delete-by-key (ADR-0281)', () => {
+    const keyOf = (key: string) =>
+      db.prepare(
+        `SELECT * FROM hierarchical_memory WHERE json_extract(metadata, '$.key') = ?`
+      ).all(key) as any[];
+
+    it('should upsert a keyed store — re-storing the same key replaces, not appends', async () => {
+      await memory.store('first value', 0.5, 'semantic', { metadata: { key: 'adr/X' } });
+      await memory.store('second value', 0.5, 'semantic', { metadata: { key: 'adr/X' } });
+
+      const rows = keyOf('adr/X');
+      expect(rows.length).toBe(1);
+      expect(rows[0].content).toBe('second value'); // latest write wins
+    });
+
+    it('should upsert across tiers — a key re-stored in a new tier moves, not duplicates', async () => {
+      await memory.store('tier move', 0.5, 'working', { metadata: { key: 'adr/T' } });
+      await memory.store('tier move', 0.5, 'semantic', { metadata: { key: 'adr/T' } });
+
+      const rows = keyOf('adr/T');
+      expect(rows.length).toBe(1);
+      expect(rows[0].tier).toBe('semantic');
+    });
+
+    it('should delete by logical key and report the count removed', async () => {
+      await memory.store('to be deleted', 0.5, 'semantic', { metadata: { key: 'adr/Y' } });
+
+      const deleted = await memory.delete('adr/Y');
+      expect(deleted).toBe(1);
+      expect(keyOf('adr/Y').length).toBe(0);
+      // read-side (query) also sees it gone — confirms caches stay in sync
+      expect(await memory.query('adr/Y')).toEqual([]);
+    });
+
+    it('should delete by raw mem-* id', async () => {
+      const id = await memory.store('delete by id', 0.5, 'working', { metadata: { key: 'adr/Z' } });
+      expect(id).toMatch(/^mem-/);
+
+      const deleted = await memory.delete(id);
+      expect(deleted).toBe(1);
+      expect(db.prepare('SELECT id FROM hierarchical_memory WHERE id = ?').get(id)).toBeUndefined();
+    });
+
+    it('should round-trip a slash-containing key through store → query → delete', async () => {
+      await memory.store('slashed key value', 0.5, 'semantic', { metadata: { key: 'adr/ADR-0281' } });
+      expect((await memory.query('adr/ADR-0281')).length).toBe(1);
+
+      const deleted = await memory.delete('adr/ADR-0281');
+      expect(deleted).toBe(1);
+      expect(await memory.query('adr/ADR-0281')).toEqual([]);
+    });
+
+    it('should restrict delete to a tier when the tier option is supplied', async () => {
+      await memory.store('working entry', 0.5, 'working', { metadata: { key: 'adr/Tier' } });
+
+      // Wrong tier → no match, nothing removed.
+      expect(await memory.delete('adr/Tier', { tier: 'semantic' })).toBe(0);
+      expect(keyOf('adr/Tier').length).toBe(1);
+
+      // Correct tier → removed.
+      expect(await memory.delete('adr/Tier', { tier: 'working' })).toBe(1);
+      expect(keyOf('adr/Tier').length).toBe(0);
+    });
+
+    it('should return 0 when deleting a non-existent key', async () => {
+      expect(await memory.delete('adr/does-not-exist')).toBe(0);
+    });
+
+    it('should return 0 for an empty key', async () => {
+      expect(await memory.delete('')).toBe(0);
+    });
+
+    it('should keep append semantics for keyless stores (no metadata.key)', async () => {
+      await memory.store('keyless one', 0.5, 'working');
+      await memory.store('keyless two', 0.5, 'working');
+      // metadata present but no key → still append
+      await memory.store('meta but no key', 0.5, 'working', { metadata: { source: 'test' } });
+
+      const rows = db.prepare('SELECT id FROM hierarchical_memory').all() as any[];
+      expect(rows.length).toBe(3);
     });
   });
 

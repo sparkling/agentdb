@@ -425,6 +425,60 @@ export class CausalMemoryGraph {
   }
 
   /**
+   * Query inbound causal edges — the reverse of {@link queryCausalEffects}.
+   *
+   * `queryCausalEffects` walks OUTBOUND edges (`from_memory_id = X`): "what does
+   * X cause?". This walks INBOUND edges (`to_memory_id = X`): "what causes X?" —
+   * the "all causes" direction. `interventionMemoryId`/`interventionMemoryType`
+   * name the EFFECT node here (the shared `CausalQuery` field names are reused so
+   * both directions take an identical query struct).
+   *
+   * ADR-0276: backs the cli `effect=` read arm. Before this, `effect=` had no
+   * controller method (`getCausalChain` is point-to-point, not "all inbound"),
+   * so `effect=` queries fell back to the KV `causal-edges` namespace
+   * (`router-fallback`). This is the reverse query that lets the controller
+   * answer them. Same NULL-tolerant uplift predicate as R3: ADR edges carry
+   * `uplift IS NULL` (no experiment behind a declared dependency) and must not be
+   * excluded; uplift-bearing learned edges still pass via `ABS(uplift) >= ?`.
+   */
+  queryCausalCauses(query: CausalQuery): CausalEdge[] {
+    const {
+      interventionMemoryId,
+      interventionMemoryType,
+      outcomeMemoryId,
+      minConfidence = 0.5,
+      minUplift = 0.0
+    } = query;
+
+    let sql = `
+      SELECT * FROM causal_edges
+      WHERE to_memory_id = ?
+        AND to_memory_type = ?
+        AND confidence >= ?
+        AND (uplift IS NULL OR ABS(uplift) >= ?)
+    `;
+
+    const params: any[] = [
+      interventionMemoryId,
+      interventionMemoryType,
+      minConfidence,
+      minUplift
+    ];
+
+    // `outcomeMemoryId` scopes to a specific SOURCE (the cause) in this direction.
+    if (outcomeMemoryId) {
+      sql += ' AND from_memory_id = ?';
+      params.push(outcomeMemoryId);
+    }
+
+    sql += ' ORDER BY ABS(uplift) * confidence DESC';
+
+    const rows = this.db.prepare<DatabaseRows.CausalEdge>(sql).all(...params);
+
+    return rows.map(row => this.rowToCausalEdge(row));
+  }
+
+  /**
    * Delete a causal node and (optionally) its incident edges.
    *
    * ADR-0276 R5: the cli causal-node-delete bridge calls this method (falling

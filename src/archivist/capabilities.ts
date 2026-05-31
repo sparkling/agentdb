@@ -289,6 +289,8 @@ export interface ReflexionStoreWriter {
     readonly code?: string; // ADR-0268: solution code, promoted into skill.code
     readonly reward: number;
     readonly success: boolean;
+    readonly ts?: number; // ADR-0277: explicit episode timestamp (seconds) for
+    // temporally-ordered causal pair-discovery; defaults to now when omitted.
   }): Promise<ReflexionWriteResult | null>;
 }
 

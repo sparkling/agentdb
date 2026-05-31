@@ -187,15 +187,21 @@ export class ReflexionMemory {
     // Fallback to SQLite (v1 compatibility)
     const stmt = this.db.prepare(`
       INSERT INTO episodes (
-        session_id, task, task_type, input, output, code, critique, reward, success,
+        ts, session_id, task, task_type, input, output, code, critique, reward, success,
         latency_ms, tokens_used, tags, metadata
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     const tags = episode.tags ? JSON.stringify(episode.tags) : null;
     const metadata = episode.metadata ? JSON.stringify(episode.metadata) : null;
 
     const result = stmt.run(
+      // ADR-0277: write an explicit ts (seconds) when the caller provides one so
+      // tests/replay/backfill can control episode time; else default to now.
+      // NightlyLearner causal pair-discovery requires temporally-ordered
+      // episodes (e2.ts > e1.ts) — without distinct ts, fast writes share the
+      // strftime('now') default and form zero candidate pairs.
+      episode.ts ?? Math.floor(Date.now() / 1000),
       episode.sessionId,
       episode.task,
       episode.taskType || null,

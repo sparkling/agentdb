@@ -43,6 +43,10 @@ export interface AgentdbReflexionStorePayload {
   readonly code?: string; // ADR-0268: solution code, promoted into skill.code
   readonly reward: number;
   readonly success: boolean;
+  readonly ts?: number; // ADR-0277: episode timestamp (seconds). Lets callers
+  // (tests / replay / backfill) control episode time. NightlyLearner's causal
+  // pair-discovery requires temporally-ordered episodes (e2.ts > e1.ts); without
+  // an explicit ts, fast writes share strftime('now') and form no pairs.
 }
 
 const STORE_ID = 'agentdb_reflexion_store' as StoreId;
@@ -79,6 +83,7 @@ export const storeReflexionHandler: GuardedWrite<AgentdbReflexionStorePayload> =
           code: payload.code,
           reward: payload.reward,
           success: payload.success,
+          ts: payload.ts, // ADR-0277: forward explicit episode timestamp
         });
 
         if (result && result.success) return;

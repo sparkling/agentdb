@@ -37,9 +37,11 @@ export interface CausalMemoryGraphConfig {
 export interface CausalEdge {
   id?: number;
   fromMemoryId: number;
-  fromMemoryType: 'episode' | 'skill' | 'note' | 'fact';
+  // ADR-0276 R4: 'adr' added so ADR causal edges share the CausalMemoryGraph.
+  // Type-only widening; the schema TEXT column has no CHECK, so no DB migration.
+  fromMemoryType: 'episode' | 'skill' | 'note' | 'fact' | 'adr';
   toMemoryId: number;
-  toMemoryType: 'episode' | 'skill' | 'note' | 'fact';
+  toMemoryType: 'episode' | 'skill' | 'note' | 'fact' | 'adr';
 
   // Metrics
   similarity: number;
@@ -396,8 +398,12 @@ export class CausalMemoryGraph {
       WHERE from_memory_id = ?
         AND from_memory_type = ?
         AND confidence >= ?
-        AND ABS(uplift) >= ?
+        AND (uplift IS NULL OR ABS(uplift) >= ?)
     `;
+    // ADR-0276 R3: NULL-tolerant uplift filter. ADR causal edges carry no uplift
+    // (uplift IS NULL); the prior `ABS(uplift) >= ?` evaluated to NULL → excluded
+    // every uplift-less edge. Uplift-bearing learned edges (ADR-0277) still pass
+    // via the ABS(uplift) >= ? branch.
 
     const params: any[] = [
       interventionMemoryId,
@@ -416,6 +422,58 @@ export class CausalMemoryGraph {
     const rows = this.db.prepare<DatabaseRows.CausalEdge>(sql).all(...params);
 
     return rows.map(row => this.rowToCausalEdge(row));
+  }
+
+  /**
+   * Delete a causal node and (optionally) its incident edges.
+   *
+   * ADR-0276 R5: the cli causal-node-delete bridge calls this method (falling
+   * back to `native-unsupported` when it is absent). Edges are stored in the
+   * SQLite `causal_edges` table; this removes every edge touching `nodeId`.
+   * Node ids are numeric here — the cli is responsible for mapping its string
+   * ADR ids to the numeric `memory_id` before invoking the bridge.
+   *
+   * @param nodeId - Numeric memory id of the node to delete
+   * @param opts.cascade - When true, also delete incident causal edges
+   * @returns deletedEdges = number of edges removed (0 when cascade is false)
+   */
+  deleteNode(nodeId: number, opts?: { cascade?: boolean }): { deletedNode: boolean; deletedEdges: number } {
+    let deletedEdges = 0;
+
+    if (opts?.cascade) {
+      const result = this.db.prepare(
+        'DELETE FROM causal_edges WHERE from_memory_id = ? OR to_memory_id = ?'
+      ).run(nodeId, nodeId);
+      deletedEdges = result.changes;
+    }
+
+    // There is no standalone node row in `causal_edges` (nodes are implicit edge
+    // endpoints), so a cascade delete that removed incident edges is treated as
+    // having deleted the node from the causal graph.
+    return { deletedNode: deletedEdges > 0, deletedEdges };
+  }
+
+  /**
+   * Delete causal edge(s) between two endpoints.
+   *
+   * ADR-0276 R5: backs the cli causal-edge-delete bridge. When `relation` is
+   * supplied it is matched against the edge `mechanism` column.
+   *
+   * @param fromId - Numeric memory id of the edge source
+   * @param toId - Numeric memory id of the edge target
+   * @param relation - Optional mechanism to scope the delete
+   * @returns deletedEdges = number of edges removed
+   */
+  deleteEdgesByEndpoints(fromId: number, toId: number, relation?: string): { deletedEdges: number } {
+    const result = relation === undefined
+      ? this.db.prepare(
+          'DELETE FROM causal_edges WHERE from_memory_id = ? AND to_memory_id = ?'
+        ).run(fromId, toId)
+      : this.db.prepare(
+          'DELETE FROM causal_edges WHERE from_memory_id = ? AND to_memory_id = ? AND mechanism = ?'
+        ).run(fromId, toId, relation);
+
+    return { deletedEdges: result.changes };
   }
 
   /**
@@ -824,9 +882,9 @@ export class CausalMemoryGraph {
     return {
       id: row.id,
       fromMemoryId: row.from_memory_id,
-      fromMemoryType: row.from_memory_type as 'episode' | 'skill' | 'note' | 'fact',
+      fromMemoryType: row.from_memory_type as 'episode' | 'skill' | 'note' | 'fact' | 'adr', // ADR-0276 R4
       toMemoryId: row.to_memory_id,
-      toMemoryType: row.to_memory_type as 'episode' | 'skill' | 'note' | 'fact',
+      toMemoryType: row.to_memory_type as 'episode' | 'skill' | 'note' | 'fact' | 'adr', // ADR-0276 R4
       similarity: row.similarity,
       uplift: row.uplift ?? undefined,
       confidence: row.confidence,

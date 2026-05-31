@@ -14,7 +14,7 @@
 CREATE TABLE IF NOT EXISTS causal_edges (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   from_memory_id INTEGER NOT NULL,
-  from_memory_type TEXT NOT NULL, -- 'episode', 'skill', 'note', 'fact'
+  from_memory_type TEXT NOT NULL, -- 'episode', 'skill', 'note', 'fact', 'adr' (ADR-0276 R4)
   to_memory_id INTEGER NOT NULL,
   to_memory_type TEXT NOT NULL,
 
@@ -47,6 +47,16 @@ CREATE INDEX IF NOT EXISTS idx_causal_edges_from ON causal_edges(from_memory_id,
 CREATE INDEX IF NOT EXISTS idx_causal_edges_to ON causal_edges(to_memory_id, to_memory_type);
 CREATE INDEX IF NOT EXISTS idx_causal_edges_uplift ON causal_edges(uplift DESC);
 CREATE INDEX IF NOT EXISTS idx_causal_edges_confidence ON causal_edges(confidence DESC);
+
+-- ADR id-allocator: maps a stable ADR id (e.g. 'ADR-0276') to the numeric
+-- memory_id used as a causal-graph node endpoint. Allocated cli-side (ADR-0276
+-- R1); created here so AgentDB.loadSchemas() provisions it in the shared
+-- .swarm/memory.db. memory_id is UNIQUE to prevent two ADRs colliding on one id.
+CREATE TABLE IF NOT EXISTS adr_node_ids (
+  adr_id TEXT PRIMARY KEY,
+  memory_id INTEGER NOT NULL UNIQUE
+);
+CREATE INDEX IF NOT EXISTS idx_adr_node_ids_memid ON adr_node_ids(memory_id);
 
 -- Causal experiments (A/B tests for uplift estimation)
 CREATE TABLE IF NOT EXISTS causal_experiments (

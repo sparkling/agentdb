@@ -56,6 +56,22 @@ export interface LearnerConfig {
   flashConfig?: Partial<FlashAttentionConfig>;
 }
 
+/**
+ * ADR-0279: action-value — E[reward | action, task_type] over the episode
+ * stream. `action` is the model/agent actually used (episodes.action). `uplift`
+ * is the de-confounded signal routers consume: the action's mean reward minus
+ * the task-type baseline (the mean over ALL actions for that task_type).
+ */
+export interface ActionValue {
+  action: string;
+  taskType: string | null;
+  meanReward: number;     // E[reward | action, task_type]
+  samples: number;
+  baselineReward: number; // E[reward | task_type] over all actions of that type
+  uplift: number;         // meanReward − baselineReward
+  confidence: number;     // min(samples / minSampleSize, 1) — ramps with evidence
+}
+
 export interface LearnerReport {
   timestamp: number;
   executionTimeMs: number;
@@ -68,6 +84,7 @@ export interface LearnerReport {
   avgUplift: number;
   avgConfidence: number;
   recommendations: string[];
+  actionValues?: ActionValue[]; // ADR-0279: E[reward | action, task_type] snapshot
 }
 
 export class NightlyLearner {
@@ -191,6 +208,10 @@ export class NightlyLearner {
       report.avgUplift = stats.avgUplift;
       report.avgConfidence = stats.avgConfidence;
 
+      // Step 6b (ADR-0279): snapshot E[reward | action, task_type] so routers
+      // can consume action-value uplift (model/agent) from the same loop.
+      report.actionValues = this.computeActionValues();
+
       // Step 7: Generate recommendations
       report.recommendations = this.generateRecommendations(report);
 
@@ -204,6 +225,59 @@ export class NightlyLearner {
       console.error('❌ Nightly Learner Failed:', error);
       throw error;
     }
+  }
+
+  /**
+   * ADR-0279: E[reward | action, task_type] over the episode stream — the
+   * action-value the routers consume (model-uplift for the ModelRouter,
+   * agent-uplift for default routing). `action` (episodes.action) is the
+   * model/agent actually used. Unlike the marginal E[reward | model] the
+   * ModelRouter learns from its own loop, this is keyed by the action AND the
+   * task-type, and reports `uplift` = mean(action, type) − baseline(type) (the
+   * de-confounded "what does doing X cause for THIS kind of task").
+   *
+   * Rows below `minSamples` (default 1) are dropped; `confidence` ramps to 1 at
+   * the learner's `minSampleSize`. Optional `taskType` filters to one type.
+   */
+  computeActionValues(opts?: { taskType?: string; minSamples?: number }): ActionValue[] {
+    const minSamples = Math.max(1, opts?.minSamples ?? 1);
+    const typeFilter = opts?.taskType ? 'AND task_type = ?' : '';
+
+    // Per-task-type baseline: mean reward over ALL actioned episodes of that type.
+    const baseParams = opts?.taskType ? [opts.taskType] : [];
+    const baseRows = this.db.prepare(`
+      SELECT COALESCE(task_type, '') AS tt, AVG(reward) AS base
+      FROM episodes
+      WHERE action IS NOT NULL ${typeFilter}
+      GROUP BY COALESCE(task_type, '')
+    `).all(...baseParams) as Array<{ tt: string; base: number }>;
+    const baseline = new Map<string, number>();
+    for (const r of baseRows) baseline.set(r.tt, r.base);
+
+    // Per-(action, task_type) value.
+    const valueParams = opts?.taskType ? [opts.taskType, minSamples] : [minSamples];
+    const rows = this.db.prepare(`
+      SELECT action, COALESCE(task_type, '') AS tt, AVG(reward) AS mean, COUNT(*) AS n
+      FROM episodes
+      WHERE action IS NOT NULL ${typeFilter}
+      GROUP BY action, COALESCE(task_type, '')
+      HAVING COUNT(*) >= ?
+      ORDER BY mean DESC
+    `).all(...valueParams) as Array<{ action: string; tt: string; mean: number; n: number }>;
+
+    const minSampleSize = this.config.minSampleSize || 30;
+    return rows.map((r) => {
+      const base = baseline.get(r.tt) ?? r.mean;
+      return {
+        action: r.action,
+        taskType: r.tt === '' ? null : r.tt,
+        meanReward: r.mean,
+        samples: r.n,
+        baselineReward: base,
+        uplift: r.mean - base,
+        confidence: Math.min(r.n / minSampleSize, 1),
+      };
+    });
   }
 
   /**

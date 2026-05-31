@@ -291,6 +291,8 @@ export interface ReflexionStoreWriter {
     readonly success: boolean;
     readonly ts?: number; // ADR-0277: explicit episode timestamp (seconds) for
     // temporally-ordered causal pair-discovery; defaults to now when omitted.
+    readonly action?: string; // ADR-0279: the action taken (model/agent used) —
+    // the dimension NightlyLearner aggregates E[reward | action, task_type] over.
   }): Promise<ReflexionWriteResult | null>;
 }
 

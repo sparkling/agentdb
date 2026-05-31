@@ -236,13 +236,14 @@ export class AgentDB {
   }
 
   /**
-   * ADR-0268: idempotently add the `task_type` / `code` columns to a
-   * pre-existing `episodes` table (fresh dbs already get them from schema.sql).
-   * Only the benign "duplicate column" (fresh db) / "no such table" (partial
-   * schema) cases are swallowed; anything else surfaces per ADR-0082 fail-loud.
+   * ADR-0268/0279: idempotently add the `task_type` / `code` / `action` columns
+   * to a pre-existing `episodes` table (fresh dbs already get them from
+   * schema.sql). Only the benign "duplicate column" (fresh db) / "no such table"
+   * (partial schema) cases are swallowed; anything else surfaces per ADR-0082
+   * fail-loud.
    */
   private ensureEpisodeColumns(): void {
-    for (const col of ['task_type', 'code']) {
+    for (const col of ['task_type', 'code', 'action']) {
       try {
         this.db.exec(`ALTER TABLE episodes ADD COLUMN ${col} TEXT`);
       } catch (err) {

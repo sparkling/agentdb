@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS episodes (
   session_id TEXT NOT NULL,
   task TEXT NOT NULL,
   task_type TEXT, -- ADR-0268: stable grouping key (deriveTaskType); NULL falls back to `task`
+  action TEXT, -- ADR-0279: the action taken (model/agent used) — the dimension NightlyLearner aggregates E[reward | action, task_type] over so routers can ask "what does DOING X cause?"
   input TEXT,
   output TEXT,
   code TEXT, -- ADR-0268: solution code, promoted into skill.code on consolidation

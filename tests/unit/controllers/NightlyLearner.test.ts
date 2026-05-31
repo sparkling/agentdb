@@ -555,4 +555,47 @@ describe('NightlyLearner', () => {
       expect(report.experimentsCreated).toBeLessThanOrEqual(2);
     });
   });
+
+  describe('computeActionValues (ADR-0279)', () => {
+    const insEpisode = (taskType: string, action: string | null, reward: number, success: number) =>
+      db.prepare(
+        `INSERT INTO episodes (session_id, task, task_type, action, reward, success) VALUES (?, ?, ?, ?, ?, ?)`
+      ).run('s', `${taskType} task`, taskType, action, reward, success);
+
+    it('aggregates E[reward | action, task_type] with de-confounded uplift', () => {
+      // task_type 'deploy': opus earns 0.9, haiku earns 0.2 → baseline 0.55.
+      for (let i = 0; i < 10; i++) {
+        insEpisode('deploy', 'opus', 0.9, 1);
+        insEpisode('deploy', 'haiku', 0.2, 0);
+      }
+      const vals = learner.computeActionValues();
+      const opus = vals.find((v) => v.action === 'opus' && v.taskType === 'deploy');
+      const haiku = vals.find((v) => v.action === 'haiku' && v.taskType === 'deploy');
+      expect(opus).toBeDefined();
+      expect(haiku).toBeDefined();
+      expect(opus!.meanReward).toBeCloseTo(0.9, 5);
+      expect(haiku!.meanReward).toBeCloseTo(0.2, 5);
+      expect(opus!.baselineReward).toBeCloseTo(0.55, 5); // mean over both actions
+      expect(opus!.uplift).toBeCloseTo(0.35, 5);          // de-confounded: opus causes higher reward
+      expect(haiku!.uplift).toBeCloseTo(-0.35, 5);
+      expect(opus!.samples).toBe(10);
+      // ordered by meanReward DESC → opus first
+      expect(vals[0].action).toBe('opus');
+    });
+
+    it('excludes NULL-action episodes and respects minSamples', () => {
+      insEpisode('test', null, 0.5, 1);     // NULL action — excluded
+      insEpisode('test', 'sonnet', 0.7, 1); // 1 sample
+      expect(learner.computeActionValues()).toHaveLength(1);                  // only sonnet
+      expect(learner.computeActionValues({ minSamples: 2 })).toHaveLength(0); // below threshold
+    });
+
+    it('filters by taskType when provided', () => {
+      insEpisode('deploy', 'opus', 0.9, 1);
+      insEpisode('frontend', 'haiku', 0.8, 1);
+      const deployOnly = learner.computeActionValues({ taskType: 'deploy' });
+      expect(deployOnly).toHaveLength(1);
+      expect(deployOnly[0].action).toBe('opus');
+    });
+  });
 });

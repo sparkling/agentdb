@@ -34,6 +34,7 @@ export interface Episode {
   sessionId: string;
   task: string;
   taskType?: string; // ADR-0268: stable grouping key (deriveTaskType); falls back to `task`
+  action?: string; // ADR-0279: the action taken (model/agent used); the dimension NightlyLearner aggregates E[reward | action, task_type] over
   input?: string;
   output?: string;
   code?: string; // ADR-0268: solution code, promoted into skill.code on consolidation
@@ -187,9 +188,9 @@ export class ReflexionMemory {
     // Fallback to SQLite (v1 compatibility)
     const stmt = this.db.prepare(`
       INSERT INTO episodes (
-        ts, session_id, task, task_type, input, output, code, critique, reward, success,
+        ts, session_id, task, task_type, action, input, output, code, critique, reward, success,
         latency_ms, tokens_used, tags, metadata
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     const tags = episode.tags ? JSON.stringify(episode.tags) : null;
@@ -205,6 +206,7 @@ export class ReflexionMemory {
       episode.sessionId,
       episode.task,
       episode.taskType || null,
+      episode.action ?? null, // ADR-0279: the action (model/agent) taken
       episode.input || null,
       episode.output || null,
       episode.code || null,
@@ -1268,9 +1270,9 @@ export class ReflexionMemory {
     try {
       const stmt = this.db.prepare(`
         INSERT INTO episodes (
-          session_id, task, task_type, input, output, code, critique, reward, success,
+          session_id, task, task_type, action, input, output, code, critique, reward, success,
           latency_ms, tokens_used, tags, metadata
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
       const tags = episode.tags ? JSON.stringify(episode.tags) : null;
       const metadata = episode.metadata ? JSON.stringify(episode.metadata) : null;
@@ -1278,6 +1280,7 @@ export class ReflexionMemory {
         episode.sessionId,
         episode.task,
         episode.taskType ?? null,
+        episode.action ?? null, // ADR-0279: the action (model/agent) taken
         episode.input ?? null,
         episode.output ?? null,
         episode.code ?? null,

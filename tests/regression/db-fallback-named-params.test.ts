@@ -122,3 +122,63 @@ describe('db-fallback sql.js NAMED-parameter binding (ADR-0285 P6 regression)', 
     });
   });
 });
+
+/**
+ * Regression: the sql.js wrapper must honor the staging substrate's SAVEPOINT /
+ * RELEASE / ROLLBACK TO lifecycle (ADR-0285 P3).
+ *
+ * The archivist staging substrate (src/archivist/staging-substrate.ts) wraps each
+ * dispatch in `SAVEPOINT staging_<storeId>_<n>` and, on commit, `RELEASE`s it (on
+ * rollback, `ROLLBACK TO` + `RELEASE`). A long-running sql.js daemon whose
+ * NAMED-bind threw mid-dispatch (the P6 root cause pinned above) skipped the
+ * matching RELEASE and left the savepoint counter desynced — so a later RELEASE
+ * referenced a name that was never opened and SQLite raised
+ * `no such savepoint: staging_agentdb_causal_edge_N` (the P3 symptom; reproduced
+ * live on a stale pre-P6-fix daemon). With P6 fixed the mid-dispatch throw is
+ * gone, so the open/release pairing stays balanced. These tests pin the sql.js
+ * wrapper's SAVEPOINT handling on a fresh process (the better-sqlite3 acceptance
+ * smoke cannot exercise the WASM path): the commit and rollback paths behave, and
+ * an unbalanced RELEASE surfaces a REAL SQLite error — it is NOT swallowed into a
+ * masked "Internal error".
+ */
+describe('db-fallback sql.js SAVEPOINT lifecycle (ADR-0285 P3 — staging substrate)', () => {
+  let db: any;
+
+  beforeEach(async () => {
+    db = await createDatabase(':memory:');
+    db.exec(DDL);
+    db.exec(SEED);
+  });
+
+  afterEach(() => {
+    if (db && typeof db.close === 'function') db.close();
+  });
+
+  it('SAVEPOINT → write → RELEASE commits the staged write', () => {
+    db.exec('SAVEPOINT staging_agentdb_causal_edge_1');
+    db.prepare(
+      'INSERT INTO causal_edges (id, confidence, uplift, mechanism) VALUES (@id, @c, @u, @m)',
+    ).run({ id: 10, c: 0.9, u: 0.6, m: 'sp-commit' });
+    db.exec('RELEASE staging_agentdb_causal_edge_1'); // must NOT throw "no such savepoint"
+    expect(
+      db.prepare('SELECT mechanism FROM causal_edges WHERE id = @id').get({ id: 10 }).mechanism,
+    ).toBe('sp-commit');
+  });
+
+  it('SAVEPOINT → write → ROLLBACK TO → RELEASE discards the staged write', () => {
+    db.exec('SAVEPOINT staging_agentdb_causal_edge_2');
+    db.prepare(
+      'INSERT INTO causal_edges (id, confidence, uplift, mechanism) VALUES (@id, @c, @u, @m)',
+    ).run({ id: 11, c: 0.9, u: 0.6, m: 'sp-rollback' });
+    db.exec('ROLLBACK TO staging_agentdb_causal_edge_2');
+    db.exec('RELEASE staging_agentdb_causal_edge_2'); // must NOT throw "no such savepoint"
+    expect(db.prepare('SELECT id FROM causal_edges WHERE id = @id').get({ id: 11 })).toBeUndefined();
+  });
+
+  it('RELEASE of an unopened savepoint surfaces a real SQLite error (the P3 symptom is diagnosable, not masked)', () => {
+    // A desynced open/release pairing (the live P3 symptom) must raise SQLite's
+    // own "no such savepoint" — proving the wrapper does NOT swallow it into a
+    // generic masked error. The desync itself is prevented upstream by the P6 fix.
+    expect(() => db.exec('RELEASE staging_agentdb_causal_edge_99')).toThrow(/no such savepoint/i);
+  });
+});

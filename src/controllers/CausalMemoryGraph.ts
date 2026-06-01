@@ -206,7 +206,15 @@ export class CausalMemoryGraph {
       return numMatch ? parseInt(numMatch[1], 10) : Math.abs(this.hashString(String(edgeId)));
     }
 
-    // Fallback to SQLite
+    // Fallback to SQLite. Fail loud on non-numeric endpoint ids (ADR-0082):
+    // `from_memory_id` / `to_memory_id` are NOT NULL columns, so an undefined
+    // id either trips a NOT NULL constraint (better-sqlite3, NULL-coerced) or
+    // the opaque `unknown type (undefined)` bind error (sql.js WASM). The cli
+    // edge-create path resolves both ids via `allocAdrNodeId` first; this guard
+    // surfaces an upstream resolution miss as one diagnosable error.
+    this.assertNumericId(edge.fromMemoryId, 'addCausalEdge(fromMemoryId)');
+    this.assertNumericId(edge.toMemoryId, 'addCausalEdge(toMemoryId)');
+
     const stmt = this.db.prepare(`
       INSERT INTO causal_edges (
         from_memory_id, from_memory_type, to_memory_id, to_memory_type,
@@ -492,6 +500,15 @@ export class CausalMemoryGraph {
    * @returns deletedEdges = number of edges removed (0 when cascade is false)
    */
   deleteNode(nodeId: number, opts?: { cascade?: boolean }): { deletedNode: boolean; deletedEdges: number } {
+    // Fail loud on a non-numeric id (ADR-0082). The cli bridge resolves the
+    // string ADR id → numeric `memory_id` via `allocAdrNodeId` before calling
+    // here; an `undefined`/`NaN` means that resolution failed upstream. Under
+    // the better-sqlite3 backend an undefined bind is silently coerced to NULL
+    // (deletes nothing — a silent no-op), and under the sql.js WASM backend it
+    // throws the opaque `Wrong API use : tried to bind a value of an unknown
+    // type (undefined)`. Asserting here turns both into one diagnosable error.
+    this.assertNumericId(nodeId, 'deleteNode(nodeId)');
+
     let deletedEdges = 0;
 
     if (opts?.cascade) {
@@ -519,6 +536,12 @@ export class CausalMemoryGraph {
    * @returns deletedEdges = number of edges removed
    */
   deleteEdgesByEndpoints(fromId: number, toId: number, relation?: string): { deletedEdges: number } {
+    // Fail loud on non-numeric endpoint ids (ADR-0082) — same rationale as
+    // `deleteNode`: an unresolved id binds NULL (silent no-op) under
+    // better-sqlite3 and throws an opaque undefined-bind under sql.js.
+    this.assertNumericId(fromId, 'deleteEdgesByEndpoints(fromId)');
+    this.assertNumericId(toId, 'deleteEdgesByEndpoints(toId)');
+
     const result = relation === undefined
       ? this.db.prepare(
           'DELETE FROM causal_edges WHERE from_memory_id = ? AND to_memory_id = ?'
@@ -931,6 +954,28 @@ export class CausalMemoryGraph {
   // ========================================================================
   // Private Helper Methods
   // ========================================================================
+
+  /**
+   * Assert a value is a finite integer before it is bound as a numeric
+   * `memory_id`. Causal-graph ids are numeric (the cli maps string ADR ids to
+   * numeric ones via `allocAdrNodeId` before reaching the controller); an
+   * `undefined` / `NaN` / non-integer means upstream resolution failed.
+   *
+   * Fail-loud per ADR-0082: better-sqlite3 silently coerces an undefined bind
+   * to NULL (a NOT-NULL violation on insert, or a silent zero-row delete),
+   * while sql.js WASM throws the opaque `Wrong API use : tried to bind a value
+   * of an unknown type (undefined)`. Validating here yields one descriptive
+   * error naming the offending parameter on either backend.
+   */
+  private assertNumericId(id: unknown, label: string): asserts id is number {
+    if (typeof id !== 'number' || !Number.isFinite(id) || !Number.isInteger(id)) {
+      throw new Error(
+        `CausalMemoryGraph: ${label} must be a finite integer memory id, got ${
+          typeof id === 'number' ? id : typeof id === 'bigint' ? `${id}n` : String(id)
+        }. The caller must resolve string ids to numeric memory ids (e.g. allocAdrNodeId) before invoking this method.`,
+      );
+    }
+  }
 
   private rowToCausalEdge(row: DatabaseRows.CausalEdge): CausalEdge {
     return {

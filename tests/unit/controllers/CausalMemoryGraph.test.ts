@@ -63,7 +63,7 @@ describe('CausalMemoryGraph', () => {
   });
 
   describe('addCausalEdge', () => {
-    it('should add causal edge with all required fields', () => {
+    it('should add causal edge with all required fields', async () => {
       const edge: CausalEdge = {
         fromMemoryId: 1,
         fromMemoryType: 'episode',
@@ -76,13 +76,13 @@ describe('CausalMemoryGraph', () => {
         evidenceIds: ['e1', 'e2', 'e3'],
       };
 
-      const edgeId = causalGraph.addCausalEdge(edge);
+      const edgeId = await causalGraph.addCausalEdge(edge);
 
       expect(edgeId).toBeGreaterThan(0);
       expect(typeof edgeId).toBe('number');
     });
 
-    it('should add causal edge with minimal fields', () => {
+    it('should add causal edge with minimal fields', async () => {
       const edge: CausalEdge = {
         fromMemoryId: 1,
         fromMemoryType: 'skill',
@@ -92,12 +92,12 @@ describe('CausalMemoryGraph', () => {
         confidence: 0.8,
       };
 
-      const edgeId = causalGraph.addCausalEdge(edge);
+      const edgeId = await causalGraph.addCausalEdge(edge);
 
       expect(edgeId).toBeGreaterThan(0);
     });
 
-    it('should handle negative uplift (harmful effects)', () => {
+    it('should handle negative uplift (harmful effects)', async () => {
       const edge: CausalEdge = {
         fromMemoryId: 1,
         fromMemoryType: 'episode',
@@ -109,12 +109,12 @@ describe('CausalMemoryGraph', () => {
         sampleSize: 50,
       };
 
-      const edgeId = causalGraph.addCausalEdge(edge);
+      const edgeId = await causalGraph.addCausalEdge(edge);
 
       expect(edgeId).toBeGreaterThan(0);
     });
 
-    it('should store edge with mechanism explanation', () => {
+    it('should store edge with mechanism explanation', async () => {
       const edge: CausalEdge = {
         fromMemoryId: 1,
         fromMemoryType: 'episode',
@@ -126,7 +126,7 @@ describe('CausalMemoryGraph', () => {
         mechanism: 'Adding tests reduces bugs by catching errors early',
       };
 
-      const edgeId = causalGraph.addCausalEdge(edge);
+      const edgeId = await causalGraph.addCausalEdge(edge);
 
       expect(edgeId).toBeGreaterThan(0);
     });
@@ -386,8 +386,66 @@ describe('CausalMemoryGraph', () => {
     });
   });
 
+  // ADR-0285 P4: causal-node-delete / causal-edge-delete must not bind an
+  // unresolved (undefined) numeric id. Under better-sqlite3 an undefined bind
+  // is silently coerced to NULL (a silent no-op delete); under the sql.js WASM
+  // backend the same bind throws the opaque `Wrong API use : tried to bind a
+  // value of an unknown type (undefined)`. The controller fails loud (ADR-0082)
+  // with a descriptive error naming the offending parameter on either backend.
+  describe('delete operations (ADR-0285 P4)', () => {
+    beforeEach(() => {
+      // Seed two edges sharing endpoint id 1 so cascade/endpoint deletes have
+      // rows to remove.
+      causalGraph.addCausalEdge({
+        fromMemoryId: 1, fromMemoryType: 'adr',
+        toMemoryId: 2, toMemoryType: 'adr',
+        similarity: 0, confidence: 1.0, mechanism: 'depends-on',
+      });
+      causalGraph.addCausalEdge({
+        fromMemoryId: 3, fromMemoryType: 'adr',
+        toMemoryId: 1, toMemoryType: 'adr',
+        similarity: 0, confidence: 1.0, mechanism: 'supersedes',
+      });
+    });
+
+    it('deleteNode cascades incident edges for a valid numeric id', () => {
+      const result = causalGraph.deleteNode(1, { cascade: true });
+      expect(result.deletedNode).toBe(true);
+      expect(result.deletedEdges).toBe(2); // both edges touch node 1
+    });
+
+    it('deleteNode fails loud on an undefined id (no silent undefined bind)', () => {
+      expect(() => causalGraph.deleteNode(undefined as unknown as number, { cascade: true }))
+        .toThrow(/deleteNode\(nodeId\) must be a finite integer memory id/);
+    });
+
+    it('deleteNode fails loud on a NaN id', () => {
+      expect(() => causalGraph.deleteNode(Number.NaN, { cascade: true }))
+        .toThrow(/finite integer memory id/);
+    });
+
+    it('deleteEdgesByEndpoints removes the matching edge for valid ids', () => {
+      const result = causalGraph.deleteEdgesByEndpoints(1, 2);
+      expect(result.deletedEdges).toBe(1);
+    });
+
+    it('deleteEdgesByEndpoints fails loud when an endpoint id is undefined', () => {
+      expect(() => causalGraph.deleteEdgesByEndpoints(1, undefined as unknown as number))
+        .toThrow(/deleteEdgesByEndpoints\(toId\) must be a finite integer memory id/);
+    });
+
+    it('addCausalEdge fails loud when an endpoint id is undefined', async () => {
+      // addCausalEdge is async — the guard rejects the returned promise.
+      await expect(causalGraph.addCausalEdge({
+        fromMemoryId: undefined as unknown as number, fromMemoryType: 'adr',
+        toMemoryId: 2, toMemoryType: 'adr',
+        similarity: 0, confidence: 1.0, mechanism: 'depends-on',
+      })).rejects.toThrow(/addCausalEdge\(fromMemoryId\) must be a finite integer memory id/);
+    });
+  });
+
   describe('Edge Cases', () => {
-    it('should handle zero uplift', () => {
+    it('should handle zero uplift', async () => {
       const edge: CausalEdge = {
         fromMemoryId: 1,
         fromMemoryType: 'episode',
@@ -398,12 +456,12 @@ describe('CausalMemoryGraph', () => {
         confidence: 0.95,
       };
 
-      const edgeId = causalGraph.addCausalEdge(edge);
+      const edgeId = await causalGraph.addCausalEdge(edge);
 
       expect(edgeId).toBeGreaterThan(0);
     });
 
-    it('should handle very high confidence', () => {
+    it('should handle very high confidence', async () => {
       const edge: CausalEdge = {
         fromMemoryId: 1,
         fromMemoryType: 'episode',
@@ -415,12 +473,12 @@ describe('CausalMemoryGraph', () => {
         sampleSize: 1000,
       };
 
-      const edgeId = causalGraph.addCausalEdge(edge);
+      const edgeId = await causalGraph.addCausalEdge(edge);
 
       expect(edgeId).toBeGreaterThan(0);
     });
 
-    it('should handle low confidence edges', () => {
+    it('should handle low confidence edges', async () => {
       const edge: CausalEdge = {
         fromMemoryId: 1,
         fromMemoryType: 'episode',
@@ -432,12 +490,12 @@ describe('CausalMemoryGraph', () => {
         sampleSize: 10,
       };
 
-      const edgeId = causalGraph.addCausalEdge(edge);
+      const edgeId = await causalGraph.addCausalEdge(edge);
 
       expect(edgeId).toBeGreaterThan(0);
     });
 
-    it('should handle empty evidence IDs', () => {
+    it('should handle empty evidence IDs', async () => {
       const edge: CausalEdge = {
         fromMemoryId: 1,
         fromMemoryType: 'episode',
@@ -448,7 +506,7 @@ describe('CausalMemoryGraph', () => {
         evidenceIds: [],
       };
 
-      const edgeId = causalGraph.addCausalEdge(edge);
+      const edgeId = await causalGraph.addCausalEdge(edge);
 
       expect(edgeId).toBeGreaterThan(0);
     });

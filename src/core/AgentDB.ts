@@ -187,8 +187,13 @@ export class AgentDB {
       this.usingWasm = false;
       return db as unknown as IDatabaseConnection;
     } catch (error) {
-      // better-sqlite3 not available or failed, try sql.js WASM
-      console.log('[AgentDB] better-sqlite3 not available, using sql.js WASM');
+      // better-sqlite3 not available or failed, try sql.js WASM.
+      // ADR-0285 follow-up: surface WHY native failed (ABI mismatch on a stale
+      // install, missing prebuild, Node-version skew). A bare "not available" hid
+      // that a long-running daemon had silently dropped to the WASM backend — where
+      // the pre-ADR-0285 named-param bind bug then masked as "Internal error".
+      const reason = error instanceof Error ? error.message : String(error);
+      console.log(`[AgentDB] native better-sqlite3 unavailable, using WASM fallback — reason: ${reason}`);
       return this.initializeSqlJsWasm(dbPath);
     }
   }

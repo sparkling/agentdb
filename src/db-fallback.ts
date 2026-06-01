@@ -18,6 +18,94 @@ type Database = any;
 let sqlJsWrapper: any = null;
 
 /**
+ * Bind better-sqlite3-style arguments onto a sql.js prepared statement.
+ *
+ * The two calling conventions better-sqlite3 exposes — and how each maps to
+ * sql.js's single `bind()` primitive:
+ *
+ *   • NAMED:      stmt.all({ minConfidence: 0.6, limit: 3 })
+ *                 → a single plain-object argument with BARE keys. sql.js binds
+ *                   named parameters from an object too, but it requires each
+ *                   key to carry the SAME sigil as the placeholder in the SQL
+ *                   (`@c` ⇒ key `'@c'`; `:c` ⇒ `':c'`; `$c` ⇒ `'$c'`). A bare
+ *                   key binds NOTHING under sql.js — silently zero rows, which
+ *                   is worse than throwing. So we detect the statement's sigil
+ *                   and re-key the object before delegating.
+ *
+ *   • POSITIONAL: stmt.run(id, payload)  /  stmt.all(a, b)
+ *                 → one-or-more scalar args (or a single array of them). sql.js
+ *                   binds positional `?`/`?N` params from an array directly.
+ *
+ * The prior implementation did `stmt.bind(params)` where `params` was the rest
+ * array — so a NAMED call arrived as `[{…}]` and sql.js, seeing an array, bound
+ * positionally and choked on the object element with the WASM string
+ * `Wrong API use : tried to bind a value of an unknown type ([object Object])`.
+ * That string is NOT an Error instance, so the cli's sanitizeError() flattened
+ * it to a generic "Internal error" (the masking-catch). This helper is the fix:
+ * route NAMED → re-keyed object, POSITIONAL → array.
+ *
+ * @param stmt   the sql.js prepared Statement
+ * @param sql    the statement's SQL text (used to detect the named-param sigil)
+ * @param params the rest array captured by run/get/all
+ */
+function bindSqlJsParams(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- sql.js Statement
+  stmt: any,
+  sql: string,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- heterogeneous bind args
+  params: any[],
+): void {
+  // No arguments → bind nothing (a statement with no placeholders, or one whose
+  // placeholders are intentionally unbound). Matches better-sqlite3's `.all()`.
+  if (params.length === 0) {
+    stmt.bind();
+    return;
+  }
+
+  const first = params[0];
+  const isPlainObject =
+    params.length === 1 &&
+    first !== null &&
+    typeof first === 'object' &&
+    !Array.isArray(first) &&
+    !ArrayBuffer.isView(first) &&
+    !(first instanceof ArrayBuffer);
+
+  if (isPlainObject) {
+    stmt.bind(namedBindObject(sql, first as Record<string, unknown>));
+    return;
+  }
+
+  // Positional: a single array argument is the bind list itself; otherwise the
+  // rest array already IS the positional list.
+  const positional = params.length === 1 && Array.isArray(first) ? first : params;
+  stmt.bind(positional);
+}
+
+/**
+ * Re-key a bare-keyed better-sqlite3 named-params object to the sigil sql.js
+ * expects. The sigil is detected from the FIRST named placeholder in the SQL
+ * (`@name` / `:name` / `$name`); a statement mixes only one sigil convention in
+ * practice. Keys that already carry a sigil are passed through unchanged.
+ */
+function namedBindObject(sql: string, params: Record<string, unknown>): Record<string, unknown> {
+  const sigil = detectNamedSigil(sql) ?? '@';
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(params)) {
+    const sigiled = key[0] === '@' || key[0] === ':' || key[0] === '$' ? key : `${sigil}${key}`;
+    out[sigiled] = value;
+  }
+  return out;
+}
+
+/** First named-parameter sigil used in the SQL, or null if there are none. */
+function detectNamedSigil(sql: string): '@' | ':' | '$' | null {
+  const m = sql.match(/[@:$][A-Za-z_][A-Za-z0-9_]*/);
+  if (!m) return null;
+  return m[0][0] as '@' | ':' | '$';
+}
+
+/**
  * Get sql.js database implementation (ONLY sql.js, no better-sqlite3)
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any -- returns dynamically constructed class
@@ -128,7 +216,7 @@ function createSqlJsWrapper(SQL: any) {
         run: (...params: any[]) => {
           if (isFinalized) throw new Error('Statement already finalized');
           try {
-            stmt.bind(params);
+            bindSqlJsParams(stmt, sql, params);
             stmt.step();
             stmt.reset();
 
@@ -146,7 +234,7 @@ function createSqlJsWrapper(SQL: any) {
         get: (...params: any[]) => {
           if (isFinalized) throw new Error('Statement already finalized');
           try {
-            stmt.bind(params);
+            bindSqlJsParams(stmt, sql, params);
             const hasRow = stmt.step();
 
             if (!hasRow) {
@@ -174,7 +262,7 @@ function createSqlJsWrapper(SQL: any) {
         all: (...params: any[]) => {
           if (isFinalized) throw new Error('Statement already finalized');
           try {
-            stmt.bind(params);
+            bindSqlJsParams(stmt, sql, params);
             const results: Record<string, unknown>[] = [];
 
             while (stmt.step()) {
@@ -339,7 +427,7 @@ export function wrapExistingSqlJsDatabase(rawDb: any, filename: string = ':memor
         run(...params: any[]) {
           if (isFinalized) throw new Error('Statement already finalized');
           try {
-            stmt.bind(params);
+            bindSqlJsParams(stmt, sql, params);
             stmt.step();
             stmt.reset();
             return {
@@ -355,7 +443,7 @@ export function wrapExistingSqlJsDatabase(rawDb: any, filename: string = ':memor
         get(...params: any[]) {
           if (isFinalized) throw new Error('Statement already finalized');
           try {
-            stmt.bind(params);
+            bindSqlJsParams(stmt, sql, params);
             const hasRow = stmt.step();
             if (!hasRow) { stmt.reset(); return undefined; }
             const columns = stmt.getColumnNames();
@@ -373,7 +461,7 @@ export function wrapExistingSqlJsDatabase(rawDb: any, filename: string = ':memor
         all(...params: any[]) {
           if (isFinalized) throw new Error('Statement already finalized');
           try {
-            stmt.bind(params);
+            bindSqlJsParams(stmt, sql, params);
             const results: Record<string, unknown>[] = [];
             while (stmt.step()) {
               const columns = stmt.getColumnNames();

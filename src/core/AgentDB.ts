@@ -2,7 +2,10 @@
  * AgentDB - Main database wrapper class
  *
  * Provides a unified interface to all AgentDB controllers with:
- * - sql.js WASM for relational storage (with better-sqlite3 fallback)
+ * - better-sqlite3 (native) for relational storage; the sql.js WASM engine is
+ *   used ONLY when explicitly opted into (AGENTDB_ALLOW_SQLJS_FALLBACK or
+ *   forceWasm) — a native load failure FAILS LOUD, never silently degrades
+ *   (ADR-0082 no-silent-fallback; the silent swap is what hid ADR-0285 P3/P4/P6)
  * - RuVector for optimized vector search (150x faster than SQLite)
  * - Unified integration passing vector backend to all controllers
  */
@@ -51,6 +54,50 @@ export interface AgentDBConfig {
   };
   /** @deprecated ADR-0170 Phase D: graph-node retired; passing true throws at initialize() */
   enableGraph?: boolean;
+}
+
+/**
+ * Decide how to handle a native `better-sqlite3` load/open failure
+ * (ADR-0082 no-silent-fallback / fail-loud-fast).
+ *
+ * Returns the actionable `Error` to throw by DEFAULT — AgentDB must NOT silently
+ * degrade to the sql.js WASM engine, which is slower and has historically
+ * diverged from better-sqlite3 on parameter binding + SAVEPOINT handling (the
+ * ADR-0285 P3/P4/P6 bug class). A silent swap hides BOTH the real failure
+ * (missing prebuild / ABI skew / no build tools) AND those divergences behind a
+ * backend that no better-sqlite3 test can catch — the exact trap the rule exists
+ * to prevent.
+ *
+ * Returns `null` ONLY when the WASM engine was EXPLICITLY opted into via
+ * `AGENTDB_ALLOW_SQLJS_FALLBACK` (`1` | `true` | `yes`); the caller then proceeds
+ * to the WASM engine. `forceWasm: true` skips the native attempt up front and is
+ * the cleaner choice for known build-tool-less environments.
+ *
+ * Exported for direct unit testing of the loud-vs-opt-in branch without standing
+ * up the full `AgentDB.initialize()` pipeline.
+ */
+export function resolveBetterSqlite3LoadFailure(
+  error: unknown,
+  env: NodeJS.ProcessEnv = process.env,
+): Error | null {
+  const optIn = env.AGENTDB_ALLOW_SQLJS_FALLBACK;
+  if (optIn === '1' || optIn === 'true' || optIn === 'yes') {
+    return null; // explicit opt-in → caller falls back to the WASM engine
+  }
+  const reason = error instanceof Error ? error.message : String(error);
+  return new Error(
+    `[AgentDB] native better-sqlite3 failed to load: ${reason}\n` +
+      `Refusing to silently fall back to the sql.js WASM engine — it is slower and ` +
+      `has historically diverged from better-sqlite3 on parameter binding + SAVEPOINTs ` +
+      `(the ADR-0285 P3/P4/P6 bug class), so a silent swap would hide both this failure ` +
+      `and those divergences.\n` +
+      `Fix the native module:\n` +
+      `  - after a Node upgrade / ABI change:  npm rebuild better-sqlite3\n` +
+      `  - missing build tools:  install Xcode CLT (macOS) or build-essential (Linux), then reinstall\n` +
+      `  - or run Node on the ABI the prebuilt binary targets\n` +
+      `If you genuinely need the WASM engine (no build tools), opt in EXPLICITLY: set ` +
+      `AGENTDB_ALLOW_SQLJS_FALLBACK=1, or construct AgentDB with { forceWasm: true }.`,
+  );
 }
 
 export class AgentDB {
@@ -187,13 +234,24 @@ export class AgentDB {
       this.usingWasm = false;
       return db as unknown as IDatabaseConnection;
     } catch (error) {
-      // better-sqlite3 not available or failed, try sql.js WASM.
-      // ADR-0285 follow-up: surface WHY native failed (ABI mismatch on a stale
-      // install, missing prebuild, Node-version skew). A bare "not available" hid
-      // that a long-running daemon had silently dropped to the WASM backend — where
-      // the pre-ADR-0285 named-param bind bug then masked as "Internal error".
+      // No silent fallback (ADR-0082 / fail-loud-fast). A native better-sqlite3
+      // failure is NOT silently downgraded to the sql.js WASM engine — that path
+      // is slower AND historically diverged on parameter binding + SAVEPOINTs
+      // (ADR-0285 P3/P4/P6), so a silent swap hides both this failure (ABI skew on
+      // a stale install, missing prebuild, Node-version skew, no build tools) and
+      // those divergences behind a backend no better-sqlite3 test can catch — the
+      // precise trap that masked the pre-ADR-0285 bind bug as "Internal error" on a
+      // long-running daemon. Fail loud unless WASM was EXPLICITLY opted into.
+      const loudError = resolveBetterSqlite3LoadFailure(error);
+      if (loudError) throw loudError;
+      // AGENTDB_ALLOW_SQLJS_FALLBACK is set — proceed to the WASM engine, but warn.
       const reason = error instanceof Error ? error.message : String(error);
-      console.log(`[AgentDB] native better-sqlite3 unavailable, using WASM fallback — reason: ${reason}`);
+      console.warn(
+        `[AgentDB] native better-sqlite3 failed to load (${reason}); ` +
+          `AGENTDB_ALLOW_SQLJS_FALLBACK is set — using the sql.js WASM engine. This ` +
+          `path is slower and historically diverges on binding/SAVEPOINTs (ADR-0285 ` +
+          `P3/P4/P6); prefer fixing the native build.`,
+      );
       return this.initializeSqlJsWasm(dbPath);
     }
   }

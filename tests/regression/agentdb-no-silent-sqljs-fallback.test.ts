@@ -39,6 +39,18 @@ describe('AgentDB better-sqlite3 load failure: fail loud, no silent sql.js fallb
     expect(e!.message).toMatch(/forceWasm/);
   });
 
+  it('DEFAULT: error is named AgentDBInitError + preserves cause (so the CLI router re-throws, not swallows)', () => {
+    // The consuming CLI's memory-router._isFatalInitError discriminates by
+    // `.name` string: a plain Error (name 'Error') is NOT in its fatal set, so
+    // it gets swallowed into a generic 'registry init failed' -> misleading
+    // 'neural is disabled' message. Naming this AgentDBInitError (the name the
+    // router already watches for, ADR-0111 W1.5/W1.6) is what makes the loud,
+    // actionable message actually surface. Do NOT relax this to a plain Error.
+    const e = resolveBetterSqlite3LoadFailure(nativeFailure, {});
+    expect(e!.name).toBe('AgentDBInitError');
+    expect((e as Error).cause).toBe(nativeFailure);
+  });
+
   it('explicit opt-in AGENTDB_ALLOW_SQLJS_FALLBACK=1 → returns null (caller proceeds to WASM)', () => {
     expect(resolveBetterSqlite3LoadFailure(nativeFailure, { AGENTDB_ALLOW_SQLJS_FALLBACK: '1' })).toBeNull();
   });

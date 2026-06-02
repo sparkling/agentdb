@@ -211,6 +211,22 @@ async function createSqlJsRvfBackend(config: VectorConfig): Promise<VectorBacken
  * @param config - Vector configuration
  * @returns Initialized VectorBackend instance
  */
+/**
+ * ADR-0286: surface a vector-backend FALLBACK loudly. Reaching a non-preferred
+ * backend — because the preferred one is unavailable, or because it failed to
+ * initialize — changes recall quality / index behavior vs the auto-priority
+ * RuVector backend, so an operator must be able to SEE it. The prior silent
+ * `console.log` notices hid exactly this (the no-fallbacks invisibility class,
+ * ADR-0082, that also hid the SQLite-side P3/P4/P6). INTERIM: loud logging only;
+ * the full fail-loud-with-explicit-opt-in is deferred (ADR-0286 — sibling of the
+ * SQLite fix `resolveBetterSqlite3LoadFailure` in core/AgentDB.ts).
+ */
+function warnVectorBackendFallback(message: string): void {
+  console.warn(
+    `[AgentDB] ⚠ VECTOR-BACKEND FALLBACK — ${message} (not on the preferred backend; see ADR-0286)`,
+  );
+}
+
 export async function createBackend(
   type: BackendType,
   config: VectorConfig
@@ -239,7 +255,7 @@ export async function createBackend(
       );
     } else if (detection.sqljsRvf) {
       backend = await createSqlJsRvfBackend(config);
-      console.log('[AgentDB] Using sql.js RVF backend (built-in)');
+      warnVectorBackendFallback('type="rvf" requested but no native @ruvector/rvf SDK is installed → using the built-in sql.js RVF backend');
     } else {
       throw new Error(
         'RVF backend not available.\n' +
@@ -273,12 +289,12 @@ export async function createBackend(
 
         // Try RVF as first fallback
         if (detection.rvf.sdk) {
-          console.log('[AgentDB] RuVector initialization failed, trying RVF backend');
-          console.log(`[AgentDB] Reason: ${errorMessage.split('\n')[0]}`);
+          warnVectorBackendFallback('RuVector initialization FAILED → trying the RVF backend');
+          console.warn(`[AgentDB]   ↳ RuVector failure reason: ${errorMessage.split('\n')[0]}`);
           try {
             backend = await createRvfBackend(config);
             await (backend as unknown as { initialize(): Promise<void> }).initialize();
-            console.log(`[AgentDB] Using RVF backend (${detection.rvf.node ? 'N-API' : 'WASM'} fallback)`);
+            warnVectorBackendFallback(`using the RVF backend (${detection.rvf.node ? 'N-API' : 'WASM'}) after RuVector init failure`);
             return backend;
           } catch {
             // RVF also failed, try HNSWLib
@@ -287,26 +303,24 @@ export async function createBackend(
 
         // Try HNSWLib as next fallback
         if (detection.hnswlib) {
-          console.log('[AgentDB] Falling back to HNSWLib');
+          warnVectorBackendFallback('RVF unavailable or also failed → falling back to HNSWLib');
           backend = await createHNSWLibBackend(config);
-          console.log('[AgentDB] Using HNSWLib backend (fallback)');
         } else if (detection.sqljsRvf) {
-          console.log('[AgentDB] Falling back to sql.js RVF backend');
+          warnVectorBackendFallback('RVF and HNSWLib unavailable → falling back to the built-in sql.js RVF backend');
           backend = await createSqlJsRvfBackend(config);
-          console.log('[AgentDB] Using sql.js RVF backend (built-in fallback)');
         } else {
           throw error;
         }
       }
     } else if (detection.rvf.sdk) {
       backend = await createRvfBackend(config);
-      console.log(`[AgentDB] Using RVF backend (${detection.rvf.node ? 'N-API native' : 'WASM'})`);
+      warnVectorBackendFallback(`RuVector (@ruvector/core) not installed → using the RVF backend (${detection.rvf.node ? 'N-API native' : 'WASM'})`);
     } else if (detection.hnswlib) {
       backend = await createHNSWLibBackend(config);
-      console.log('[AgentDB] Using HNSWLib backend (fallback)');
+      warnVectorBackendFallback('RuVector and RVF not installed → using the HNSWLib backend');
     } else if (detection.sqljsRvf) {
       backend = await createSqlJsRvfBackend(config);
-      console.log('[AgentDB] Using sql.js RVF backend (built-in)');
+      warnVectorBackendFallback('only the built-in sql.js RVF backend is available (no native RuVector/RVF/HNSWLib) → using it');
     } else {
       throw new Error(
         'No vector backend available.\n' +

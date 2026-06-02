@@ -57,6 +57,22 @@ export interface AgentDBConfig {
 }
 
 /**
+ * Fatal AgentDB initialization failure. Named so the consuming CLI's
+ * `_isFatalInitError` (memory-router.ts) re-throws it instead of swallowing it
+ * into a generic "registry init failed" → "neural is disabled" red herring: a
+ * native required-dep load failure is exactly the "AgentDBInitError: required
+ * dep failed under Model 1" class that router already watches for (ADR-0111
+ * W1.5/W1.6). The discrimination is by `.name` string (cross-package), so the
+ * name MUST stay `'AgentDBInitError'`. Original error preserved as `cause`.
+ */
+export class AgentDBInitError extends Error {
+  constructor(message: string, options?: { cause?: unknown }) {
+    super(message, options as ErrorOptions);
+    this.name = 'AgentDBInitError';
+  }
+}
+
+/**
  * Decide how to handle a native `better-sqlite3` load/open failure
  * (ADR-0082 no-silent-fallback / fail-loud-fast).
  *
@@ -85,7 +101,7 @@ export function resolveBetterSqlite3LoadFailure(
     return null; // explicit opt-in → caller falls back to the WASM engine
   }
   const reason = error instanceof Error ? error.message : String(error);
-  return new Error(
+  return new AgentDBInitError(
     `[AgentDB] native better-sqlite3 failed to load: ${reason}\n` +
       `Refusing to silently fall back to the sql.js WASM engine — it is slower and ` +
       `has historically diverged from better-sqlite3 on parameter binding + SAVEPOINTs ` +
@@ -97,6 +113,7 @@ export function resolveBetterSqlite3LoadFailure(
       `  - or run Node on the ABI the prebuilt binary targets\n` +
       `If you genuinely need the WASM engine (no build tools), opt in EXPLICITLY: set ` +
       `AGENTDB_ALLOW_SQLJS_FALLBACK=1, or construct AgentDB with { forceWasm: true }.`,
+    { cause: error },
   );
 }
 

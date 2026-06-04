@@ -17,6 +17,7 @@ import type { GraphBackend, GraphNode } from '../backends/GraphBackend.js';
 import type { GraphDatabaseAdapter } from '../backends/graph/GraphDatabaseAdapter.js';
 import { NodeIdMapper } from '../utils/NodeIdMapper.js';
 import { QueryCache, type QueryCacheConfig } from '../core/QueryCache.js';
+import { redactFreeText } from '../security/redaction.js';
 
 /** Parse JSON from DB row values without throwing on malformed data. */
 function safeJsonParse<T>(value: string | null | undefined, fallback: T): T {
@@ -106,6 +107,16 @@ export class ReflexionMemory {
    *   often in-memory or rebuildable from SQL).
    */
   async storeEpisode(episode: Episode): Promise<number> {
+    // ADR-0289: PII/secret gate at the capture boundary — runs BEFORE any
+    // persist or embed (every path below writes raw free-text to SQLite and
+    // feeds the embedder). Secrets hard-block the write with a named
+    // AgentDBRedactionError (row never written, even masked); PII is masked
+    // by default. Self-inert for metadata-only episodes (ADR-0290 Phase 1)
+    // whose free-text fields are absent. Escape hatches:
+    // AGENTDB_REDACTION_DISABLE=1 (whole gate), AGENTDB_REDACTION_KEEP_PII=1
+    // (mask opt-out; secrets still hard-block).
+    episode = redactFreeText(episode).record;
+
     // Invalidate episode caches on write
     this.queryCache.invalidateCategory('episodes');
     this.queryCache.invalidateCategory('task-stats');

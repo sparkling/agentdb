@@ -50,3 +50,13 @@ export {
 
 // Path security
 export { validatePath } from './path-security.js';
+
+// ADR-0289: PII/secret redaction before durable capture
+export {
+  redactFreeText,
+  AgentDBRedactionError,
+  EPISODE_FREE_TEXT_FIELDS,
+  isRedactionDisabled,
+  isPiiMaskingDisabled,
+} from './redaction.js';
+export type { RedactionViolation, RedactFreeTextResult } from './redaction.js';

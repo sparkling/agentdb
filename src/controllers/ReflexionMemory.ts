@@ -45,6 +45,10 @@ export interface Episode {
   tokensUsed?: number;
   tags?: string[];
   metadata?: Record<string, any>;
+  skipEmbedding?: boolean; // ADR-0290 Phase 1: metadata-only episode (no semantic
+  // free text — task is a derived type label). Skips embedding generation and
+  // vector/graph index writes; the SQLite row stays fully visible to SQL-side
+  // learning (NightlyLearner action-values, causal discovery, skill consolidation).
 }
 
 export interface EpisodeWithEmbedding extends Episode {
@@ -105,6 +109,18 @@ export class ReflexionMemory {
     // Invalidate episode caches on write
     this.queryCache.invalidateCategory('episodes');
     this.queryCache.invalidateCategory('task-stats');
+
+    // ADR-0290 Phase 1: metadata-only episodes carry no semantic free text —
+    // there is nothing meaningful to embed or index. Write only the durable
+    // SQLite row (the record every SQL-side learning consumer reads) and skip
+    // the embedder + vector/graph/learning-backend writes entirely. Also keeps
+    // the hook-driven capture path free of per-task embedding-model loads
+    // (ADR-0287 F10 constraint 4: no per-turn mpnet embed on the hot path —
+    // semantic embedding work stays with the daemon).
+    if (episode.skipEmbedding) {
+      return this.insertEpisodeRow(episode);
+    }
+
     // Use GraphDatabaseAdapter if available (AgentDB v2)
     if (this.graphBackend && 'storeEpisode' in this.graphBackend) {
       // GraphDatabaseAdapter has specialized storeEpisode method
@@ -186,40 +202,7 @@ export class ReflexionMemory {
     }
 
     // Fallback to SQLite (v1 compatibility)
-    const stmt = this.db.prepare(`
-      INSERT INTO episodes (
-        ts, session_id, task, task_type, action, input, output, code, critique, reward, success,
-        latency_ms, tokens_used, tags, metadata
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `);
-
-    const tags = episode.tags ? JSON.stringify(episode.tags) : null;
-    const metadata = episode.metadata ? JSON.stringify(episode.metadata) : null;
-
-    const result = stmt.run(
-      // ADR-0277: write an explicit ts (seconds) when the caller provides one so
-      // tests/replay/backfill can control episode time; else default to now.
-      // NightlyLearner causal pair-discovery requires temporally-ordered
-      // episodes (e2.ts > e1.ts) — without distinct ts, fast writes share the
-      // strftime('now') default and form zero candidate pairs.
-      episode.ts ?? Math.floor(Date.now() / 1000),
-      episode.sessionId,
-      episode.task,
-      episode.taskType || null,
-      episode.action ?? null, // ADR-0279: the action (model/agent) taken
-      episode.input || null,
-      episode.output || null,
-      episode.code || null,
-      episode.critique || null,
-      episode.reward,
-      episode.success ? 1 : 0,
-      episode.latencyMs || null,
-      episode.tokensUsed || null,
-      tags,
-      metadata
-    );
-
-    const episodeId = normalizeRowId(result.lastInsertRowid);
+    const episodeId = this.insertEpisodeRow(episode);
 
     // Generate and store embedding
     const text = this.buildEpisodeText(episode);
@@ -872,6 +855,47 @@ export class ReflexionMemory {
     if (episode.critique) parts.push(episode.critique);
     if (episode.output) parts.push(episode.output);
     return parts.join('\n');
+  }
+
+  /**
+   * Durable SQLite episode write — the restart-safe record (#128) shared by
+   * the v1 fallback path and the ADR-0290 metadata-only (skipEmbedding) path.
+   */
+  private insertEpisodeRow(episode: Episode): number {
+    const stmt = this.db.prepare(`
+      INSERT INTO episodes (
+        ts, session_id, task, task_type, action, input, output, code, critique, reward, success,
+        latency_ms, tokens_used, tags, metadata
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+
+    const tags = episode.tags ? JSON.stringify(episode.tags) : null;
+    const metadata = episode.metadata ? JSON.stringify(episode.metadata) : null;
+
+    const result = stmt.run(
+      // ADR-0277: write an explicit ts (seconds) when the caller provides one so
+      // tests/replay/backfill can control episode time; else default to now.
+      // NightlyLearner causal pair-discovery requires temporally-ordered
+      // episodes (e2.ts > e1.ts) — without distinct ts, fast writes share the
+      // strftime('now') default and form zero candidate pairs.
+      episode.ts ?? Math.floor(Date.now() / 1000),
+      episode.sessionId,
+      episode.task,
+      episode.taskType || null,
+      episode.action ?? null, // ADR-0279: the action (model/agent) taken
+      episode.input || null,
+      episode.output || null,
+      episode.code || null,
+      episode.critique || null,
+      episode.reward,
+      episode.success ? 1 : 0,
+      episode.latencyMs || null,
+      episode.tokensUsed || null,
+      tags,
+      metadata
+    );
+
+    return normalizeRowId(result.lastInsertRowid);
   }
 
   private storeEmbedding(episodeId: number, embedding: Float32Array): void {

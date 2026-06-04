@@ -49,6 +49,10 @@ export interface AgentdbReflexionStorePayload {
   // an explicit ts, fast writes share strftime('now') and form no pairs.
   readonly action?: string; // ADR-0279: the action taken (model/agent used) —
   // NightlyLearner aggregates E[reward | action, task_type] over this column.
+  readonly skip_embedding?: boolean; // ADR-0290 Phase 1: metadata-only episode —
+  // no semantic free text (task is a derived type label); the controller skips
+  // embedding generation + vector/graph index writes. The SQLite row remains
+  // fully visible to NightlyLearner / skill consolidation / causal discovery.
 }
 
 const STORE_ID = 'agentdb_reflexion_store' as StoreId;
@@ -87,6 +91,7 @@ export const storeReflexionHandler: GuardedWrite<AgentdbReflexionStorePayload> =
           success: payload.success,
           ts: payload.ts, // ADR-0277: forward explicit episode timestamp
           action: payload.action, // ADR-0279: forward the action (model/agent) taken
+          skipEmbedding: payload.skip_embedding, // ADR-0290: metadata-only episode
         });
 
         if (result && result.success) return;

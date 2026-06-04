@@ -293,6 +293,8 @@ export interface ReflexionStoreWriter {
     // temporally-ordered causal pair-discovery; defaults to now when omitted.
     readonly action?: string; // ADR-0279: the action taken (model/agent used) —
     // the dimension NightlyLearner aggregates E[reward | action, task_type] over.
+    readonly skipEmbedding?: boolean; // ADR-0290 Phase 1: metadata-only episode —
+    // no semantic free text; skip embedding + vector/graph index writes.
   }): Promise<ReflexionWriteResult | null>;
 }
 

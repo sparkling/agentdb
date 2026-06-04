@@ -37,8 +37,11 @@ export {
   safeLog,
 } from './validation.js';
 
-// Input validation
-export { ValidationError } from './input-validation.js';
+// Input validation — `export *` keeps the `./security` subpath a strict
+// superset of its previous target (it used to point straight at
+// input-validation.js; ADR-0289 repointed it to this barrel so the
+// redaction surface is reachable as @sparkleideas/agentdb/security).
+export * from './input-validation.js';
 
 // Resource limits & circuit breaker
 export {

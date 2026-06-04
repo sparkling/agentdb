@@ -37,7 +37,7 @@
     "./backends": "./dist/src/backends/index.js",
     "./backends/self-learning": "./dist/src/backends/rvf/SelfLearningRvfBackend.js",
     "./backends/native-accelerator": "./dist/src/backends/rvf/NativeAccelerator.js",
-    "./security": "./dist/src/security/input-validation.js",
+    "./security": "./dist/src/security/index.js",
     "./wrappers": "./dist/src/wrappers/index.js",
     "./wrappers/gnn": "./dist/src/wrappers/gnn-wrapper.js",
     "./wrappers/agentdb-fast": "./dist/src/wrappers/agentdb-fast.js",
